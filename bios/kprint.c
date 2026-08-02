@@ -33,6 +33,7 @@
 #include "ikbd.h"
 #include "midi.h"
 #include "amiga.h"
+#include "qemuvirt.h"
 
 #define DISPLAY_INSTRUCTION_AT_PC   0   /* set to 1 for extra info from dopanic() */
 #define DISPLAY_STACK               0   /* set to 1 for extra info from dopanic() */
@@ -202,6 +203,12 @@ static int vkprintf(const char *fmt, va_list ap)
 
 #if COLDFIRE_DEBUG_PRINT
     return doprintf(kprintf_outc_coldfire_rs232, fmt, ap);
+#endif
+
+#if QEMU_VIRT_DEBUG_PRINT
+    /* The goldfish-tty needs no initialisation and cannot block, so it
+     * is always usable and needs no boot_status check. */
+    return doprintf(qemuvirt_kprintf_outc, fmt, ap);
 #endif
 
 #if MIDI_DEBUG_PRINT

@@ -14,8 +14,17 @@
  * to allow #include, #define, #if, etc. */
 #include "include/config.h"
 
+#ifdef TARGET_QEMU_VIRT
+/* QEMU's -kernel option loads a big-endian m68k ELF and jumps to the ELF
+ * entry point, so this target keeps the ELF wrapper rather than being
+ * flattened to a plain image.  See docs/qemu-virt-machine.md.
+ */
+OUTPUT_FORMAT(elf32-m68k)
+ENTRY(_main)
+#else
 /* Create a plain binary file, without any header */
 OUTPUT_FORMAT(binary)
+#endif
 
 #if !EMUTOS_LIVES_IN_RAM
 

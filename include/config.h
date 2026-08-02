@@ -33,7 +33,7 @@
 /*
  * Determine if this EmuTOS is built for ROM or RAM
  */
-#if defined(TARGET_PRG) || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) || defined(TARGET_LISA_FLOPPY)
+#if defined(TARGET_PRG) || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) || defined(TARGET_LISA_FLOPPY) || defined(TARGET_QEMU_VIRT)
 #  define EMUTOS_LIVES_IN_RAM 1
 # else
 #  define EMUTOS_LIVES_IN_RAM 0
@@ -621,6 +621,40 @@
    /* This makes LisaEm timings completely inaccurate, so disable it */
 #  define USE_STOP_INSN_TO_FREE_HOST_CPU 0
 # endif
+#endif
+
+/*
+ * Defaults for the QEMU m68k "virt" target
+ */
+#ifdef TARGET_QEMU_VIRT
+# define MACHINE_QEMU_VIRT
+#endif
+
+/*
+ * Defaults for the QEMU m68k "virt" machine
+ *
+ * This machine has no Atari hardware whatsoever.  Its peripherals are
+ * Goldfish devices (interrupt controller, RTC, TTY) plus 128
+ * virtio-mmio transports; see bios/qemuvirt.h and
+ * docs/qemu-virt-machine.md for the memory map.
+ *
+ * EmuTOS is loaded here by QEMU's -kernel option, which requires a
+ * big-endian ELF and hands control to the ELF entry point with the
+ * stack pointer set to zero, so nothing may touch the stack before
+ * _realmain loads it.
+ */
+#ifdef MACHINE_QEMU_VIRT
+# ifndef CONF_ATARI_HARDWARE
+#  define CONF_ATARI_HARDWARE 0
+# endif
+# ifndef CONF_WITH_APOLLO_68080
+#  define CONF_WITH_APOLLO_68080 0
+# endif
+/* Note: CONF_SERIAL_CONSOLE is deliberately left off.  It selects the
+ * MFP RS232 port, which this machine does not have, and would pull in
+ * RS232_DEBUG_PRINT.  Debug output goes to the goldfish-tty instead,
+ * via QEMU_VIRT_DEBUG_PRINT.
+ */
 #endif
 
 /*
@@ -1989,6 +2023,20 @@
 #endif
 
 /*
+ * Set QEMU_VIRT_DEBUG_PRINT to 1 to redirect debug prints to the
+ * goldfish-tty of QEMU's m68k "virt" machine.  The device needs no
+ * initialisation and never blocks, so this is available from the very
+ * first instructions of the boot.
+ */
+#ifndef QEMU_VIRT_DEBUG_PRINT
+# ifdef MACHINE_QEMU_VIRT
+#  define QEMU_VIRT_DEBUG_PRINT 1
+# else
+#  define QEMU_VIRT_DEBUG_PRINT 0
+# endif
+#endif
+
+/*
  * Set MIDI_DEBUG_PRINT to 1 to redirect debug prints to MIDI out.  This
  * is useful for an emulator without any native debug print capabilities,
  * or for real hardware. This overrides previous debug print settings.
@@ -2015,7 +2063,7 @@
 
 
 /* Determine if kprintf() is available */
-#if CONF_WITH_UAE || DETECT_NATIVE_FEATURES || STONX_NATIVE_PRINT || CONSOLE_DEBUG_PRINT || RS232_DEBUG_PRINT || SCC_DEBUG_PRINT || COLDFIRE_DEBUG_PRINT || MIDI_DEBUG_PRINT || CARTRIDGE_DEBUG_PRINT
+#if CONF_WITH_UAE || DETECT_NATIVE_FEATURES || STONX_NATIVE_PRINT || CONSOLE_DEBUG_PRINT || RS232_DEBUG_PRINT || SCC_DEBUG_PRINT || COLDFIRE_DEBUG_PRINT || MIDI_DEBUG_PRINT || CARTRIDGE_DEBUG_PRINT || QEMU_VIRT_DEBUG_PRINT
 #  define HAS_KPRINTF 1
 # else
 #  define HAS_KPRINTF 0
@@ -2223,8 +2271,12 @@
 # endif
 #endif
 
-#if (CONSOLE_DEBUG_PRINT + RS232_DEBUG_PRINT + SCC_DEBUG_PRINT + COLDFIRE_DEBUG_PRINT + MIDI_DEBUG_PRINT + CARTRIDGE_DEBUG_PRINT) > 1
-# error Only one of CONSOLE_DEBUG_PRINT, RS232_DEBUG_PRINT, SCC_DEBUG_PRINT, COLDFIRE_DEBUG_PRINT, MIDI_DEBUG_PRINT or CARTRIDGE_DEBUG_PRINT must be set to 1.
+#if (CONSOLE_DEBUG_PRINT + RS232_DEBUG_PRINT + SCC_DEBUG_PRINT + COLDFIRE_DEBUG_PRINT + MIDI_DEBUG_PRINT + CARTRIDGE_DEBUG_PRINT + QEMU_VIRT_DEBUG_PRINT) > 1
+# error Only one of CONSOLE_DEBUG_PRINT, RS232_DEBUG_PRINT, SCC_DEBUG_PRINT, COLDFIRE_DEBUG_PRINT, MIDI_DEBUG_PRINT, CARTRIDGE_DEBUG_PRINT or QEMU_VIRT_DEBUG_PRINT must be set to 1.
+#endif
+
+#if QEMU_VIRT_DEBUG_PRINT && !defined(MACHINE_QEMU_VIRT)
+# error QEMU_VIRT_DEBUG_PRINT requires MACHINE_QEMU_VIRT.
 #endif
 
 

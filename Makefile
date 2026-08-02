@@ -64,6 +64,7 @@ help:
 	@echo "m548x-dbug $(SREC_M548X_DBUG), EmuTOS-RAM for dBUG on ColdFire Evaluation Boards"
 	@echo "m548x-bas  $(SREC_M548X_BAS), EmuTOS for BaS_gcc on ColdFire Evaluation Boards"
 	@echo "m548x-prg  emutos.prg, a RAM tos for ColdFire Evaluation Boards with BaS_gcc"
+	@echo "qemu-virt $(EMUTOS_VIRT), EmuTOS ELF for the QEMU m68k virt machine"
 	@echo "prg     emutos.prg, a RAM tos"
 	@echo "prg256  $(EMU256_PRG), a RAM tos for ST/STe systems"
 	@echo "flop    $(EMUTOS_ST), a bootable floppy with RAM tos"
@@ -307,6 +308,7 @@ bios_src +=  memory.S processor.S vectors.S aciavecs.S bios.c xbios.c acsi.c \
              pmmu030.c 68040_pmmu.S \
              amiga.c amiga2.S spi_vamp.c \
              lisa.c lisa2.S \
+             qemuvirt.c \
              delay.c delayasm.S sd.c memory2.c bootparams.c scsi.c nova.c \
              dsp.c dsp2.S \
              scsidriv.c
@@ -905,6 +907,34 @@ lisaflop:
 
 $(EMUTOS_DC42): lisaboot.img emutos.img mkrom
 	./mkrom lisa-boot-floppy lisaboot.img emutos.img $@
+
+#
+# EmuTOS for the QEMU m68k "virt" machine
+#
+# Unlike every other target, the artifact is an ELF rather than a flat
+# image: QEMU's -kernel option loads it with load_elf() and jumps to the
+# ELF entry point.  emutos.ld therefore keeps the ELF wrapper when
+# TARGET_QEMU_VIRT is defined, so the link output is used as-is.
+#
+
+TOCLEAN += *.elf
+
+EMUTOS_VIRT = emutos-virt.elf
+QEMU_VIRT_DEFS =
+
+.PHONY: qemu-virt
+NODEP += qemu-virt
+qemu-virt: UNIQUE = $(COUNTRY)
+qemu-virt: CPUFLAGS = -m68040
+qemu-virt: override DEF += -DTARGET_QEMU_VIRT $(QEMU_VIRT_DEFS)
+qemu-virt:
+	$(MAKE) CPUFLAGS='$(CPUFLAGS)' DEF='$(DEF)' OPTFLAGS='$(OPTFLAGS)' UNIQUE=$(UNIQUE) EMUTOS_VIRT=$(EMUTOS_VIRT) $(EMUTOS_VIRT)
+	@printf "$(LOCALCONFINFO)"
+
+$(EMUTOS_VIRT): emutos.img
+	cp emutos.img $@
+	@echo "# $@ ready; run with:"
+	@echo "#   qemu-system-m68k -M virt -m 128 -kernel $@ -nographic"
 
 lisaboot.img: obj/lisaboot.o obj/lisautil.o obj/bootram.o
 	$(LD) $+ $(PCREL_LDFLAGS) -o $@

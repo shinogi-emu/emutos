@@ -104,8 +104,14 @@ _detect_cpu:
 // 68040 or 68060 (or Apollo 68080)
 
 x040:   moveq   #40,d0          // assume 68040
+// Note: QEMU's m68k does not raise an exception for an unimplemented
+// control register.  It aborts the machine instead, so the PCR probe
+// cannot be used to tell a 68040 from a 68060 on MACHINE_QEMU_VIRT.
+// The CPU there is whatever -cpu selected, defaulting to 68040.
+#ifndef MACHINE_QEMU_VIRT
         MOVEC_PCR_D1            // attempt to access the PCR
         moveq   #60,d0          // no fault, assume 68060
+#endif
 
 #if CONF_WITH_APOLLO_68080
         ADDIWL_0_A0             // check for addiw.l instruction
