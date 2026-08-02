@@ -17,7 +17,11 @@
 
 #define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
 
-#define EXTENDED_PALETTE (CONF_WITH_VIDEL || CONF_WITH_TT_SHIFTER)
+/*
+ * The 16-bit VDI needs the 256-entry palette tables regardless of which
+ * hardware provides the mode.
+ */
+#define EXTENDED_PALETTE (CONF_WITH_VIDEL || CONF_WITH_TT_SHIFTER || CONF_WITH_VDI_16BIT)
 
 #define TRUECOLOR_MODE  (v_planes > 8)
 
