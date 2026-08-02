@@ -12,6 +12,7 @@
 #include "emutos.h"
 #include "virtio.h"
 #include "kprint.h"
+#include "virtio_gpu.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -477,6 +478,13 @@ WORD virtio_probe(void)
             found++;
             if (id == VIRTIO_ID_RNG)
                 virtio_selftest(slot);
+            if (id == VIRTIO_ID_GPU)
+            {
+                if (virtio_gpu_init(slot, GPU_TEST_FB,
+                                    GPU_TEST_W, GPU_TEST_H) == 0)
+                    virtio_gpu_testpattern(GPU_TEST_FB,
+                                           GPU_TEST_W, GPU_TEST_H);
+            }
         }
     }
 
