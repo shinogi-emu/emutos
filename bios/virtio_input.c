@@ -380,13 +380,23 @@ static void vi_move(WORD tx, WORD ty)
 /* Apply everything accumulated since the last SYN. */
 static void vi_sync(void)
 {
+    KDEBUG(("input: sync move=%d btn=%d pos=%d,%d have=%d devtab=%d,%d\n",
+            pending_move, pending_btn, abs_x, abs_y, have_pos,
+            DEV_TAB[0], DEV_TAB[1]));
+
     if (!pending_move && !pending_btn)
         return;
 
     if (have_pos)
     {
-        LONG tx = ((LONG)abs_x * (DEV_TAB[0] + 1)) / (VI_ABS_MAX + 1);
-        LONG ty = ((LONG)abs_y * (DEV_TAB[1] + 1)) / (VI_ABS_MAX + 1);
+        /*
+         * Shift rather than divide by (VI_ABS_MAX + 1). EmuTOS builds
+         * with -mshort, so that expression is evaluated in a 16-bit int
+         * and 32768 overflows to -32768 -- every target then clamps to
+         * zero and the pointer sticks in the top-left corner.
+         */
+        LONG tx = ((LONG)abs_x * (DEV_TAB[0] + 1)) >> 15;
+        LONG ty = ((LONG)abs_y * (DEV_TAB[1] + 1)) >> 15;
 
         vi_move((WORD)tx, (WORD)ty);
     }
@@ -444,6 +454,9 @@ static void vi_drain(VIDEV *d)
         type = ld16(ev);
         code = ld16(ev + 2);
         value = ld32(ev + 4);
+
+        KDEBUG(("input: slot %d ev type=%d code=0x%x val=%ld\n",
+                d->slot, type, code, value));
 
         switch (type)
         {
