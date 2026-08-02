@@ -11,6 +11,7 @@
 #include "bios.h"
 #include "qemuvirt.h"
 #include "vectors.h"
+#include "virtio_gpu.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -222,6 +223,7 @@ ULONG qemuvirt_altram_size(void)
 static ULONG rtc_next_hi[GF_RTC_NB];
 static ULONG rtc_next_lo[GF_RTC_NB];
 static ULONG rtc_period[GF_RTC_NB];
+static WORD present_div;
 
 /*
  * Diagnostics.  rtc_skipped counts individual ticks walked past during
@@ -351,6 +353,19 @@ WORD qemuvirt_timer_ack(void)
     {
         rtc_reload(QEMUVIRT_RTC_VBL);
         fired |= QEMUVIRT_FIRED_VBL;
+
+        /*
+         * Present at a divided rate. A whole-screen conversion is
+         * roughly a million table lookups and runs here at IPL 6, so
+         * at the full VBL rate it would dominate the machine. Dirty
+         * tiles replace this with a proportional cost and the divider
+         * can then go away.
+         */
+        if (++present_div >= QEMUVIRT_PRESENT_DIV)
+        {
+            present_div = 0;
+            virtio_gpu_present();
+        }
     }
 
     return fired;

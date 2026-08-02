@@ -13,6 +13,7 @@
 #include "virtio.h"
 #include "kprint.h"
 #include "virtio_gpu.h"
+#include "qemuvirt.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -480,10 +481,10 @@ WORD virtio_probe(void)
                 virtio_selftest(slot);
             if (id == VIRTIO_ID_GPU)
             {
-                if (virtio_gpu_init(slot, GPU_TEST_FB,
-                                    GPU_TEST_W, GPU_TEST_H) == 0)
-                    virtio_gpu_testpattern(GPU_TEST_FB,
-                                           GPU_TEST_W, GPU_TEST_H);
+                if (virtio_gpu_init(slot, QEMUVIRT_ARGB_FB,
+                                    QEMUVIRT_SCREEN_W,
+                                    QEMUVIRT_SCREEN_H) == 0)
+                    virtio_gpu_build_ctab();
             }
         }
     }

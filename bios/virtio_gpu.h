@@ -112,10 +112,8 @@ WORD virtio_gpu_init(WORD slot, ULONG fb, WORD width, WORD height);
 void virtio_gpu_flush(WORD x, WORD y, WORD w, WORD h);
 void virtio_gpu_testpattern(ULONG fb, WORD w, WORD h);
 
-/* Bring-up framebuffer: below the screen allocation, above the OS. */
-#define GPU_TEST_FB     0x00a00000UL
-#define GPU_TEST_W      1280
-#define GPU_TEST_H      720
+void virtio_gpu_build_ctab(void);
+void virtio_gpu_present(void);
 
 #endif /* MACHINE_QEMU_VIRT */
 

@@ -35,6 +35,7 @@
 #include "bios.h"
 #include "bdosbind.h"
 #include "amiga.h"
+#include "qemuvirt.h"
 #include "lisa.h"
 #include "nova.h"
 
@@ -818,6 +819,17 @@ void screen_get_current_mode_info(UWORD *planes, UWORD *hz_rez, UWORD *vt_rez)
     *planes = 1;
     *hz_rez = 720;
     *vt_rez = 364;
+#elif defined(MACHINE_QEMU_VIRT)
+    /*
+     * 16 planes selects the VDI's chunky truecolor path (TRUECOLOR_MODE
+     * is v_planes > 8); it is not a bitplane count. update_rez_dependent()
+     * derives v_lin_wr as V_REZ_HZ/8*v_planes, which gives the correct
+     * 2 bytes per pixel for this mode, so the width must stay a multiple
+     * of 8.
+     */
+    *planes = 16;
+    *hz_rez = QEMUVIRT_SCREEN_W;
+    *vt_rez = QEMUVIRT_SCREEN_H;
 #else
     atari_get_current_mode_info(planes, hz_rez, vt_rez);
 #endif

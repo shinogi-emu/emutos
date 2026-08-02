@@ -650,6 +650,14 @@
 # ifndef CONF_WITH_APOLLO_68080
 #  define CONF_WITH_APOLLO_68080 0
 # endif
+/*
+ * The display is a linear 16-bit chunky framebuffer converted to ARGB
+ * for virtio-gpu, so the VDI runs in its Falcon 16bpp truecolor mode.
+ * That is the only chunky mode EmuTOS has.
+ */
+# ifndef CONF_WITH_VDI_16BIT
+#  define CONF_WITH_VDI_16BIT 1
+# endif
 /* Note: CONF_SERIAL_CONSOLE is deliberately left off.  It selects the
  * MFP RS232 port, which this machine does not have, and would pull in
  * RS232_DEBUG_PRINT.  Debug output goes to the goldfish-tty instead,

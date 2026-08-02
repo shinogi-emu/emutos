@@ -109,6 +109,36 @@
 
 #define GF_RTC_BIT(n)       (1UL << (n))    /* PIC bit for RTC #n  */
 
+/*
+ * Display geometry. The VDI renders 16bpp chunky here and the result is
+ * converted to ARGB for virtio-gpu, because virtio-gpu has no 16-bit
+ * format and EmuTOS has no 32-bit rendering path.
+ *
+ * Width must be a multiple of 8: update_rez_dependent() computes the
+ * stride as V_REZ_HZ / 8 * v_planes.
+ */
+#define QEMUVIRT_SCREEN_W   1280
+#define QEMUVIRT_SCREEN_H   720
+
+/*
+ * The ARGB surface virtio-gpu scans out, and the colour table used to
+ * produce it, both live in Alt-RAM. They must not come from ST-RAM: the
+ * VDI framebuffer is allocated at the top of ST-RAM by balloc_stram(),
+ * and a fixed ST-RAM address large enough for the ARGB surface would
+ * run into it.
+ *
+ * The table maps every possible 16-bit VDI pixel to a finished ARGB
+ * longword, so the per-pixel work is one indexed load. Expansion,
+ * target byte order and the unused bit of RRRRRGGGGG0BBBBB all resolve
+ * at table-build time and disappear from the conversion loop.
+ */
+#define QEMUVIRT_ARGB_FB    0x01000000UL  /* 16MB: W*H*4 = 3.5MB      */
+#define QEMUVIRT_CTAB       0x01400000UL  /* 20MB: 65536 * 4 = 256KB  */
+#define QEMUVIRT_CTAB_SIZE  65536UL
+
+/* Present every Nth VBL until damage tracking makes that unnecessary. */
+#define QEMUVIRT_PRESENT_DIV    5
+
 /* 200 Hz in nanoseconds */
 #define QEMUVIRT_TICK_NS    5000000UL
 

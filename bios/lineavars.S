@@ -12,7 +12,11 @@
 
 #include "asmdefs.h"
 
-#define EXTENDED_PALETTE (CONF_WITH_VIDEL || CONF_WITH_TT_SHIFTER)
+/*
+ * Note: this must match the definition in vdi/vdi_defs.h. The two are
+ * separate because that header cannot be included from assembler.
+ */
+#define EXTENDED_PALETTE (CONF_WITH_VIDEL || CONF_WITH_TT_SHIFTER || CONF_WITH_VDI_16BIT)
 
                 .bss
 

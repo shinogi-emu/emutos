@@ -13,6 +13,8 @@
 #include "virtio.h"
 #include "virtio_gpu.h"
 #include "kprint.h"
+#include "qemuvirt.h"
+#include "tosvars.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -194,43 +196,60 @@ void virtio_gpu_flush(WORD x, WORD y, WORD w, WORD h)
 }
 
 /*
- * Write a known pattern and show it.
+ * Colour table: every 16-bit VDI pixel to a finished ARGB longword.
  *
- * The pixel format question cannot be settled by reading QEMU's format
- * names: the PIXMAN_BE_* macros are defined twice under opposite
- * HOST_BIG_ENDIAN branches, so the same identifier is a different
- * constant depending on the machine QEMU was built on. The only answer
- * that survives a host change is to write known bytes and look at what
- * lands, which is what this does -- four flat quadrants whose values are
- * unmistakable if a channel is transposed.
+ * The VDI's truecolor pixel is RRRRRGGGGG0BBBBB -- 5:5:5 with bit 5
+ * unused, not RGB565. Expansion replicates the high bits into the low
+ * ones, (v << 3) | (v >> 2), so 0x1F maps to 0xFF and 0 maps to 0. The
+ * naive v << 3 would map 0x1F to 0xF8, making white 248,248,248 --
+ * wrong in a way that looks entirely correct until compared against a
+ * reference.
  *
- * Written as big-endian longwords 0x00RRGGBB, which is what a plain
- * move.l produces on m68k. If X8R8G8B8 is the right choice, the colours
- * come out as named.
+ * Building the table costs 65536 iterations once at mode-set and
+ * removes the expansion, the byte order and the dead bit from the
+ * per-pixel path entirely.
  */
-void virtio_gpu_testpattern(ULONG fb, WORD w, WORD h)
+void virtio_gpu_build_ctab(void)
 {
-    volatile ULONG *p = (volatile ULONG *)fb;
-    WORD x, y;
+    ULONG *tab = (ULONG *)QEMUVIRT_CTAB;
+    ULONG i;
 
-    for (y = 0; y < h; y++)
+    for (i = 0; i < QEMUVIRT_CTAB_SIZE; i++)
     {
-        for (x = 0; x < w; x++)
-        {
-            ULONG c;
+        ULONG r = (i >> 11) & 0x1f;
+        ULONG g = (i >> 6) & 0x1f;    /* bit 5 is unused */
+        ULONG b = i & 0x1f;
 
-            if (y < h / 2)
-                c = (x < w / 2) ? 0x00ff0000UL   /* red    */
-                                : 0x0000ff00UL;  /* green  */
-            else
-                c = (x < w / 2) ? 0x000000ffUL   /* blue   */
-                                : 0x00ffffffUL;  /* white  */
+        r = (r << 3) | (r >> 2);
+        g = (g << 3) | (g >> 2);
+        b = (b << 3) | (b >> 2);
 
-            p[(ULONG)y * w + x] = c;
-        }
+        /* X8R8G8B8: a big-endian longword store lays down X,R,G,B. */
+        tab[i] = (r << 16) | (g << 8) | b;
     }
+}
 
-    virtio_gpu_flush(0, 0, w, h);
+/*
+ * Convert the VDI framebuffer into the ARGB surface and show it.
+ *
+ * Whole screen for now. The damage-tracking work replaces the bounds
+ * here with the dirty tiles; the conversion itself is unchanged by it.
+ */
+void virtio_gpu_present(void)
+{
+    const ULONG *tab = (const ULONG *)QEMUVIRT_CTAB;
+    const UWORD *src = (const UWORD *)v_bas_ad;
+    ULONG *dst = (ULONG *)QEMUVIRT_ARGB_FB;
+    ULONG n = (ULONG)QEMUVIRT_SCREEN_W * QEMUVIRT_SCREEN_H;
+    ULONG i;
+
+    if (!gpu_ready)
+        return;
+
+    for (i = 0; i < n; i++)
+        dst[i] = tab[src[i]];
+
+    virtio_gpu_flush(0, 0, QEMUVIRT_SCREEN_W, QEMUVIRT_SCREEN_H);
 }
 
 #endif /* MACHINE_QEMU_VIRT */
