@@ -190,6 +190,44 @@ void virtq_kick(VIRTQ *vq, WORD head)
 }
 
 /*
+ * Submit a request/response pair and wait for it.
+ *
+ * This is the shape almost every virtio device uses: one
+ * device-readable descriptor carrying the request, chained to one
+ * device-writable descriptor for the reply. The order is mandatory --
+ * QEMU raises "Incorrect order for descriptors" if a readable
+ * descriptor follows a writable one in the same chain.
+ *
+ * Synchronous by design. Interrupt-driven completion needs the queue
+ * bound to an IPL and an ISR ack path; every user so far is a boot-time
+ * or low-rate operation where spinning is simpler and cannot deadlock.
+ *
+ * Returns the byte count the device reported, or -1 on timeout.
+ */
+LONG virtq_request(VIRTQ *vq, const void *req, ULONG req_len,
+                   void *resp, ULONG resp_len)
+{
+    ULONG len = 0;
+    WORD head;
+    LONG spin;
+
+    virtq_add(vq, 0, (ULONG)req, req_len, VRING_DESC_F_NEXT);
+    st16le(vq->desc + 14, 1);           /* desc[0].next = 1 */
+    virtq_add(vq, 1, (ULONG)resp, resp_len, VRING_DESC_F_WRITE);
+
+    virtq_kick(vq, 0);
+
+    for (spin = 0; spin < VIRTQ_SPIN_LIMIT; spin++)
+    {
+        head = virtq_poll(vq, &len);
+        if (head >= 0)
+            return (LONG)len;
+    }
+
+    return -1;
+}
+
+/*
  * Check for a completion. Returns the head descriptor index and sets
  * *len to the bytes the device wrote, or -1 if nothing has completed.
  *

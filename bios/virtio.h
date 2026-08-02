@@ -154,6 +154,11 @@ WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem);
 void virtq_add(VIRTQ *vq, WORD head, ULONG addr, ULONG len, UWORD flags);
 void virtq_kick(VIRTQ *vq, WORD head);
 WORD virtq_poll(VIRTQ *vq, ULONG *len);
+LONG virtq_request(VIRTQ *vq, const void *req, ULONG req_len,
+                   void *resp, ULONG resp_len);
+
+/* Spin bound for synchronous requests. */
+#define VIRTQ_SPIN_LIMIT    100000L
 
 #endif /* MACHINE_QEMU_VIRT */
 
