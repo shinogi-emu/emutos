@@ -40,6 +40,94 @@
 #define GF_TTY_CMD_INT_ENABLE   1
 
 /*
+ * goldfish-pic (QEMU: hw/intc/goldfish_pic.c)
+ *
+ * Six instances, 0x1000 apart.  Each aggregates 32 input lines into one
+ * 68k interrupt level: PIC #N drives IPL N and autovector 24+N.
+ *
+ * Registers are DEVICE_NATIVE_ENDIAN and longword-only, as for the TTY.
+ * There is no acknowledge register: the PIC is level-driven off the
+ * device's own line, so a handler must silence the device itself or the
+ * level stays asserted and the CPU re-enters immediately.
+ */
+#define GF_PIC_BASE         0xff000000UL
+#define GF_PIC_STRIDE       0x1000UL
+#define GF_PIC_NB           6
+
+/* PIC #N (1-based), as numbered in QEMU's own comments */
+#define GF_PIC(n)           (GF_PIC_BASE + ((ULONG)((n) - 1) * GF_PIC_STRIDE))
+
+#define GF_PIC_STATUS       0x00    /* R: popcount(pending & enabled)  */
+#define GF_PIC_IRQ_PENDING  0x04    /* R: pending & enabled, as a mask */
+#define GF_PIC_DISABLE_ALL  0x08    /* W: clear enabled and pending    */
+#define GF_PIC_DISABLE      0x0c    /* W: enabled &= ~value            */
+#define GF_PIC_ENABLE       0x10    /* W: enabled |= value             */
+
+/*
+ * goldfish-rtc (QEMU: hw/rtc/goldfish_rtc.c)
+ *
+ * Two instances, 0x1000 apart.  virt.c constructs them with
+ * big-endian=true, so unlike virtio-mmio these registers need no byte
+ * swapping on m68k.
+ *
+ * The counter is NANOSECONDS since the Unix epoch, and the alarm is
+ * ONE-SHOT -- nothing re-arms it.  A periodic tick has to be rebuilt by
+ * the handler on every interrupt.
+ *
+ * RTC 0 raises flat IRQ 168, which is PIC #6 bit 0, i.e. IPL 6.
+ */
+#define GF_RTC_BASE         0xff006000UL
+#define GF_RTC_STRIDE       0x1000UL
+#define GF_RTC_NB           2
+
+/* RTC #n, 0-based */
+#define GF_RTC(n)           (GF_RTC_BASE + ((ULONG)(n) * GF_RTC_STRIDE))
+
+#define GF_RTC_TIME_LOW         0x00    /* R: low 32 bits, latches high */
+#define GF_RTC_TIME_HIGH        0x04    /* R: high 32, read second      */
+#define GF_RTC_ALARM_LOW        0x08    /* W: arms the alarm            */
+#define GF_RTC_ALARM_HIGH       0x0c    /* W: does NOT arm              */
+#define GF_RTC_IRQ_ENABLED      0x10    /* RW: bit 0                    */
+#define GF_RTC_CLEAR_ALARM      0x14    /* W: cancel                    */
+#define GF_RTC_ALARM_STATUS     0x18    /* R: 1 while armed             */
+#define GF_RTC_CLEAR_INTERRUPT  0x1c    /* W: deassert the line         */
+
+/*
+ * Both RTCs hang off PIC #6: RTC 0 on IRQ #1 (bit 0), RTC 1 on IRQ #2
+ * (bit 1).  Having two independently armed one-shots means the 200 Hz
+ * system tick and the VBL do not have to be divided out of a single
+ * source -- each keeps its own deadline.
+ *
+ * Because both share one autovector, the level 6 handler must read the
+ * PIC's pending register to find out which of them fired.
+ */
+#define GF_RTC_PIC          6       /* PIC carrying both RTC lines */
+#define GF_RTC_IPL          6       /* resulting 68k level         */
+
+#define QEMUVIRT_RTC_TICK   0       /* RTC index driving _hz_200   */
+#define QEMUVIRT_RTC_VBL    1       /* RTC index driving the VBL   */
+
+#define GF_RTC_BIT(n)       (1UL << (n))    /* PIC bit for RTC #n  */
+
+/* 200 Hz in nanoseconds */
+#define QEMUVIRT_TICK_NS    5000000UL
+
+/* VBL rate.  50 Hz matches the PAL default EmuTOS builds for. */
+#define QEMUVIRT_VBL_NS     20000000UL
+
+/*
+ * How many missed ticks we will walk forward through before giving up
+ * and resyncing the deadline to the present.  Sized for a genuinely
+ * late handler, not for a suspended host: an hour of laptop sleep is
+ * 720000 missed ticks, and walking those would be an interrupt storm
+ * lasting as long as the outage.
+ */
+#define QEMUVIRT_CATCHUP_MAX    64
+
+extern ULONG rtc_skipped[];     /* ticks walked past during catch-up */
+extern ULONG rtc_resync[];      /* times the deadline was jumped     */
+
+/*
  * Bootinfo (QEMU: hw/m68k/bootinfo.h, standard-headers/asm-m68k/bootinfo.h)
  *
  * QEMU deposits a list of tagged records immediately after the loaded
@@ -78,6 +166,14 @@
 
 void kprintf_outc_qemuvirt(int c);
 void qemuvirt_machine_init(void);
+void qemuvirt_init_system_timer(void);
+void qemuvirt_timer_int(void);   /* asm, bios/qemuvirt2.S */
+
+/* Bits returned by qemuvirt_timer_ack() */
+#define QEMUVIRT_FIRED_TICK 0x01
+#define QEMUVIRT_FIRED_VBL  0x02
+
+WORD qemuvirt_timer_ack(void);
 ULONG qemuvirt_memconf(void);
 ULONG qemuvirt_altram_base(void);
 ULONG qemuvirt_altram_size(void);

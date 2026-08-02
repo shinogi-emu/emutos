@@ -10,6 +10,7 @@
 #include "emutos.h"
 #include "bios.h"
 #include "qemuvirt.h"
+#include "vectors.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -193,6 +194,217 @@ ULONG qemuvirt_altram_size(void)
 {
     return (cached_ramsize > QEMUVIRT_MAX_STRAM)
          ? (cached_ramsize - QEMUVIRT_MAX_STRAM) : 0;
+}
+
+/*
+ * 200 Hz tick
+ *
+ * The goldfish-rtc alarm is one-shot: firing it clears alarm_running and
+ * nothing re-arms it (hw/rtc/goldfish_rtc.c).  There is no other timer
+ * on this machine, so the periodic tick is rebuilt by re-arming inside
+ * every interrupt.
+ *
+ * The next deadline is computed from the previous deadline rather than
+ * from "now", so the tick cannot drift by the handler's own latency.
+ * If we ever fall far enough behind that the new deadline is already
+ * past, the catch-up is bounded -- QEMU fires an alarm set in the past
+ * synchronously from the register write, so an unbounded loop here would
+ * become an interrupt storm.
+ *
+ * The counter is 64-bit nanoseconds.  It is kept as two longwords
+ * because EmuTOS builds with -mshort and has no 64-bit type.
+ */
+
+#define GF_RTC_REG(n, offset) (*(volatile ULONG *)(GF_RTC(n) + (offset)))
+#define GF_PIC_REG(n, offset) (*(volatile ULONG *)(GF_PIC(n) + (offset)))
+
+/* Next deadline per RTC, as two longwords, and the period each runs at. */
+static ULONG rtc_next_hi[GF_RTC_NB];
+static ULONG rtc_next_lo[GF_RTC_NB];
+static ULONG rtc_period[GF_RTC_NB];
+
+/*
+ * Diagnostics.  rtc_skipped counts individual ticks walked past during
+ * bounded catch-up; rtc_resync counts the times the gap was so large we
+ * gave up and jumped the deadline to the present.  A non-zero resync
+ * count means the guest clock is behind real time and cannot be trusted.
+ */
+ULONG rtc_skipped[GF_RTC_NB];
+ULONG rtc_resync[GF_RTC_NB];
+
+/* Read the counter.  TIME_LOW must be read first: it latches TIME_HIGH. */
+static void rtc_now(WORD n, ULONG *hi, ULONG *lo)
+{
+    *lo = GF_RTC_REG(n, GF_RTC_TIME_LOW);
+    *hi = GF_RTC_REG(n, GF_RTC_TIME_HIGH);
+}
+
+/* Arm the alarm.  ALARM_HIGH only stores; writing ALARM_LOW is what arms. */
+static void rtc_arm(WORD n)
+{
+    GF_RTC_REG(n, GF_RTC_ALARM_HIGH) = rtc_next_hi[n];
+    GF_RTC_REG(n, GF_RTC_ALARM_LOW) = rtc_next_lo[n];
+}
+
+/* TRUE if the deadline in (hi,lo) is at or before (nhi,nlo). */
+static WORD rtc_reached(ULONG hi, ULONG lo, ULONG nhi, ULONG nlo)
+{
+    if (hi != nhi)
+        return (hi < nhi);
+    return (lo <= nlo);
+}
+
+/*
+ * Push a deadline forward by its period, skipping any already missed.
+ *
+ * Bounded deliberately.  Arming an alarm that is already in the past
+ * makes QEMU raise the interrupt synchronously from the ALARM_LOW write
+ * (goldfish_rtc_set_alarm), so an unbounded "advance until future" loop
+ * would turn a late tick into an interrupt storm rather than recover
+ * from it.
+ */
+static void rtc_advance(WORD n)
+{
+    ULONG nhi, nlo;
+    WORD guard;
+
+    rtc_now(n, &nhi, &nlo);
+
+    for (guard = 0; guard < QEMUVIRT_CATCHUP_MAX; guard++)
+    {
+        ULONG prev = rtc_next_lo[n];
+
+        rtc_next_lo[n] += rtc_period[n];
+        if (rtc_next_lo[n] < prev)      /* carry into the high longword */
+            rtc_next_hi[n]++;
+
+        if (!rtc_reached(rtc_next_hi[n], rtc_next_lo[n], nhi, nlo))
+        {
+            rtc_skipped[n] += guard;    /* 0 in the normal case */
+            return;
+        }
+    }
+
+    /*
+     * Too far behind to walk forward tick by tick.  This is not a late
+     * handler: it is the host having been suspended, or the VM stopped
+     * in the debugger, where the gap can be hours -- millions of ticks.
+     *
+     * Resync the deadline to now rather than grinding through them.
+     * That deliberately drops the missed ticks, so _hz_200 runs slow by
+     * exactly the outage: the alternative is an interrupt storm lasting
+     * as long as the outage did.  Record it, because the visible symptom
+     * of dropped ticks is a wrong clock and wrong timeouts much later,
+     * which looks nothing like a timer fault.
+     */
+    rtc_resync[n]++;
+    rtc_next_hi[n] = nhi;
+    rtc_next_lo[n] = nlo;
+
+    rtc_next_lo[n] += rtc_period[n];
+    if (rtc_next_lo[n] < nlo)
+        rtc_next_hi[n]++;
+}
+
+/* Silence one RTC, then re-arm it for the next period. */
+static void rtc_reload(WORD n)
+{
+    /*
+     * CLEAR_INTERRUPT is the write that actually deasserts the line --
+     * it is the only one that clears irq_pending, and the line follows
+     * irq_pending & irq_enabled.  CLEAR_ALARM cancels the one-shot,
+     * which is a no-op here since it has already fired, but keeps the
+     * device in a defined state.
+     */
+    GF_RTC_REG(n, GF_RTC_CLEAR_ALARM) = 1;
+    GF_RTC_REG(n, GF_RTC_CLEAR_INTERRUPT) = 1;
+
+    rtc_advance(n);
+    rtc_arm(n);
+}
+
+/*
+ * Acknowledge whatever fired, and say what it was.
+ *
+ * Called from the level 6 assembler stub, which dispatches on the
+ * result.  Both RTCs share autovector 6, so the PIC's pending register
+ * decides which of them fired -- and both may have fired at once.  The
+ * PIC has no acknowledge register of its own and is level-driven, so
+ * silencing the devices is what lowers the level; miss that and we
+ * re-enter immediately on rte.
+ *
+ * This returns rather than calling the EmuTOS handlers itself, because
+ * those are assembler routines with their own entry contract.
+ */
+WORD qemuvirt_timer_ack(void)
+{
+    ULONG pending = GF_PIC_REG(GF_RTC_PIC, GF_PIC_IRQ_PENDING);
+    WORD fired = 0;
+
+    if (pending & GF_RTC_BIT(QEMUVIRT_RTC_TICK))
+    {
+        rtc_reload(QEMUVIRT_RTC_TICK);
+        fired |= QEMUVIRT_FIRED_TICK;
+    }
+
+    if (pending & GF_RTC_BIT(QEMUVIRT_RTC_VBL))
+    {
+        rtc_reload(QEMUVIRT_RTC_VBL);
+        fired |= QEMUVIRT_FIRED_VBL;
+    }
+
+    return fired;
+}
+
+/*
+ * Bring one RTC up at the given period, and unmask its PIC line.
+ *
+ * The offset staggers this timer's phase against the others.  Without
+ * it the 200 Hz tick and the 50 Hz VBL, both starting from the same
+ * instant, coincide on every fourth tick -- and since the VBL body is
+ * much longer than the tick body, that would make every fourth service
+ * window a latency spike.  Real hardware derives the two from separate
+ * oscillators and collides only occasionally; staggering deliberately
+ * is closer to that in effect, if not in mechanism.
+ */
+static void rtc_start(WORD n, ULONG period, ULONG offset)
+{
+    ULONG nhi, nlo;
+
+    GF_RTC_REG(n, GF_RTC_IRQ_ENABLED) = 0;
+    GF_RTC_REG(n, GF_RTC_CLEAR_ALARM) = 1;
+    GF_RTC_REG(n, GF_RTC_CLEAR_INTERRUPT) = 1;
+
+    rtc_period[n] = period;
+    rtc_now(n, &nhi, &nlo);
+    rtc_next_hi[n] = nhi;
+    rtc_next_lo[n] = nlo + offset;
+    if (rtc_next_lo[n] < nlo)
+        rtc_next_hi[n]++;
+    rtc_advance(n);
+
+    /* Every PIC line comes up masked after reset; unmask just this one. */
+    GF_PIC_REG(GF_RTC_PIC, GF_PIC_ENABLE) = GF_RTC_BIT(n);
+
+    GF_RTC_REG(n, GF_RTC_IRQ_ENABLED) = 1;
+    rtc_arm(n);
+}
+
+/*
+ * Install the level 6 vector and start both timers.
+ *
+ * Called from init_system_timer(), which runs before bios_init() lowers
+ * the IPL mask, so nothing can arrive until we are ready.  The vector
+ * goes in before the PIC lines are unmasked; vecs_init() has already
+ * pointed every autovector at just_rte, so a stray line in between is
+ * absorbed rather than fatal.
+ */
+void qemuvirt_init_system_timer(void)
+{
+    VEC_LEVEL6 = qemuvirt_timer_int;
+
+    rtc_start(QEMUVIRT_RTC_TICK, QEMUVIRT_TICK_NS, 0);
+    rtc_start(QEMUVIRT_RTC_VBL, QEMUVIRT_VBL_NS, QEMUVIRT_TICK_NS / 2);
 }
 
 /*
