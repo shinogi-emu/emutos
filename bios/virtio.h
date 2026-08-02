@@ -158,7 +158,7 @@ LONG virtq_request(VIRTQ *vq, const void *req, ULONG req_len,
                    void *resp, ULONG resp_len);
 
 /* Spin bound for synchronous requests. */
-#define VIRTQ_SPIN_LIMIT    100000L
+#define VIRTQ_SPIN_LIMIT    20000000L
 
 #endif /* MACHINE_QEMU_VIRT */
 
