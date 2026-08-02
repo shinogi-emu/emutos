@@ -636,7 +636,7 @@
  * This machine has no Atari hardware whatsoever.  Its peripherals are
  * Goldfish devices (interrupt controller, RTC, TTY) plus 128
  * virtio-mmio transports; see bios/qemuvirt.h and
- * docs/qemu-virt-machine.md for the memory map.
+ * the shinogi project notes for the memory map.
  *
  * EmuTOS is loaded here by QEMU's -kernel option, which requires a
  * big-endian ELF and hands control to the ELF entry point with the

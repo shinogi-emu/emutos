@@ -143,8 +143,19 @@ memchk:
 
         // The old RAM settings are valid, load them into registers.
         // They will stay in safe place in case we clear the sysvars.
+#if defined(MACHINE_QEMU_VIRT)
+        // Except here: nothing ran before us on this machine, so the
+        // sysvars hold no configuration to reuse. The emulator states
+        // the real RAM size in the bootinfo just past our BSS, and
+        // there is no memory controller to configure.
+        // The callee is C, so it preserves d3/a3 as required below.
+        jsr     _qemuvirt_memconf       // d0 = end of ST-RAM
+        move.l  d0,d5                   // _phystop
+        moveq   #0,d6                   // fake memctrl
+#else
         move.b  memctrl.w, d6
         move.l  _phystop.w, d5
+#endif
 
 #if CONF_WITH_TTRAM
         move.l  _ramvalid.w, d3

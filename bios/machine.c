@@ -42,6 +42,7 @@
 #include "nova.h"
 #include "biosext.h"
 #include "amiga.h"
+#include "qemuvirt.h"
 
 #if CONF_WITH_ADVANCED_CPU
 UBYTE is_bus32; /* 1 if address bus is 32-bit, 0 if it is 24-bit */
@@ -623,6 +624,15 @@ void machine_detect(void)
  */
 void machine_init(void)
 {
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * Capture the emulator's memory description now.  It sits just past
+     * our BSS, which is where the OS memory pool begins, so the first
+     * allocation overwrites it -- this must happen before then.
+     */
+    qemuvirt_machine_init();
+#endif
+
 #if !CONF_WITH_RESET
 /*
  * we must disable interrupts here, because the reset instruction hasn't

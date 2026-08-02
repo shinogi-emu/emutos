@@ -39,7 +39,49 @@
 #define GF_TTY_CMD_INT_DISABLE  0
 #define GF_TTY_CMD_INT_ENABLE   1
 
-void qemuvirt_kprintf_outc(int c);
+/*
+ * Bootinfo (QEMU: hw/m68k/bootinfo.h, standard-headers/asm-m68k/bootinfo.h)
+ *
+ * QEMU deposits a list of tagged records immediately after the loaded
+ * image.  All fields are big-endian, and each record's size covers the
+ * whole record including its 4-byte header, so the list is walked by
+ * adding size -- record payloads are not all the same length.
+ */
+#define BI_LAST         0x0000  /* sentinel, no payload                  */
+#define BI_MACHTYPE     0x0001  /* ULONG machine type                    */
+#define BI_CPUTYPE      0x0002  /* ULONG cpu type                        */
+#define BI_MEMCHUNK     0x0005  /* ULONG base, ULONG size                */
+
+#define MACH_VIRT       14      /* BI_MACHTYPE value for this machine    */
+
+#define CPU_68020       (1<<0)
+#define CPU_68030       (1<<1)
+#define CPU_68040       (1<<2)
+#define CPU_68060       (1<<3)
+
+/*
+ * Largest ST-RAM we will claim, regardless of how much -m gave us.
+ * This matches the 14M stram region in emutos.ld.  Anything above it
+ * needs to be surfaced as Alt-RAM instead.
+ */
+#define QEMUVIRT_MAX_STRAM  (14UL * 1024 * 1024)
+
+/* Fallback if the bootinfo cannot be validated */
+#define QEMUVIRT_FALLBACK_STRAM  (4UL * 1024 * 1024)
+
+/*
+ * Most RAM we will describe, whatever -m says.  BDOS records a memory
+ * block length in a signed LONG, so 2GB and above would read as
+ * negative.  QEMU itself allows nearly 4GB.
+ */
+#define QEMUVIRT_MAX_RAM    (2032UL * 1024 * 1024)
+
+void kprintf_outc_qemuvirt(int c);
+void qemuvirt_machine_init(void);
+ULONG qemuvirt_memconf(void);
+ULONG qemuvirt_altram_base(void);
+ULONG qemuvirt_altram_size(void);
+WORD qemuvirt_cputype(void);
 
 #endif /* MACHINE_QEMU_VIRT */
 

@@ -917,7 +917,7 @@ $(EMUTOS_DC42): lisaboot.img emutos.img mkrom
 # TARGET_QEMU_VIRT is defined, so the link output is used as-is.
 #
 
-TOCLEAN += *.elf
+TOCLEAN += emutos-virt.elf
 
 EMUTOS_VIRT = emutos-virt.elf
 QEMU_VIRT_DEFS =

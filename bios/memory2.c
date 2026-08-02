@@ -24,6 +24,7 @@
 #include "vectors.h"
 #include "../bdos/bdosstub.h"
 #include "amiga.h"
+#include "qemuvirt.h"
 #include "string.h"
 
 #define ZONECOUNT   32      /* for memory test */
@@ -148,6 +149,30 @@ void altram_init(void)
     /* Add eventual TT-RAM to BDOS pool */
     if (ramtop != NULL)
         xmaddalt(TTRAM_START, ramtop - TTRAM_START);
+#endif
+
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * Everything the emulator gave us above the ST-RAM cap becomes
+     * Alt-RAM.  There is nothing to probe for and no bus error to catch
+     * here, so the sizes come straight from the bootinfo.
+     *
+     * The block deliberately starts at the ST-RAM cap rather than at
+     * memtop: xmaddalt() only rejects overlaps against memtop, which has
+     * already been lowered by the screen allocation, so a block based on
+     * memtop would silently alias the framebuffer.
+     */
+    {
+        ULONG altbase = qemuvirt_altram_base();
+        ULONG altsize = qemuvirt_altram_size();
+
+        if (altsize != 0)
+        {
+            KDEBUG(("xmaddalt() qemu-virt adr=%p size=%ld\n",
+                (UBYTE *)altbase, altsize));
+            xmaddalt((UBYTE *)altbase, altsize);
+        }
+    }
 #endif
 
 #if CONF_WITH_MONSTER

@@ -17,7 +17,7 @@
 #ifdef TARGET_QEMU_VIRT
 /* QEMU's -kernel option loads a big-endian m68k ELF and jumps to the ELF
  * entry point, so this target keeps the ELF wrapper rather than being
- * flattened to a plain image.  See docs/qemu-virt-machine.md.
+ * flattened to a plain image.  See the shinogi project notes.
  */
 OUTPUT_FORMAT(elf32-m68k)
 ENTRY(_main)

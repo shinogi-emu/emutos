@@ -208,7 +208,7 @@ static int vkprintf(const char *fmt, va_list ap)
 #if QEMU_VIRT_DEBUG_PRINT
     /* The goldfish-tty needs no initialisation and cannot block, so it
      * is always usable and needs no boot_status check. */
-    return doprintf(qemuvirt_kprintf_outc, fmt, ap);
+    return doprintf(kprintf_outc_qemuvirt, fmt, ap);
 #endif
 
 #if MIDI_DEBUG_PRINT
