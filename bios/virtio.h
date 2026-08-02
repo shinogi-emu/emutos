@@ -105,12 +105,55 @@
  * feature word, which is why features are negotiated as two 32-bit
  * halves selected by *_FEATURES_SEL.
  */
-#define VIRTIO_F_VERSION_1_BIT      0   /* within the high word */
+#define VIRTIO_F_VERSION_1_BIT       0  /* bit 32, within the high word */
+#define VIRTIO_F_ACCESS_PLATFORM_BIT 1  /* bit 33 */
+
+/*
+ * Split virtqueue.
+ *
+ * Layout QEMU expects (hw/virtio/virtio.c:65-95). Every field is
+ * little-endian for a VERSION_1 device regardless of target, which is a
+ * separate mechanism from the register swap and must be applied
+ * separately.
+ *
+ *   desc[i]   16 bytes: addr(8) len(4) flags(2) next(2)
+ *   avail      flags(2) idx(2) ring[num](2 each)   [+ used_event(2)]
+ *   used       flags(2) idx(2) ring[num](8 each)   [+ avail_event(2)]
+ *
+ * The trailing event fields exist only if VIRTIO_RING_F_EVENT_IDX was
+ * negotiated. We do not negotiate it, so they are absent and QEMU never
+ * reads them.
+ */
+#define VRING_DESC_F_NEXT       1
+#define VRING_DESC_F_WRITE      2
+#define VRING_DESC_F_INDIRECT   4
+
+#define VRING_AVAIL_F_NO_INTERRUPT  1
+#define VRING_USED_F_NO_NOTIFY      1
+
+#define VIRTQ_DESC_SIZE     16
+#define VIRTQ_USED_ELEM_SIZE 8
+
+typedef struct
+{
+    WORD slot;              /* transport slot        */
+    WORD index;             /* queue index           */
+    WORD num;               /* queue size            */
+    UWORD avail_idx;        /* our copy of avail.idx */
+    UWORD last_used;        /* our copy of used.idx  */
+    UBYTE *desc;
+    UBYTE *avail;
+    UBYTE *used;
+} VIRTQ;
 
 ULONG vio_read32(WORD slot, WORD reg);
 void vio_write32(WORD slot, WORD reg, ULONG value);
 
 WORD virtio_probe(void);
+WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem);
+void virtq_add(VIRTQ *vq, WORD head, ULONG addr, ULONG len, UWORD flags);
+void virtq_kick(VIRTQ *vq, WORD head);
+WORD virtq_poll(VIRTQ *vq, ULONG *len);
 
 #endif /* MACHINE_QEMU_VIRT */
 

@@ -48,6 +48,174 @@ void vio_write32(WORD slot, WORD reg, ULONG value)
     VIO_REG(slot, reg) = bswap32(value);
 }
 
+/*
+ * Ring field access.
+ *
+ * Every ring field is little-endian for a VERSION_1 device, by a
+ * completely different mechanism from the register swap: rings are DMA
+ * through guest RAM and QEMU converts them with virtio_tswap*, while
+ * registers are swapped by the memory core. Each needs exactly one
+ * swap from us; neither cancels the other.
+ *
+ * Byte-wise so that ring placement can never produce a misaligned
+ * access, and so the byte order is visible in the code rather than
+ * implied by a cast.
+ */
+static void st16le(UBYTE *p, UWORD v)
+{
+    p[0] = (UBYTE)(v & 0xff);
+    p[1] = (UBYTE)(v >> 8);
+}
+
+static UWORD ld16le(const UBYTE *p)
+{
+    return (UWORD)(p[0] | ((UWORD)p[1] << 8));
+}
+
+static void st32le(UBYTE *p, ULONG v)
+{
+    p[0] = (UBYTE)(v & 0xff);
+    p[1] = (UBYTE)((v >> 8) & 0xff);
+    p[2] = (UBYTE)((v >> 16) & 0xff);
+    p[3] = (UBYTE)((v >> 24) & 0xff);
+}
+
+static ULONG ld32le(const UBYTE *p)
+{
+    return (ULONG)p[0] | ((ULONG)p[1] << 8)
+         | ((ULONG)p[2] << 16) | ((ULONG)p[3] << 24);
+}
+
+/* 64-bit descriptor address; we are always below 4GB so the high half is 0. */
+static void st64le(UBYTE *p, ULONG v)
+{
+    st32le(p, v);
+    st32le(p + 4, 0);
+}
+
+/*
+ * Bring one queue up.
+ *
+ * Order is not negotiable. QUEUE_NUM must be written before
+ * QUEUE_READY: if it is missing, virtio_queue_set_num() rejects the
+ * zero and the device silently keeps its own default size while we
+ * index the rings with ours. Likewise QUEUE_READY with the addresses
+ * still zero leaves the region cache NULL and every later kick is
+ * silently dropped. Neither mistake produces a diagnostic.
+ *
+ * Returns 0 on success.
+ */
+WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem)
+{
+    ULONG max;
+    WORD i;
+    ULONG avail_off, used_off;
+
+    vq->slot = slot;
+    vq->index = index;
+    vq->num = num;
+    vq->avail_idx = 0;
+    vq->last_used = 0;
+
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_SEL, (ULONG)index);
+
+    max = vio_read32(slot, VIRTIO_MMIO_QUEUE_NUM_MAX);
+    if (max == 0)
+    {
+        KINFO(("virtio: slot %d queue %d does not exist\n", slot, index));
+        return -1;
+    }
+    if ((ULONG)num > max)
+    {
+        KINFO(("virtio: slot %d queue %d max is %ld\n", slot, index, max));
+        return -1;
+    }
+
+    /* desc is 16-byte aligned by the caller; keep avail and used aligned too */
+    avail_off = (ULONG)VIRTQ_DESC_SIZE * num;
+    used_off = (avail_off + 4 + 2 * (ULONG)num + 15) & ~15UL;
+
+    vq->desc = mem;
+    vq->avail = mem + avail_off;
+    vq->used = mem + used_off;
+
+    /* A stale ring looks exactly like a valid one to the device. */
+    for (i = 0; i < (WORD)(used_off + 4 + VIRTQ_USED_ELEM_SIZE * num); i++)
+        mem[i] = 0;
+
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_NUM, (ULONG)num);
+
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_DESC_LOW, (ULONG)vq->desc);
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_DESC_HIGH, 0);
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_AVAIL_LOW, (ULONG)vq->avail);
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_AVAIL_HIGH, 0);
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_USED_LOW, (ULONG)vq->used);
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_USED_HIGH, 0);
+
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_READY, 1);
+
+    KDEBUG(("virtio: slot %d queue %d num %d desc %p avail %p used %p\n",
+            slot, index, num, vq->desc, vq->avail, vq->used));
+
+    return 0;
+}
+
+/* Fill one descriptor. Chaining is the caller's business via flags/next. */
+void virtq_add(VIRTQ *vq, WORD head, ULONG addr, ULONG len, UWORD flags)
+{
+    UBYTE *d = vq->desc + (ULONG)head * VIRTQ_DESC_SIZE;
+
+    st64le(d, addr);
+    st32le(d + 8, len);
+    st16le(d + 12, flags);
+    st16le(d + 14, 0);
+}
+
+/*
+ * Publish a chain and notify the device.
+ *
+ * avail.idx is free-running mod 2^16 and is NOT masked by the queue
+ * size -- only the ring slot is. QEMU rejects a jump larger than the
+ * queue size with "Guest moved used index", which is the signature of
+ * having written this field big-endian.
+ */
+void virtq_kick(VIRTQ *vq, WORD head)
+{
+    st16le(vq->avail + 4 + 2 * (vq->avail_idx % vq->num), (UWORD)head);
+
+    vq->avail_idx++;
+    st16le(vq->avail + 2, vq->avail_idx);
+
+    vio_write32(vq->slot, VIRTIO_MMIO_QUEUE_NOTIFY, (ULONG)vq->index);
+}
+
+/*
+ * Check for a completion. Returns the head descriptor index and sets
+ * *len to the bytes the device wrote, or -1 if nothing has completed.
+ *
+ * used.idx is the device's publication barrier: QEMU writes the used
+ * element first and only then advances the index.
+ */
+WORD virtq_poll(VIRTQ *vq, ULONG *len)
+{
+    UWORD used_idx = ld16le(vq->used + 2);
+    UBYTE *elem;
+    WORD head;
+
+    if (used_idx == vq->last_used)
+        return -1;
+
+    elem = vq->used + 4
+         + VIRTQ_USED_ELEM_SIZE * (ULONG)(vq->last_used % vq->num);
+
+    head = (WORD)ld32le(elem);
+    if (len)
+        *len = ld32le(elem + 4);
+
+    vq->last_used++;
+    return head;
+}
+
 static const char *virtio_name(ULONG id)
 {
     switch (id)
@@ -108,7 +276,15 @@ static WORD virtio_negotiate(WORD slot)
     drv_lo = 0;
     drv_hi = dev_hi & (1UL << VIRTIO_F_VERSION_1_BIT);
 
-    if (drv_hi == 0)
+    /*
+     * ACCESS_PLATFORM must be accepted if it is offered, or
+     * virtio_validate_features() fails and FEATURES_OK silently never
+     * takes effect. It is only offered when the device was created with
+     * iommu_platform=on, so normally this bit is absent.
+     */
+    drv_hi |= dev_hi & (1UL << VIRTIO_F_ACCESS_PLATFORM_BIT);
+
+    if ((drv_hi & (1UL << VIRTIO_F_VERSION_1_BIT)) == 0)
     {
         KINFO(("virtio: slot %d does not offer VERSION_1\n", slot));
         vio_write32(slot, VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED);
@@ -141,6 +317,63 @@ static WORD virtio_negotiate(WORD slot)
            slot, dev_hi, dev_lo, drv_hi, drv_lo));
 
     return 0;
+}
+
+/*
+ * End-to-end ring self-test against virtio-rng.
+ *
+ * The simplest device that exists: one queue, hand it a writable
+ * buffer, get random bytes back. If the ring layout, the little-endian
+ * field encoding, the notify and the used-ring readback are all correct
+ * this returns data; if any one of them is wrong it returns nothing or
+ * QEMU complains. That makes it a far better check of the virtqueue
+ * core than any amount of reading the code.
+ */
+#define SELFTEST_QSIZE  8
+#define SELFTEST_LEN    16
+
+static UBYTE selftest_ring[512] __attribute__((aligned(16)));
+static UBYTE selftest_buf[SELFTEST_LEN] __attribute__((aligned(4)));
+
+static void virtio_selftest(WORD slot)
+{
+    VIRTQ vq;
+    ULONG len = 0;
+    WORD head, i, spin;
+
+    if (virtq_setup(&vq, slot, 0, SELFTEST_QSIZE, selftest_ring) != 0)
+        return;
+
+    /* Queues exist now, so the device may be told the driver is live. */
+    vio_write32(slot, VIRTIO_MMIO_STATUS,
+                VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER
+                | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
+
+    for (i = 0; i < SELFTEST_LEN; i++)
+        selftest_buf[i] = 0;
+
+    /* One device-writable descriptor. */
+    virtq_add(&vq, 0, (ULONG)selftest_buf, SELFTEST_LEN, VRING_DESC_F_WRITE);
+    virtq_kick(&vq, 0);
+
+    for (spin = 0; spin < 10000; spin++)
+    {
+        head = virtq_poll(&vq, &len);
+        if (head >= 0)
+            break;
+    }
+
+    if (head < 0)
+    {
+        KINFO(("virtio: rng self-test TIMED OUT (no completion)\n"));
+        return;
+    }
+
+    KINFO(("virtio: rng self-test head %d len %ld: "
+           "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+           head, len,
+           selftest_buf[0], selftest_buf[1], selftest_buf[2], selftest_buf[3],
+           selftest_buf[4], selftest_buf[5], selftest_buf[6], selftest_buf[7]));
 }
 
 /*
@@ -202,7 +435,11 @@ WORD virtio_probe(void)
         }
 
         if (virtio_negotiate(slot) == 0)
+        {
             found++;
+            if (id == VIRTIO_ID_RNG)
+                virtio_selftest(slot);
+        }
     }
 
     KINFO(("virtio: %d device(s)\n", found));
