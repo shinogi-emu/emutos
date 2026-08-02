@@ -43,6 +43,7 @@
 #include "biosext.h"
 #include "amiga.h"
 #include "qemuvirt.h"
+#include "virtio.h"
 
 #if CONF_WITH_ADVANCED_CPU
 UBYTE is_bus32; /* 1 if address bus is 32-bit, 0 if it is 24-bit */
@@ -631,6 +632,7 @@ void machine_init(void)
      * allocation overwrites it -- this must happen before then.
      */
     qemuvirt_machine_init();
+    virtio_probe();
 #endif
 
 #if !CONF_WITH_RESET
