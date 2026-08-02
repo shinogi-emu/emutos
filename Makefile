@@ -308,7 +308,7 @@ bios_src +=  memory.S processor.S vectors.S aciavecs.S bios.c xbios.c acsi.c \
              pmmu030.c 68040_pmmu.S \
              amiga.c amiga2.S spi_vamp.c \
              lisa.c lisa2.S \
-             qemuvirt.c qemuvirt2.S virtio.c virtio_gpu.c \
+             qemuvirt.c qemuvirt2.S virtio.c virtio_gpu.c virtio_input.c \
              delay.c delayasm.S sd.c memory2.c bootparams.c scsi.c nova.c \
              dsp.c dsp2.S \
              scsidriv.c

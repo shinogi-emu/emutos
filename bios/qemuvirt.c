@@ -12,6 +12,7 @@
 #include "qemuvirt.h"
 #include "vectors.h"
 #include "virtio_gpu.h"
+#include "virtio_input.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -347,6 +348,9 @@ WORD qemuvirt_timer_ack(void)
     {
         rtc_reload(QEMUVIRT_RTC_TICK);
         fired |= QEMUVIRT_FIRED_TICK;
+
+        /* 200 Hz: 5ms of input latency, well under perception. */
+        virtio_input_poll();
     }
 
     if (pending & GF_RTC_BIT(QEMUVIRT_RTC_VBL))

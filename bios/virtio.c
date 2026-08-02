@@ -14,6 +14,7 @@
 #include "kprint.h"
 #include "virtio_gpu.h"
 #include "qemuvirt.h"
+#include "virtio_input.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -479,6 +480,8 @@ WORD virtio_probe(void)
             found++;
             if (id == VIRTIO_ID_RNG)
                 virtio_selftest(slot);
+            if (id == VIRTIO_ID_INPUT)
+                virtio_input_attach(slot);
             if (id == VIRTIO_ID_GPU)
             {
                 if (virtio_gpu_init(slot, QEMUVIRT_ARGB_FB,
