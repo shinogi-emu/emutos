@@ -21,10 +21,22 @@
 #define P9_RVERSION 101
 #define P9_TATTACH  104
 #define P9_RATTACH  105
+#define P9_TWALK    110
+#define P9_RWALK    111
+#define P9_TGETATTR  24
+#define P9_RGETATTR  25
+#define P9_TCLUNK   120
+#define P9_RCLUNK   121
+
+#define P9_GETATTR_BASIC 0x000007ffUL
 
 void virtio_9p_attach(WORD slot);
 WORD virtio_9p_present(void);
 LONG p9_attach(void);
 LONG p9_errno_to_gemdos(ULONG err);
+LONG p9_walk(ULONG fid, ULONG newfid, const char *name);
+LONG p9_getattr(ULONG fid, ULONG *size, UWORD *is_dir, ULONG *mtime,
+                UWORD *writable);
+void p9_clunk(ULONG fid);
 
 #endif /* VIRTIO_9P_H */

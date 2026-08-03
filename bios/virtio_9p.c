@@ -169,7 +169,92 @@ LONG p9_attach(void)
     KINFO(("9p: attached, root fid %d\n", P9_ROOT_FID));
     p9_ready = 1;
 
+    {
+        ULONG size, mtime;
+        UWORD is_dir, writable;
+
+        if (p9_walk(P9_ROOT_FID, 1, "HELLO.TXT") == 0)
+        {
+            KINFO(("9p: walk HELLO.TXT ok\n"));
+            if (p9_getattr(1, &size, &is_dir, &mtime, &writable) == 0)
+                KINFO(("9p: getattr size %ld dir %d writable %d\n",
+                       size, is_dir, writable));
+            p9_clunk(1);
+        }
+    }
+
     return 0;
+}
+
+LONG p9_walk(ULONG fid, ULONG newfid, const char *name)
+{
+    ULONG off = 7;
+
+    p9_tx[4] = P9_TWALK;
+    p9_st32(p9_tx + off, fid);
+    off += 4;
+    p9_st32(p9_tx + off, newfid);
+    off += 4;
+
+    if (name)
+    {
+        p9_st16(p9_tx + off, 1);
+        off += 2;
+        off = p9_put_str(p9_tx, off, name);
+    }
+    else
+    {
+        p9_st16(p9_tx + off, 0);    /* clone */
+        off += 2;
+    }
+
+    return p9_rpc(off, 1, P9_RWALK);
+}
+
+/*
+ * Only the fields GEMDOS needs. The Rgetattr body is
+ * valid[8] qid[13] mode[4] uid[4] gid[4] nlink[8] rdev[8] size[8] ...
+ * so size starts at 7 + 8 + 13 + 4 + 4 + 4 + 8 + 8 = 56.
+ */
+LONG p9_getattr(ULONG fid, ULONG *size, UWORD *is_dir, ULONG *mtime,
+                UWORD *writable)
+{
+    ULONG off = 7;
+    ULONG mode;
+    LONG rc;
+
+    p9_tx[4] = P9_TGETATTR;
+    p9_st32(p9_tx + off, fid);
+    off += 4;
+    p9_st32(p9_tx + off, P9_GETATTR_BASIC);
+    off += 4;
+    p9_st32(p9_tx + off, 0);        /* request_mask is 8 bytes */
+    off += 4;
+
+    rc = p9_rpc(off, 1, P9_RGETATTR);
+    if (rc < 0)
+        return rc;
+
+    mode = p9_ld32(p9_rx + 28);     /* 7 + 8 + 13 */
+
+    /* Low 32 bits of size are all a 16-bit-int guest can use anyway. */
+    *size = p9_ld32(p9_rx + 56);
+    *is_dir = (mode & 0170000UL) == 0040000UL;  /* S_IFDIR */
+    *writable = (mode & 0200UL) != 0;           /* S_IWUSR */
+    *mtime = p9_ld32(p9_rx + 96);               /* mtime_sec */
+
+    return 0;
+}
+
+void p9_clunk(ULONG fid)
+{
+    ULONG off = 7;
+
+    p9_tx[4] = P9_TCLUNK;
+    p9_st32(p9_tx + off, fid);
+    off += 4;
+
+    p9_rpc(off, 1, P9_RCLUNK);
 }
 
 void virtio_9p_attach(WORD slot)
