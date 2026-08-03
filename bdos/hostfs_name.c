@@ -17,6 +17,8 @@
 
 #include "hostfs_name.h"
 
+#ifdef MACHINE_QEMU_VIRT
+
 #define INVALID_CHAR '+'
 
 /* Bytes below 32, byte 127, and these become INVALID_CHAR. */
@@ -127,3 +129,5 @@ int hostfs_name_compare(const char *a, const char *b)
 
     return (int)*x - (int)*y;
 }
+
+#endif /* MACHINE_QEMU_VIRT */
