@@ -14,8 +14,27 @@
 
 #define HOSTFS_DRIVE 2          /* C: */
 
-#define HOSTFS_MAX_ENTRIES 128
+/*
+ * The Fsfirst/Fsnext snapshot is one flat table, so its size is the
+ * hard limit on how many entries a single directory can show. 512 at 64
+ * bytes each is 32KB of BSS, which this machine has no shortage of, and
+ * it covers any host folder a person would plausibly point the drive
+ * at. A directory bigger than this is reported, not silently clipped --
+ * see dir_snapshot().
+ */
+#define HOSTFS_MAX_ENTRIES 512
 #define HOSTFS_MAX_NAME    64
+
+/*
+ * Treaddir is paged: the device decides how many entries fit in one
+ * reply, and the snapshot re-issues the request until a page comes back
+ * empty. A device that returned entries whose offsets never advanced
+ * would make that loop run forever, so the number of pages is bounded
+ * as well. At a couple of dozen entries per page this is far more than
+ * HOSTFS_MAX_ENTRIES needs, and is reached only by a device that is
+ * broken or hostile.
+ */
+#define HOSTFS_MAX_DIRPAGES 256
 
 /*
  * Open files live in a private GEMDOS handle range that EmuTOS can

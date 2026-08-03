@@ -88,6 +88,28 @@ static void dir_sort(void)
  * Tlopen fixes a fid to an open stream, and the caller still owns
  * dirfid and has to clunk it afterwards.
  *
+ * Treaddir is PAGED, and the paging is the whole point of the loop
+ * below. One request returns only as many entries as fit in the reply
+ * the buffer was sized for -- a couple of dozen here -- and the device,
+ * not the caller, decides how many that is. Each entry carries its own
+ * 9P offset, and handing the last one back on the next request is how
+ * the following page is reached; a snapshot that issued one Treaddir
+ * and stopped would list the first page of a directory and lose every
+ * entry after it, with nothing to show that anything was missing. An
+ * empty page ends the directory.
+ *
+ * Two things are refused rather than tolerated:
+ *
+ *   - a directory with more entries than the table holds is REPORTED.
+ *     The scan keeps reading to the end so the count it prints is the
+ *     true shortfall rather than a guess, but it stops storing. A
+ *     listing that is short and says so can be acted on; one that is
+ *     short and silent looks exactly like an empty folder.
+ *
+ *   - a device whose entries do not advance the offset would make this
+ *     re-read the same page forever, so the page count is bounded.
+ *     Reaching that bound is also reported.
+ *
  * dirbuf and name are static, not locals: this runs on the BDOS's
  * dedicated internal stack (see rwa.S, "fstrt"), which is a couple of
  * KB shared with the rest of the GEMDOS call chain. A 1KB local here
@@ -100,7 +122,9 @@ static char dirent_name[HOSTFS_MAX_NAME];
 
 static LONG dir_snapshot(ULONG dirfid)
 {
-    ULONG pos, off, next = 0;
+    ULONG diroff = 0;
+    ULONG pages = 0;
+    LONG dropped = 0;
     LONG n;
 
     dir_count = 0;
@@ -114,20 +138,49 @@ static LONG dir_snapshot(ULONG dirfid)
         return EDRIVE;
     }
 
-    n = p9_readdir(HOSTFS_SCAN_FID, 0, dirbuf, sizeof(dirbuf));
-    for (pos = 0; n > 0 && pos < (ULONG)n && dir_count < HOSTFS_MAX_ENTRIES; )
+    while ((n = p9_readdir(HOSTFS_SCAN_FID, diroff, dirbuf,
+                           sizeof(dirbuf))) > 0)
     {
-        off = p9_dirent_next(dirbuf, (ULONG)n, pos, dirent_name,
-                              sizeof(dirent_name), &next);
-        if (off == 0)
-            break;
-        pos = off;
+        ULONG pos, off, next = 0;
+        WORD progress = 0;
 
-        strcpy(dir_names[dir_count], dirent_name);
-        dir_count++;
+        if (++pages > HOSTFS_MAX_DIRPAGES)
+        {
+            KINFO(("hostfs: directory read stopped after %d pages\n",
+                   (WORD)HOSTFS_MAX_DIRPAGES));
+            break;
+        }
+
+        for (pos = 0; pos < (ULONG)n; )
+        {
+            off = p9_dirent_next(dirbuf, (ULONG)n, pos, dirent_name,
+                                 sizeof(dirent_name), &next);
+            if (off == 0)
+                break;
+            pos = off;
+            diroff = next;
+            progress = 1;
+
+            if (dir_count >= HOSTFS_MAX_ENTRIES)
+            {
+                dropped++;
+                continue;
+            }
+
+            strcpy(dir_names[dir_count], dirent_name);
+            dir_count++;
+        }
+
+        if (!progress)
+            break;              /* nothing consumed: stop rather than spin */
     }
 
     p9_clunk(HOSTFS_SCAN_FID);
+
+    if (dropped > 0)
+        KINFO(("hostfs: directory has %ld entries, %ld not listed (limit %d)\n",
+               (LONG)dir_count + dropped, dropped, (WORD)HOSTFS_MAX_ENTRIES));
+
     dir_sort();
 
     return 0;

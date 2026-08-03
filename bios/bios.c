@@ -227,6 +227,7 @@ static UBYTE selftest_big[SELFTEST_BIG];
 
 static void hostfs_pathtest(void);
 static void hostfs_subdirtest(void);
+static void hostfs_manytest(void);
 
 static void hostfs_selftest(void)
 {
@@ -456,6 +457,7 @@ static void hostfs_pathtest(void)
                selftest_dfree[2], selftest_dfree[3]));
 
     hostfs_subdirtest();
+    hostfs_manytest();
 
     /*
      * Put the boot drive back. The switch to C: above is a test, not a
@@ -560,6 +562,56 @@ static void hostfs_subdirtest(void)
            Fsfirst("C:\\SUB\\..\\..\\*.*", 0)));
 
     Dsetpath("C:\\");
+}
+
+/*
+ * A directory far larger than one 9P Rreaddir message.
+ *
+ * A single Treaddir returns whatever fits in the reply the buffer was
+ * sized for -- a couple of dozen entries here -- so a snapshot that
+ * issued one request and stopped would list the first page and silently
+ * lose the rest. Nothing about that is visible from a small fixture,
+ * which is why this one is deliberately larger than any page.
+ *
+ * The count alone would not prove much either: it is asserted together
+ * with the FIRST and LAST names in sort order, so an implementation
+ * that read the right number of entries from the wrong pages, or
+ * repeated a page, cannot match. The dot entries are skipped when
+ * picking those two -- they sort ahead of everything and would make
+ * "first" say nothing -- but they are still counted.
+ */
+static char selftest_first[16];
+static char selftest_last[16];
+
+static void hostfs_manytest(void)
+{
+    DTA *dta = (DTA *)selftest_dta;
+    LONG rc;
+    WORD count = 0;
+
+    /* Nothing to say on a host folder without the fixture directory. */
+    if (Dsetpath("C:\\MANY") != 0)
+        return;
+    Dsetpath("C:\\");
+
+    selftest_first[0] = '\0';
+    selftest_last[0] = '\0';
+
+    Fsetdta(selftest_dta);
+    for (rc = Fsfirst("C:\\MANY\\*.*", 0); rc == 0; rc = Fsnext())
+    {
+        count++;
+
+        if (dta->d_fname[0] == '.')
+            continue;
+
+        if (selftest_first[0] == '\0')
+            strcpy(selftest_first, dta->d_fname);
+        strcpy(selftest_last, dta->d_fname);
+    }
+
+    KINFO(("hostfs: many count %d first %s last %s\n",
+           count, selftest_first, selftest_last));
 }
 #endif /* MACHINE_QEMU_VIRT */
 
