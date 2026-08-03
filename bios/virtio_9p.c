@@ -199,6 +199,25 @@ LONG p9_attach(void)
     KINFO(("9p: attached, root fid %d\n", P9_ROOT_FID));
     p9_ready = 1;
 
+    /*
+     * Temporary scaffolding, exercising each transport path so its
+     * golden stays green. Both probes are removed once the GEMDOS
+     * layer exercises walk/getattr and readdir for real.
+     */
+    {
+        ULONG size, mtime;
+        UWORD is_dir, writable;
+
+        if (p9_walk(P9_ROOT_FID, 1, "HELLO.TXT") == 0)
+        {
+            KINFO(("9p: walk HELLO.TXT ok\n"));
+            if (p9_getattr(1, &size, &is_dir, &mtime, &writable) == 0)
+                KINFO(("9p: getattr size %ld dir %d writable %d\n",
+                       size, is_dir, writable));
+            p9_clunk(1);
+        }
+    }
+
     {
         UBYTE dirbuf[512];
         char name[64];
