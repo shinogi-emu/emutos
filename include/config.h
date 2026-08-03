@@ -658,6 +658,13 @@
 # ifndef CONF_WITH_VDI_16BIT
 #  define CONF_WITH_VDI_16BIT 1
 # endif
+/*
+ * The only mass storage this machine has is virtio.  There is no ACSI,
+ * SCSI, IDE or SD/MMC bus to probe, so virtio-blk is the disk bus here.
+ */
+# ifndef CONF_WITH_VIRTIO_BLK
+#  define CONF_WITH_VIRTIO_BLK 1
+# endif
 /* Note: CONF_SERIAL_CONSOLE is deliberately left off.  It selects the
  * MFP RS232 port, which this machine does not have, and would pull in
  * RS232_DEBUG_PRINT.  Debug output goes to the goldfish-tty instead,
@@ -1097,6 +1104,18 @@
  */
 #ifndef CONF_WITH_SDMMC
 # define CONF_WITH_SDMMC 0
+#endif
+
+/*
+ * Set CONF_WITH_VIRTIO_BLK to 1 to activate the virtio-blk bus.
+ *
+ * A virtio-blk device is a plain LBA block device behind a virtio-mmio
+ * transport, so this is only meaningful on a machine that has those
+ * transports.  The partitions on it are found by the standard scan in
+ * bios/disk.c, which already understands DOS and Atari partitioning.
+ */
+#ifndef CONF_WITH_VIRTIO_BLK
+# define CONF_WITH_VIRTIO_BLK 0
 #endif
 
 /*

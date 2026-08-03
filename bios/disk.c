@@ -26,6 +26,11 @@
 #include "acsi.h"
 #include "scsi.h"
 #include "sd.h"
+#include "virtio_blk.h"
+#ifdef MACHINE_QEMU_VIRT
+#include "virtio_9p.h"
+#endif
+#include "../bdos/hostfs.h"
 #include "../bdos/bdosstub.h"
 #include "string.h"
 
@@ -115,7 +120,10 @@ static const int majors[] =
     0, 1, 2, 3, 4, 5, 6, 7,             /* ACSI */
 #endif
 #if CONF_WITH_SDMMC
-    24, 25, 26, 27, 28, 29, 30, 31      /* SD/MMC */
+    24, 25, 26, 27, 28, 29, 30, 31,     /* SD/MMC */
+#endif
+#if CONF_WITH_VIRTIO_BLK
+    32, 33, 34, 35, 36, 37, 38, 39      /* virtio-blk */
 #endif
 };
 
@@ -320,6 +328,19 @@ void disk_init_all(void)
     for (i = 2, bitmask = 0x04L; i < BLKDEVNUM; i++, bitmask <<= 1)
         devices_available |= bitmask;
 
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * The host folder takes drive C unconditionally, but it registers
+     * itself later than this scan and never goes through
+     * add_partition(), so its letter has to be withheld here.  Without
+     * this a partition is handed C as well and is then shadowed for
+     * every GEMDOS call, which looks exactly like a partition that
+     * failed to mount.
+     */
+    if (virtio_9p_present())
+        devices_available &= ~(1L << HOSTFS_DRIVE);
+#endif
+
     /* scan for attached harddrives and their partitions */
     for(i = 0; i < ARRAY_SIZE(majors); i++) {
         UWORD unit = NUMFLOPPIES + majors[i];
@@ -416,6 +437,11 @@ LONG disk_mediach(UWORD unit)
         ret = sd_ioctl(reldev,GET_MEDIACHANGE,NULL);
         break;
 #endif /* CONF_WITH_SDMMC */
+#if CONF_WITH_VIRTIO_BLK
+    case VIRTIO_BUS:
+        ret = virtio_blk_ioctl(reldev,GET_MEDIACHANGE,NULL);
+        break;
+#endif /* CONF_WITH_VIRTIO_BLK */
     default:
         ret = EUNDEV;
     }
@@ -1061,6 +1087,11 @@ static LONG internal_inquire(UWORD unit, ULONG *blocksize, ULONG *deviceflags, c
         flags = XH_TARGET_REMOVABLE;    /* medium is removable */
         break;
 #endif /* CONF_WITH_SDMMC */
+#if CONF_WITH_VIRTIO_BLK
+    case VIRTIO_BUS:
+        ret = virtio_blk_ioctl(reldev,GET_DISKNAME,name);
+        break;
+#endif /* CONF_WITH_VIRTIO_BLK */
     default:
         ret = EUNDEV;
     }
@@ -1161,6 +1192,14 @@ LONG disk_get_capacity(UWORD unit, ULONG *blocks, ULONG *blocksize)
             return ret;
         break;
 #endif /* CONF_WITH_SDMMC */
+#if CONF_WITH_VIRTIO_BLK
+    case VIRTIO_BUS:
+        ret = virtio_blk_ioctl(reldev,GET_DISKINFO,info);
+        KDEBUG(("virtio_blk_ioctl(%d) returned %ld\n", reldev, ret));
+        if (ret < 0)
+            return ret;
+        break;
+#endif /* CONF_WITH_VIRTIO_BLK */
     default:
         return EUNDEV;
     }
@@ -1229,6 +1268,12 @@ LONG disk_rw(UWORD unit, UWORD rw, ULONG sector, UWORD count, UBYTE *buf)
         KDEBUG(("sd_rw() returned %ld\n", ret));
         break;
 #endif /* CONF_WITH_SDMMC */
+#if CONF_WITH_VIRTIO_BLK
+    case VIRTIO_BUS:
+        ret = virtio_blk_rw(rw, sector, count, buf, reldev);
+        KDEBUG(("virtio_blk_rw() returned %ld\n", ret));
+        break;
+#endif /* CONF_WITH_VIRTIO_BLK */
     default:
         ret = EUNDEV;
     }

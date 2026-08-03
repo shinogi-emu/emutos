@@ -152,8 +152,10 @@ void vio_write32(WORD slot, WORD reg, ULONG value);
 WORD virtio_probe(void);
 WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem);
 void virtq_add(VIRTQ *vq, WORD head, ULONG addr, ULONG len, UWORD flags);
+void virtq_chain(VIRTQ *vq, WORD head, WORD next);
 void virtq_kick(VIRTQ *vq, WORD head);
 WORD virtq_poll(VIRTQ *vq, ULONG *len);
+WORD virtq_wait(VIRTQ *vq, ULONG *len);
 LONG virtq_request(VIRTQ *vq, const void *req, ULONG req_len,
                    void *resp, ULONG resp_len);
 

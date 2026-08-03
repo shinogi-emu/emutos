@@ -741,6 +741,108 @@ static void hostfs_dtatest(void)
     KINFO(("hostfs: dtaguard resume rc %ld name %s\n",
            rc, rc == 0 ? dta->d_fname : (char *)""));
 }
+
+#if CONF_WITH_VIRTIO_BLK
+/*
+ * Exercise the virtio-blk drive, on the same terms as the host folder
+ * above: everything here goes through plain GEMDOS calls, so what it
+ * proves is the whole stack -- the block driver, the MBR scan, the BPB
+ * and FAT16 -- and not just that a sector came back.
+ *
+ * The drive LETTER is looked up rather than assumed. Which letter the
+ * partition lands on depends on what else registered first (the host
+ * folder takes C while both exist), and hard-coding it would make this
+ * report nothing the day that changes.
+ */
+static WORD vblk_drive(void)
+{
+    WORD i;
+
+    for (i = 0; i < BLKDEVNUM; i++)
+        if ((blkdev[i].flags & DEVICE_VALID)
+            && IS_VIRTIO_DEVICE(blkdev[i].unit - NUMFLOPPIES))
+            return i;
+
+    return -1;
+}
+
+static void vblk_selftest(void)
+{
+    char path[16];
+    WORD drive = vblk_drive();
+    LONG fh, n, total;
+    ULONG hash;
+
+    if (drive < 0)
+        return;                 /* no virtio-blk drive: nothing to prove */
+
+    KINFO(("vblk: drive %c unit %d\n", 'A' + drive, blkdev[drive].unit));
+
+    strcpy(path, "@:\\HELLO.TXT");
+    path[0] = 'A' + drive;
+
+    fh = Fopen(path, 0);
+    if (fh > 0)
+    {
+        n = Fread((WORD)fh, 63L, selftest_buf);
+        if (n >= 0)
+        {
+            selftest_buf[n] = '\0';
+            KINFO(("vblk: read %ld bytes: %s\n", n, selftest_buf));
+        }
+        Fclose((WORD)fh);
+    }
+    else
+        KINFO(("vblk: open %s rc %ld\n", path, fh));
+
+    /*
+     * A file spanning many clusters, hashed rather than printed. One
+     * sector arriving correctly proves very little: the interesting
+     * failures are a request whose byte count wrapped, a chain whose
+     * status byte landed in the payload, and a FAT walk that repeated
+     * or skipped a cluster. All three survive a single-sector read and
+     * none of them survives this.
+     */
+    strcpy(path, "@:\\BIG.DAT");
+    path[0] = 'A' + drive;
+
+    fh = Fopen(path, 0);
+    if (fh > 0)
+    {
+        total = 0;
+        hash = 2166136261UL;
+
+        while ((n = Fread((WORD)fh, (LONG)SELFTEST_BIG, selftest_big)) > 0)
+        {
+            LONG j;
+
+            for (j = 0; j < n; j++)
+            {
+                hash ^= selftest_big[j];
+                hash *= 16777619UL;
+            }
+            total += n;
+        }
+
+        if (n == 0)
+            KINFO(("vblk: big %ld bytes fnv1a 0x%08lx\n", total, hash));
+
+        Fclose((WORD)fh);
+    }
+    else
+        KINFO(("vblk: open %s rc %ld\n", path, fh));
+
+    /*
+     * Writes are refused, deliberately: the host side is QEMU's vvfat
+     * in read-only mode. This asserts that they fail as write-protect
+     * rather than being attempted and half-succeeding.
+     */
+    strcpy(path, "@:\\NEW.TXT");
+    path[0] = 'A' + drive;
+    KINFO(("vblk: create rc %ld\n", Fcreate(path, 0)));
+}
+#endif /* CONF_WITH_VIRTIO_BLK */
+
 #endif /* MACHINE_QEMU_VIRT */
 
 /*
@@ -1119,6 +1221,9 @@ static void bios_init(void)
 
 #ifdef MACHINE_QEMU_VIRT
     hostfs_selftest();
+#if CONF_WITH_VIRTIO_BLK
+    vblk_selftest();
+#endif
 #endif
 
     /* Enable VBL processing */

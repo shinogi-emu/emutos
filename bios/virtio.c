@@ -16,6 +16,7 @@
 #include "qemuvirt.h"
 #include "virtio_input.h"
 #include "virtio_9p.h"
+#include "virtio_blk.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -176,6 +177,41 @@ void virtq_add(VIRTQ *vq, WORD head, ULONG addr, ULONG len, UWORD flags)
 }
 
 /*
+ * Link one descriptor to the next.
+ *
+ * virtq_add() always writes a "next" of zero, which is correct only for
+ * the last descriptor of a chain.  Anything longer than one descriptor
+ * has to say where the chain continues, and must also carry
+ * VRING_DESC_F_NEXT in the flags virtq_add() was given -- the flag and
+ * this field are read independently by the device, and setting only one
+ * of them either truncates the chain or walks it into descriptor 0.
+ */
+void virtq_chain(VIRTQ *vq, WORD head, WORD next)
+{
+    st16le(vq->desc + (ULONG)head * VIRTQ_DESC_SIZE + 14, (UWORD)next);
+}
+
+/*
+ * Wait for the next completion on this queue.
+ *
+ * Returns the head descriptor index and sets *len to the bytes the
+ * device wrote, or -1 if nothing completed within the spin bound.
+ */
+WORD virtq_wait(VIRTQ *vq, ULONG *len)
+{
+    LONG spin;
+
+    for (spin = 0; spin < VIRTQ_SPIN_LIMIT; spin++)
+    {
+        WORD head = virtq_poll(vq, len);
+        if (head >= 0)
+            return head;
+    }
+
+    return -1;
+}
+
+/*
  * Publish a chain and notify the device.
  *
  * avail.idx is free-running mod 2^16 and is NOT masked by the queue
@@ -212,23 +248,17 @@ LONG virtq_request(VIRTQ *vq, const void *req, ULONG req_len,
                    void *resp, ULONG resp_len)
 {
     ULONG len = 0;
-    WORD head;
-    LONG spin;
 
     virtq_add(vq, 0, (ULONG)req, req_len, VRING_DESC_F_NEXT);
-    st16le(vq->desc + 14, 1);           /* desc[0].next = 1 */
+    virtq_chain(vq, 0, 1);
     virtq_add(vq, 1, (ULONG)resp, resp_len, VRING_DESC_F_WRITE);
 
     virtq_kick(vq, 0);
 
-    for (spin = 0; spin < VIRTQ_SPIN_LIMIT; spin++)
-    {
-        head = virtq_poll(vq, &len);
-        if (head >= 0)
-            return (LONG)len;
-    }
+    if (virtq_wait(vq, &len) < 0)
+        return -1;
 
-    return -1;
+    return (LONG)len;
 }
 
 /*
@@ -485,6 +515,10 @@ WORD virtio_probe(void)
                 virtio_input_attach(slot);
             if (id == VIRTIO_ID_9P)
                 virtio_9p_attach(slot);
+#if CONF_WITH_VIRTIO_BLK
+            if (id == VIRTIO_ID_BLK)
+                virtio_blk_attach(slot);
+#endif
             if (id == VIRTIO_ID_GPU)
             {
                 if (virtio_gpu_init(slot, QEMUVIRT_ARGB_FB,
