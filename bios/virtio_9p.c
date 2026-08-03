@@ -35,6 +35,15 @@ static UBYTE p9_ring[2048] __attribute__((aligned(16)));
 static UBYTE p9_tx[P9_MSIZE] __attribute__((aligned(4)));
 static UBYTE p9_rx[P9_MSIZE] __attribute__((aligned(4)));
 
+/*
+ * Bytes actually written into p9_rx by the last successful p9_rpc().
+ * "min" only guarantees a floor for indexing fixed offsets; callers
+ * that must trust a variable-length field carried in the reply (e.g.
+ * Rreaddir's count) need the real length to clamp against, since the
+ * device is not trusted to report a count that fits what it sent.
+ */
+static ULONG p9_rx_len;
+
 /* Little-endian stores. */
 static void p9_st16(UBYTE *p, UWORD v)
 {
@@ -122,6 +131,8 @@ static LONG p9_rpc(ULONG len, UWORD tag, UBYTE want, ULONG min)
         return EDRIVE;
     }
 
+    p9_rx_len = (ULONG)got;
+
     if (p9_rx[4] == P9_RLERROR)
     {
         if (got < 11)
@@ -189,15 +200,23 @@ LONG p9_attach(void)
     p9_ready = 1;
 
     {
-        ULONG size, mtime;
-        UWORD is_dir, writable;
+        UBYTE dirbuf[512];
+        char name[64];
+        ULONG off = 0, next = 0, pos;
+        LONG n;
 
-        if (p9_walk(P9_ROOT_FID, 1, "HELLO.TXT") == 0)
+        if (p9_walk(P9_ROOT_FID, 1, 0) == 0 && p9_lopen(1, P9_O_RDONLY) == 0)
         {
-            KINFO(("9p: walk HELLO.TXT ok\n"));
-            if (p9_getattr(1, &size, &is_dir, &mtime, &writable) == 0)
-                KINFO(("9p: getattr size %ld dir %d writable %d\n",
-                       size, is_dir, writable));
+            n = p9_readdir(1, 0, dirbuf, sizeof(dirbuf));
+            for (pos = 0; n > 0 && pos < (ULONG)n; )
+            {
+                off = p9_dirent_next(dirbuf, (ULONG)n, pos, name,
+                                      sizeof(name), &next);
+                if (off == 0)
+                    break;
+                KINFO(("9p: dirent %s\n", name));
+                pos = off;
+            }
             p9_clunk(1);
         }
     }
@@ -278,6 +297,106 @@ void p9_clunk(ULONG fid)
     off += 4;
 
     p9_rpc(off, 1, P9_RCLUNK, 7);   /* header only */
+}
+
+/*
+ * Rlopen is qid[13] iounit[4] starting at +7, but nothing here reads
+ * either field -- only success/failure of the open matters -- so 7
+ * (header only) is enough to pass as "min".
+ */
+LONG p9_lopen(ULONG fid, ULONG flags)
+{
+    ULONG off = 7;
+
+    p9_tx[4] = P9_TLOPEN;
+    p9_st32(p9_tx + off, fid);
+    off += 4;
+    p9_st32(p9_tx + off, flags);
+    off += 4;
+
+    return p9_rpc(off, 1, P9_RLOPEN, 7);
+}
+
+/*
+ * Treaddir: fid[4] offset[8] count[4]. Rreaddir: count[4] data[count].
+ *
+ * count[4] sits at +7, so the reply must be at least 11 bytes before
+ * it may be read at all -- that is what "min" enforces below. But
+ * count itself comes from the device and is not trusted just because
+ * it arrived: after reading it, this clamps against p9_rx_len (what
+ * actually came back) before clamping against the caller's buffer, so
+ * a device that claims more data than it sent can never make this
+ * function copy stale or out-of-bounds bytes out of p9_rx.
+ */
+LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen)
+{
+    ULONG off = 7;
+    ULONG count, avail;
+    LONG rc;
+
+    p9_tx[4] = P9_TREADDIR;
+    p9_st32(p9_tx + off, fid);
+    off += 4;
+    p9_st32(p9_tx + off, offset);   /* offset is 8 bytes, low half */
+    off += 4;
+    p9_st32(p9_tx + off, 0);
+    off += 4;
+    p9_st32(p9_tx + off, buflen);
+    off += 4;
+
+    rc = p9_rpc(off, 1, P9_RREADDIR, 11);   /* count[4] at +7 */
+    if (rc < 0)
+        return rc;
+
+    count = p9_ld32(p9_rx + 7);
+
+    /* Bytes actually available after the count field, per p9_rx_len. */
+    avail = (p9_rx_len > 11) ? p9_rx_len - 11 : 0;
+    if (count > avail)
+        count = avail;
+    if (count > buflen)
+        count = buflen;
+
+    memcpy(buf, p9_rx + 11, count);
+
+    return (LONG)count;
+}
+
+/*
+ * Step over one directory entry.
+ *
+ * Each is qid[13] offset[8] type[1] name[s], so the name length sits
+ * at +22 and the name itself at +24. next_off receives the 9P offset
+ * to hand to the following Treaddir, which is the entry's own offset
+ * field rather than a byte count.
+ *
+ * buflen is the number of valid bytes in buf (what p9_readdir actually
+ * returned), not the size of whatever array the caller declared it
+ * in. Every offset used below is checked against that real length, so
+ * a truncated or corrupt entry near the end of the data stops cleanly
+ * instead of reading past it.
+ */
+ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
+                     ULONG namemax, ULONG *next_off)
+{
+    ULONG n;
+
+    if (off + 24 > buflen)
+        return 0;
+
+    n = p9_ld16(buf + off + 22);
+    if (n == 0 || n >= namemax)
+        return 0;
+
+    if (off + 24 + n > buflen)
+        return 0;
+
+    memcpy(name, buf + off + 24, n);
+    name[n] = '\0';
+
+    *next_off = p9_ld32(buf + off + 13);
+
+    return off + 24 + n;
 }
 
 void virtio_9p_attach(WORD slot)
