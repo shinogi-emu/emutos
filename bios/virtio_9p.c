@@ -424,6 +424,79 @@ LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen)
 }
 
 /*
+ * Tread: fid[4] offset[8] count[4]. Rread: count[4] data[count].
+ *
+ * The same two-stage clamp as p9_readdir() applies -- count comes from
+ * the device and is checked against p9_rx_len (what actually arrived)
+ * and then against what was asked for, so a device claiming more data
+ * than it sent cannot make this copy stale bytes out of p9_rx.
+ *
+ * The loop is the part that matters. A GEMDOS Fread count is a LONG and
+ * routinely exceeds what one Tread can carry: the reply is
+ * count[4] data[count] at +7, so a single request can never exceed
+ * p9_msize - 11, and p9_msize is the NEGOTIATED value, not the P9_MSIZE
+ * constant that was merely offered. Chunking therefore lives here
+ * rather than in the GEMDOS layer, which has no business knowing the
+ * transport's limits -- and getting it wrong would be invisible until
+ * something read a file bigger than one message.
+ *
+ * A short chunk ends the read: for a regular file that means EOF (or
+ * the server's own iounit limit), and either way the caller gets the
+ * count actually transferred rather than the count requested. A
+ * transport error after some bytes have already been copied returns
+ * those bytes; the error surfaces on the next call, when there is no
+ * partial result to lose.
+ */
+LONG p9_read(ULONG fid, ULONG offset, UBYTE *buf, ULONG count)
+{
+    ULONG done = 0;
+
+    while (done < count)
+    {
+        ULONG off = 7;
+        ULONG request, got, avail;
+        LONG rc;
+
+        request = count - done;
+        if (request > p9_msize - 11)
+            request = p9_msize - 11;
+
+        p9_tx[4] = P9_TREAD;
+        p9_st32(p9_tx + off, fid);
+        off += 4;
+        p9_st32(p9_tx + off, offset + done);    /* offset is 8 bytes, low half */
+        off += 4;
+        p9_st32(p9_tx + off, 0);
+        off += 4;
+        p9_st32(p9_tx + off, request);
+        off += 4;
+
+        rc = p9_rpc(off, 1, P9_RREAD, 11);      /* count[4] at +7 */
+        if (rc < 0)
+            return (done > 0) ? (LONG)done : rc;
+
+        got = p9_ld32(p9_rx + 7);
+
+        avail = (p9_rx_len > 11) ? p9_rx_len - 11 : 0;
+        if (got > avail)
+            got = avail;
+        if (got > request)
+            got = request;
+
+        if (got == 0)
+            break;                              /* end of file */
+
+        memcpy(buf + done, p9_rx + 11, got);
+        done += got;
+
+        if (got < request)
+            break;                              /* short chunk: nothing more to come */
+    }
+
+    return (LONG)done;
+}
+
+/*
  * Step over one directory entry.
  *
  * Each is qid[13] offset[8] type[1] name[s], so the name length sits

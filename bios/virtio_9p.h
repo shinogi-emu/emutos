@@ -31,6 +31,8 @@
 #define P9_RLOPEN    13
 #define P9_TREADDIR  40
 #define P9_RREADDIR  41
+#define P9_TREAD    116
+#define P9_RREAD    117
 
 #define P9_GETATTR_BASIC 0x000007ffUL
 
@@ -46,6 +48,7 @@ LONG p9_getattr(ULONG fid, ULONG *size, UWORD *is_dir, ULONG *mtime,
 void p9_clunk(ULONG fid);
 LONG p9_lopen(ULONG fid, ULONG flags);
 LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen);
+LONG p9_read(ULONG fid, ULONG offset, UBYTE *buf, ULONG count);
 ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
                      ULONG namemax, ULONG *next_off);
 

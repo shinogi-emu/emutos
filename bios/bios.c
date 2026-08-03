@@ -206,6 +206,141 @@ static void vecs_init(void)
 
 extern PFVOID vbl_list[8]; /* Default array for vblqueue */
 
+#ifdef MACHINE_QEMU_VIRT
+/*
+ * Temporary scaffolding: exercise the host-folder drive from inside the
+ * guest and report on the serial line, so the golden tests can verify it
+ * headlessly with no display and no interaction. Removed once GEM
+ * itself drives these paths.
+ *
+ * Buffers are static. selftest_big in particular is 16KB, which no
+ * stack here would survive, and it has to be larger than one 9P
+ * message for the read to be worth anything: p9_read() chunks by the
+ * negotiated msize, so a request smaller than a single chunk never
+ * takes the loop and a large file would still come back mangled.
+ */
+#define SELFTEST_BIG 16384
+
+static char selftest_dta[44];
+static UBYTE selftest_buf[64];
+static UBYTE selftest_big[SELFTEST_BIG];
+
+static void hostfs_selftest(void)
+{
+    LONG fh, n, total;
+    ULONG hash;
+    WORD i;
+
+    /*
+     * List the drive while opening a file inside the loop.
+     *
+     * The open/close pair in the middle of the scan is the whole point:
+     * Fsfirst/Fsnext keep their state in single globals, so an Fopen
+     * that resolved its path by re-snapshotting the directory would
+     * reset the scan under itself and this loop would either repeat
+     * entries or stop early. That it still reports exactly the entries,
+     * in order, is what the listing goldens are checking here -- the
+     * desktop's own idiom is precisely this interleaving.
+     */
+    Fsetdta(selftest_dta);
+    for (n = Fsfirst("C:\\*.*", 0); n == 0; n = Fsnext())
+    {
+        fh = Fopen("C:\\HELLO.TXT", 0);
+        if (fh > 0)
+            Fclose((WORD)fh);
+    }
+
+    /* Open, read, seek, close. */
+    fh = Fopen("C:\\HELLO.TXT", 0);
+    if (fh > 0)
+    {
+        KINFO(("hostfs: open HELLO.TXT handle %ld\n", fh));
+
+        n = Fread((WORD)fh, 64L, selftest_buf);
+        if (n >= 0)
+        {
+            selftest_buf[n] = '\0';
+            KINFO(("hostfs: read %ld bytes: %s\n", n, selftest_buf));
+        }
+
+        if (Fseek(2L, (WORD)fh, 0) == 2)
+        {
+            n = Fread((WORD)fh, 3L, selftest_buf);
+            if (n >= 0)
+            {
+                selftest_buf[n] = '\0';
+                KINFO(("hostfs: seek 2 read %ld: %s\n", n, selftest_buf));
+            }
+        }
+
+        KINFO(("hostfs: close handle %ld\n", fh));
+        Fclose((WORD)fh);
+    }
+
+    /*
+     * Wrap the slot table. Slots rotate, so 23 open/close pairs walk
+     * the eight of them nearly three times over; 23 is deliberately not
+     * a multiple of the table size, so the loop finishes mid-table
+     * rather than landing back on its starting slot by construction,
+     * and the reported handle differs from the one the open above
+     * returned. If any error path had failed to clunk, the slot whose
+     * fid stayed bound would fail its next walk, the loop would break
+     * early and no line would be reported at all.
+     */
+    fh = -1;
+    for (i = 0; i < 23; i++)
+    {
+        fh = Fopen("C:\\HELLO.TXT", 0);
+        if (fh <= 0)
+            break;
+        Fclose((WORD)fh);
+    }
+    if (fh > 0)
+        KINFO(("hostfs: wrap %d opens, last handle %ld ok\n", i, fh));
+
+    /*
+     * A file larger than the negotiated msize, read in requests larger
+     * than the msize, hashed rather than printed: the host computes the
+     * same FNV-1a over the same file, so any byte that chunking dropped,
+     * duplicated or reordered changes the result.
+     */
+    fh = Fopen("C:\\BIG.DAT", 0);
+    if (fh > 0)
+    {
+        total = 0;
+        hash = 2166136261UL;
+
+        while ((n = Fread((WORD)fh, (LONG)SELFTEST_BIG, selftest_big)) > 0)
+        {
+            LONG j;
+
+            /*
+             * The size of the FIRST read is the part that proves the
+             * chunking loop, not the hash: a p9_read() that issued one
+             * Tread and stopped would satisfy this outer loop just as
+             * well, one short buffer at a time, and produce the same
+             * hash. A single Fread returning more than msize - 11 bytes
+             * cannot have been one message.
+             */
+            if (total == 0)
+                KINFO(("hostfs: big first read %ld bytes\n", n));
+
+            for (j = 0; j < n; j++)
+            {
+                hash ^= selftest_big[j];
+                hash *= 16777619UL;
+            }
+            total += n;
+        }
+
+        if (n == 0)
+            KINFO(("hostfs: big %ld bytes fnv1a 0x%08lx\n", total, hash));
+
+        Fclose((WORD)fh);
+    }
+}
+#endif /* MACHINE_QEMU_VIRT */
+
 /*
  * Initialize the BIOS
  */
@@ -581,14 +716,7 @@ static void bios_init(void)
     boot_status |= DOS_AVAILABLE;   /* track progress */
 
 #ifdef MACHINE_QEMU_VIRT
-    {
-        static char selftest_dta[44];
-        LONG rc;
-
-        Fsetdta(selftest_dta);
-        for (rc = Fsfirst("C:\\*.*", 0); rc == 0; rc = Fsnext())
-            ;
-    }
+    hostfs_selftest();
 #endif
 
     /* Enable VBL processing */
