@@ -57,7 +57,8 @@ static void dir_sort(void)
 }
 
 /*
- * Snapshot the drive root. Dot entries are dropped at the root.
+ * Snapshot the drive root. Dot entries are filtered by hostfs_match(),
+ * not here.
  *
  * dirbuf and name are static, not locals: this runs on the BDOS's
  * dedicated internal stack (see rwa.S, "fstrt"), which is a couple of
@@ -93,9 +94,6 @@ static LONG dir_snapshot(void)
         if (off == 0)
             break;
         pos = off;
-
-        if (dirent_name[0] == '.')  /* root drops every dot entry */
-            continue;
 
         strcpy(dir_names[dir_count], dirent_name);
         dir_count++;
@@ -141,37 +139,155 @@ WORD hostfs_claims(WORD fn, short *pw)
     return 0;
 }
 
-LONG hostfs_dispatch(WORD fn, short *pw)
+/*
+ * Ported from the reference implementation's fsfirst_match(). Matching
+ * is against the RAW host name; the clipped 8.3 name is only ever what
+ * gets written into the DTA. Listing membership and display names are
+ * therefore computed independently, which is why a name can be visible
+ * yet unmatchable by the pattern that appears to describe it.
+ */
+static WORD hostfs_match(const char *pat, const char *name, WORD subdir)
 {
-    char clipped[13];
+    const char *dot = 0;
+    const char *p = pat;
+    const char *n = name;
+    const char *q;
 
-    (void)pw;
-
-    if (fn == 0x4E)                 /* Fsfirst */
+    if (name[0] == '.')
     {
-        LONG rc = dir_snapshot();
-
-        if (rc < 0)
-            return rc;
-        if (dir_count == 0)
-            return EFILNF;
-
-        hostfs_host_to_atari(dir_names[0], clipped);
-        dir_pos = 1;
-        KINFO(("hostfs: fsfirst %s\n", clipped));
-
-        return 0;
+        if (!subdir)
+            return 0;                   /* root drops every dot entry */
+        if (strcmp(name, ".") && strcmp(name, ".."))
+            return 0;
     }
 
-    /* Fsnext */
-    if (dir_pos >= dir_count)
-        return ENMFIL;
+    for (q = name; *q; q++)
+        if (*q == '.')
+            dot = q;                    /* the LAST dot */
 
-    hostfs_host_to_atari(dir_names[dir_pos], clipped);
-    dir_pos++;
-    KINFO(("hostfs: fsnext %s\n", clipped));
+    /* A plain "*" must not match anything carrying an extension. */
+    if (dot && p[0] == '*' && p[1] == '\0')
+        return 0;
+
+    while (*n)
+    {
+        if (*p == '*')
+        {
+            while (*n && n != dot)
+                n++;
+            p++;
+        }
+        else if (*p == '?' && *n)
+        {
+            n++;
+            p++;
+        }
+        else if (toupper(*p++) != toupper(*n++))
+        {
+            return 0;
+        }
+    }
+
+    while (p[0] == '*')
+        p++;
+    if (p[0] == '.' && p[1] == '*')     /* ".*" also matches no extension */
+        p += 2;
+    while (p[0] == '*')
+        p++;
+
+    return p[0] == '\0';
+}
+
+/* Fill the caller's DTA from one snapshot entry. */
+static LONG hostfs_fill_dta(const char *host)
+{
+    DTA *dta = (DTA *)run->p_xdta;
+    ULONG size, mtime;
+    UWORD is_dir, writable;
+    char clipped[13];
+
+    if (p9_walk(P9_ROOT_FID, 1, host) != 0)
+        return EFILNF;
+
+    if (p9_getattr(1, &size, &is_dir, &mtime, &writable) != 0)
+    {
+        p9_clunk(1);
+        return EFILNF;
+    }
+    p9_clunk(1);
+
+    hostfs_host_to_atari(host, clipped);
+    strcpy(dta->d_fname, clipped);
+
+    dta->d_length = (LONG)size;
+    dta->d_attrib = 0;
+    if (is_dir)
+        dta->d_attrib |= FA_SUBDIR;
+    if (!writable)
+        dta->d_attrib |= FA_RO;
+
+    /* Dates are refined in Stage 2; zero is a valid packed value. */
+    dta->d_time = 0;
+    dta->d_date = 0;
+
+    KINFO(("hostfs: dta %s len %ld attr 0x%02x\n",
+           clipped, dta->d_length, dta->d_attrib));
 
     return 0;
+}
+
+static char dir_pattern[16];
+
+LONG hostfs_dispatch(WORD fn, short *pw)
+{
+    WORD first_call = (fn == 0x4E);
+
+    if (fn == 0x4E)                     /* Fsfirst */
+    {
+        const char *spec = *(const char **)&pw[1];
+        const char *base;
+        LONG rc;
+
+        /* Keep only the final component as the match pattern. */
+        base = spec;
+        while (*spec)
+        {
+            if (*spec == '\\' || *spec == '/' || *spec == ':')
+                base = spec + 1;
+            spec++;
+        }
+        strcpy(dir_pattern, base);
+
+        rc = dir_snapshot();
+        if (rc < 0)
+            return rc;
+
+        dir_pos = 0;
+        fn = 0x4F;                      /* fall into the Fsnext scan */
+    }
+
+    /* Fsnext, and the tail of Fsfirst */
+    while (dir_pos < dir_count)
+    {
+        const char *host = dir_names[dir_pos];
+        LONG rc;
+
+        dir_pos++;
+        if (!hostfs_match(dir_pattern, host, 0))
+            continue;
+
+        rc = hostfs_fill_dta(host);
+        if (rc == 0)
+        {
+            char clipped[13];
+
+            hostfs_host_to_atari(host, clipped);
+            KINFO(("hostfs: %s %s\n", first_call ? "fsfirst" : "fsnext", clipped));
+        }
+        return rc;
+    }
+
+    return ENMFIL;
 }
 
 #endif /* MACHINE_QEMU_VIRT */
