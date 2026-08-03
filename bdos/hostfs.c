@@ -21,6 +21,7 @@
 #include "kprint.h"
 #include "gemerror.h"
 #include "string.h"
+#include "fs.h"
 #include "bdosstub.h"
 #include "miscutil.h"
 #include "biosbind.h"
@@ -30,14 +31,35 @@
 static WORD hostfs_on;
 
 /*
- * Whether the search currently open via the DTA belongs to us. Fsfirst
- * decides this from the path being searched; Fsnext has no path of its
- * own to look at; it just continues whatever Fsfirst last decided. Without
- * this, every Fsfirst/Fsnext pair in the system -- not just ones aimed at
- * C: -- would be answered with the host folder listing, since fn alone
- * does not say which drive is being searched.
+ * Which search a given Fsnext continues is a property of the DTA, not of
+ * this module.
+ *
+ * Fsfirst decides from the path which drive is being searched; Fsnext
+ * has no path of its own and must continue whatever Fsfirst started for
+ * THAT DTA. A single global "the last Fsfirst was ours" flag is not
+ * enough, because searches interleave: an application may hold a scan of
+ * C: open across an unrelated Fsfirst on another drive, and the flag
+ * would then decline the C: Fsnext that follows.
+ *
+ * Declining it is not merely a wrong listing, it is memory corruption.
+ * The Fsnext reaches stock xsnext(), which reads dt_offset_drive out of
+ * the DTA -- a field this module never wrote, so it holds whatever the
+ * application left there. ixsnext() masks it to five bits, checks only
+ * the TOP of the range and then indexes drvtbl[] with no NULL test
+ * (fsdir.c:556-563); on `virt` there is no floppy, so drvtbl[0] is NULL
+ * and a zeroed DTA dereferences low memory and issues a real sector
+ * read. There is no MMU.
+ *
+ * So the routing decision is stamped into the DTA itself. The stamp goes
+ * in dt_offset_drive, the same field stock xsfirst() sets to -1L to mark
+ * an uninitialised DTA, and it is likewise NEGATIVE: xsnext() returns
+ * ENMFIL for any dt_offset_drive < 0L before it calls ixsnext()
+ * (fsdir.c:662-663), so even a hostfs Fsnext that this module declines
+ * for some other reason fails cleanly instead of walking a FAT
+ * directory. -1L is stock's value, so -2L is used here to keep the two
+ * distinguishable.
  */
-static WORD hostfs_active;
+#define HOSTFS_DTA_MAGIC  (-2L)
 
 /*
  * The current directory on the drive, always in the canonical form
@@ -935,12 +957,15 @@ WORD hostfs_claims(WORD fn, short *pw)
         if (drv < 0)
             drv = run->p_curdrv;
 
-        hostfs_active = (drv == HOSTFS_DRIVE);
-        return hostfs_active;
+        return drv == HOSTFS_DRIVE;
     }
 
-    if (fn == 0x4F)                 /* Fsnext: continue whatever Fsfirst started */
-        return hostfs_active;
+    /*
+     * Fsnext continues the search belonging to THIS DTA, which is ours
+     * only if our own Fsfirst stamped it -- see HOSTFS_DTA_MAGIC above.
+     */
+    if (fn == 0x4F)
+        return ((DTAINFO *)run->p_xdta)->dt_offset_drive == HOSTFS_DTA_MAGIC;
 
     /*
      * Calls whose drive is named by a path: an explicit drive letter if
@@ -1192,6 +1217,24 @@ LONG hostfs_dispatch(WORD fn, short *pw)
     {
         const char *spec = *(const char **)&pw[1];
         LONG rc;
+
+        /*
+         * Claim the DTA before anything can fail.
+         *
+         * From here on every Fsnext through this DTA comes to us,
+         * including the ones that follow a FAILED Fsfirst -- which is
+         * the point. The alternative, stamping only on success, leaves
+         * a DTA carrying application garbage in dt_offset_drive for
+         * stock xsnext() to index drvtbl[] with.
+         *
+         * The scan state is emptied with it, so a failure below cannot
+         * leave the PREVIOUS scan's entries reachable: without this,
+         * Fsfirst("C:\NOSUCH\*.*") followed by Fsnext() answers with
+         * leftovers from an unrelated directory instead of ENMFIL.
+         */
+        ((DTAINFO *)run->p_xdta)->dt_offset_drive = HOSTFS_DTA_MAGIC;
+        dir_count = 0;
+        dir_pos = 0;
 
         /*
          * The same resolver every other path-taking call uses: the
