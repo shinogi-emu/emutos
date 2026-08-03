@@ -100,10 +100,14 @@ LONG p9_errno_to_gemdos(ULONG err)
 /*
  * Send the message built in p9_tx and collect the reply in p9_rx.
  *
- * Returns the reply type, or a negative GEMDOS error. An Rlerror is
- * translated here so callers never see an errno.
+ * Returns 0 on a reply of the wanted type that is at least "min" bytes
+ * long, or a negative GEMDOS error. An Rlerror is translated here so
+ * callers never see an errno. A reply that is too short to safely
+ * index -- whether it is a truncated Rlerror or a short "want" reply
+ * that a caller will index at fixed offsets -- is EDRIVE, never a
+ * silent read of stale buffer bytes.
  */
-static LONG p9_rpc(ULONG len, UWORD tag, UBYTE want)
+static LONG p9_rpc(ULONG len, UWORD tag, UBYTE want, ULONG min)
 {
     LONG got;
 
@@ -119,12 +123,27 @@ static LONG p9_rpc(ULONG len, UWORD tag, UBYTE want)
     }
 
     if (p9_rx[4] == P9_RLERROR)
+    {
+        if (got < 11)
+        {
+            KINFO(("9p: short Rlerror (%ld)\n", got));
+            return EDRIVE;
+        }
+
         return p9_errno_to_gemdos(p9_ld32(p9_rx + 7));
+    }
 
     if (p9_rx[4] != want)
     {
         KINFO(("9p: unexpected reply type %d, wanted %d\n",
                p9_rx[4], want));
+        return EDRIVE;
+    }
+
+    if ((ULONG)got < min)
+    {
+        KINFO(("9p: short reply type %d (%ld < %lu)\n",
+               p9_rx[4], got, min));
         return EDRIVE;
     }
 
@@ -143,7 +162,7 @@ LONG p9_attach(void)
     off += 4;
     off = p9_put_str(p9_tx, off, "9P2000.L");
 
-    rc = p9_rpc(off, 0xffff, P9_RVERSION);
+    rc = p9_rpc(off, 0xffff, P9_RVERSION, 11);   /* msize[4] at +7 */
     if (rc < 0)
         return rc;
 
@@ -162,7 +181,7 @@ LONG p9_attach(void)
     p9_st32(p9_tx + off, 0);                /* n_uname */
     off += 4;
 
-    rc = p9_rpc(off, 0, P9_RATTACH);
+    rc = p9_rpc(off, 0, P9_RATTACH, 7);   /* header only; qid unused */
     if (rc < 0)
         return rc;
 
@@ -208,7 +227,7 @@ LONG p9_walk(ULONG fid, ULONG newfid, const char *name)
         off += 2;
     }
 
-    return p9_rpc(off, 1, P9_RWALK);
+    return p9_rpc(off, 1, P9_RWALK, 7);   /* header only; wqid unused */
 }
 
 /*
@@ -231,7 +250,11 @@ LONG p9_getattr(ULONG fid, ULONG *size, UWORD *is_dir, ULONG *mtime,
     p9_st32(p9_tx + off, 0);        /* request_mask is 8 bytes */
     off += 4;
 
-    rc = p9_rpc(off, 1, P9_RGETATTR);
+    /*
+     * mtime_sec is the last field read, at +96, four bytes -- bytes
+     * 96..99, so the reply must be at least 100 bytes long.
+     */
+    rc = p9_rpc(off, 1, P9_RGETATTR, 100);
     if (rc < 0)
         return rc;
 
@@ -254,7 +277,7 @@ void p9_clunk(ULONG fid)
     p9_st32(p9_tx + off, fid);
     off += 4;
 
-    p9_rpc(off, 1, P9_RCLUNK);
+    p9_rpc(off, 1, P9_RCLUNK, 7);   /* header only */
 }
 
 void virtio_9p_attach(WORD slot)
