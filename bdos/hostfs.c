@@ -266,17 +266,31 @@ static WORD name_equal(const char *a, const char *b)
  * which is the same rule the listing uses -- so anything Fsfirst showed
  * can be opened by the name it showed.
  *
+ * BOTH sides are clipped, and the guest side is clipped with
+ * hostfs_atari_clip() rather than with the display mapping. TOS itself
+ * truncates a name to 8.3 on the way into GEMDOS, so an application
+ * that asks for "VERYLONGNAME.TXT" is asking for "VERYLONG.TXT" and the
+ * reference implementation opens it; comparing the host's clipped name
+ * against the RAW guest string instead would answer EFILNF for a file
+ * that both TOS and the reference implementation open. Note the two
+ * clippers are deliberately different functions -- the lookup direction
+ * splits at the FIRST dot and neither upcases nor substitutes -- which
+ * is why this cannot just call hostfs_host_to_atari() twice.
+ *
  * Static buffers, not locals: this runs on the BDOS's small private
  * stack (see the note on dirbuf above).
  */
 static UBYTE lookup_buf[1024];
 static char lookup_name[HOSTFS_MAX_NAME];
 static char lookup_clipped[13];
+static char lookup_want[13];
 
 static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
 {
     ULONG diroff = 0;
     LONG n;
+
+    hostfs_atari_clip(atari, lookup_want);
 
     /*
      * Clone rather than open dirfid itself: Tlopen fixes a fid to an
@@ -307,8 +321,11 @@ static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
             diroff = next;
             progress = 1;
 
+            if (!lookup_name[0])
+                continue;       /* entry this build cannot represent */
+
             hostfs_host_to_atari(lookup_name, lookup_clipped);
-            if (name_equal(lookup_clipped, atari))
+            if (name_equal(lookup_clipped, lookup_want))
             {
                 strcpy(out, lookup_name);
                 p9_clunk(HOSTFS_SCAN_FID);
