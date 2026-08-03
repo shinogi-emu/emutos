@@ -23,6 +23,7 @@
 #include "string.h"
 #include "bdosstub.h"
 #include "miscutil.h"
+#include "biosbind.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -37,6 +38,14 @@ static WORD hostfs_on;
  * does not say which drive is being searched.
  */
 static WORD hostfs_active;
+
+/*
+ * The current directory on the drive, always in the canonical form
+ * "\" or "\SUB\DEEP" -- see the note in hostfs.h. Only one string is
+ * needed because this module owns exactly one drive; the drive EmuTOS
+ * keeps in p_curdir[] is untouched, since stock code never reaches C:.
+ */
+static char hostfs_path[HOSTFS_MAX_PATH];
 
 static char dir_names[HOSTFS_MAX_ENTRIES][HOSTFS_MAX_NAME];
 static WORD dir_count;
@@ -79,15 +88,15 @@ static LONG dir_snapshot(void)
     dir_count = 0;
     dir_pos = 0;
 
-    if (p9_walk(P9_ROOT_FID, 1, 0) != 0)
+    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, 0) != 0)
         return EDRIVE;
-    if (p9_lopen(1, P9_O_RDONLY) != 0)
+    if (p9_lopen(HOSTFS_WALK_FID, P9_O_RDONLY) != 0)
     {
-        p9_clunk(1);
+        p9_clunk(HOSTFS_WALK_FID);
         return EDRIVE;
     }
 
-    n = p9_readdir(1, 0, dirbuf, sizeof(dirbuf));
+    n = p9_readdir(HOSTFS_WALK_FID, 0, dirbuf, sizeof(dirbuf));
     for (pos = 0; n > 0 && pos < (ULONG)n && dir_count < HOSTFS_MAX_ENTRIES; )
     {
         off = p9_dirent_next(dirbuf, (ULONG)n, pos, dirent_name,
@@ -100,7 +109,7 @@ static LONG dir_snapshot(void)
         dir_count++;
     }
 
-    p9_clunk(1);
+    p9_clunk(HOSTFS_WALK_FID);
     dir_sort();
 
     return 0;
@@ -174,20 +183,26 @@ static UBYTE lookup_buf[1024];
 static char lookup_name[HOSTFS_MAX_NAME];
 static char lookup_clipped[13];
 
-static WORD hostfs_resolve(const char *atari, char *out)
+static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
 {
     ULONG diroff = 0;
     LONG n;
 
-    if (p9_walk(P9_ROOT_FID, 1, 0) != 0)
+    /*
+     * Clone rather than open dirfid itself: Tlopen fixes a fid to an
+     * open stream, and the caller still needs dirfid walkable so it can
+     * descend into whatever this scan finds.
+     */
+    if (p9_walk(dirfid, HOSTFS_SCAN_FID, 0) != 0)
         return 0;
-    if (p9_lopen(1, P9_O_RDONLY) != 0)
+    if (p9_lopen(HOSTFS_SCAN_FID, P9_O_RDONLY) != 0)
     {
-        p9_clunk(1);
+        p9_clunk(HOSTFS_SCAN_FID);
         return 0;
     }
 
-    while ((n = p9_readdir(1, diroff, lookup_buf, sizeof(lookup_buf))) > 0)
+    while ((n = p9_readdir(HOSTFS_SCAN_FID, diroff, lookup_buf,
+                           sizeof(lookup_buf))) > 0)
     {
         ULONG pos, off, next = 0;
         WORD progress = 0;
@@ -206,7 +221,7 @@ static WORD hostfs_resolve(const char *atari, char *out)
             if (name_equal(lookup_clipped, atari))
             {
                 strcpy(out, lookup_name);
-                p9_clunk(1);
+                p9_clunk(HOSTFS_SCAN_FID);
                 return 1;
             }
         }
@@ -215,9 +230,14 @@ static WORD hostfs_resolve(const char *atari, char *out)
             break;              /* nothing consumed: stop rather than spin */
     }
 
-    p9_clunk(1);
+    p9_clunk(HOSTFS_SCAN_FID);
 
     return 0;
+}
+
+static WORD hostfs_resolve(const char *atari, char *out)
+{
+    return hostfs_resolve_in(P9_ROOT_FID, atari, out);
 }
 
 /*
@@ -231,6 +251,16 @@ static WORD hostfs_resolve(const char *atari, char *out)
  * which is worse than failing, because the caller gets the wrong file
  * rather than an error. Subdirectory support is a separate change to
  * both the resolver and the walk.
+ *
+ * For the same reason a RELATIVE name is refused whenever Dsetpath has
+ * moved the current directory off the root: the file the caller means
+ * lives in that directory, and answering with the root's file of the
+ * same name would again be the wrong file rather than an error.
+ *
+ * "." and ".." are refused outright. They are directories, so the
+ * is_dir check downstream would catch them, but only by accident --
+ * ".." names the host folder's PARENT, which is outside the drive, and
+ * nothing outside the drive should ever reach a walk.
  */
 static const char *hostfs_rootname(const char *path)
 {
@@ -240,15 +270,32 @@ static const char *hostfs_rootname(const char *path)
         p += 2;
     if (*p == '\\' || *p == '/')    /* and one root separator */
         p++;
+    else if (strcmp(hostfs_path, "\\"))
+        return NULL;                /* relative, and we are not at the root */
 
     for (path = p; *path; path++)
         if (*path == '\\' || *path == '/' || *path == ':')
             return NULL;
 
+    if (!strcmp(p, ".") || !strcmp(p, ".."))
+        return NULL;
+
     return p;
 }
 
 static char open_host[HOSTFS_MAX_NAME];
+
+/*
+ * The Fopen mode word, reduced to the access code stock EmuTOS acts on.
+ *
+ * xopen() masks with VALID_FOPEN_BITS (fs.h:166-173) and ixopen() then
+ * looks only at "is it zero", so the inheritance bit (0x80) and the
+ * share-mode bits (0x70) are ignored rather than rejected
+ * (fsopnclo.c:221-226, 259-261). Testing the raw word here instead
+ * would make C: stricter than every other drive for callers that set
+ * those bits, which is a difference no application expects.
+ */
+#define HOSTFS_FOPEN_BITS 0x07
 
 static LONG hostfs_open(const char *path, WORD mode)
 {
@@ -257,8 +304,7 @@ static LONG hostfs_open(const char *path, WORD mode)
     const char *name;
     WORD slot = 0, i;
 
-    if (mode != 0)              /* read-only for now; no Twrite path exists */
-        return EACCDN;
+    mode &= HOSTFS_FOPEN_BITS;      /* 0 = read, 1 = write, 2 = read/write */
 
     name = hostfs_rootname(path);
     if (!name || !*name)
@@ -299,6 +345,26 @@ static LONG hostfs_open(const char *path, WORD mode)
     }
 
     if (is_dir)
+    {
+        p9_clunk(fid);
+        return EACCDN;
+    }
+
+    /*
+     * A write-capable open is accepted, and the fid is still opened
+     * read-only on the wire, because this module has no Twrite path
+     * yet: opening for read/write and then only reading has to work,
+     * since plenty of software asks for mode 2 out of habit and would
+     * otherwise fail on C: where it succeeds everywhere else. Fwrite
+     * refuses cleanly with EACCDN until stage 2 adds the write path;
+     * that is the same error the caller would have got from the open,
+     * only later, and it costs nothing to the reader.
+     *
+     * The one rule kept exactly is stock's: a file the host will not
+     * let us write cannot be opened for writing at all, which mirrors
+     * ixopen()'s FA_RO test (fsopnclo.c:259-261).
+     */
+    if (mode != 0 && !writable)
     {
         p9_clunk(fid);
         return EACCDN;
@@ -393,8 +459,313 @@ static LONG hostfs_seek(LONG offset, WORD h, WORD mode)
     return newpos;
 }
 
+/*
+ * The GEMDOS attribute byte for a host object. This is the single
+ * definition of the rule: hostfs_fill_dta() writes it into the DTA for
+ * Fsfirst/Fsnext and hostfs_attrib() returns the same byte to Fattrib,
+ * so the two can never disagree about what a file looks like.
+ *
+ * Nothing sets FA_ARCHIVE: the host has no such bit, and claiming it
+ * would tell every backup tool that every file has changed.
+ */
+static UBYTE hostfs_attr(UWORD is_dir, UWORD writable)
+{
+    UBYTE attr = 0;
+
+    if (is_dir)
+        attr |= FA_SUBDIR;
+    if (!writable)
+        attr |= FA_RO;
+
+    return attr;
+}
+
+/*
+ * Current-directory handling.
+ *
+ * hostfs_path is built and compared textually, never handed to the
+ * host. That is the containment guarantee: ".." pops a component off
+ * this string and, at the root, is refused outright rather than clamped
+ * silently, so no walk is ever issued for a name above the shared
+ * folder. Clamping would be friendlier and wrong -- "\..\..\ETC" would
+ * then quietly mean "\ETC", and a caller probing for an escape would be
+ * told it succeeded.
+ *
+ * Static buffers, not locals: the BDOS's private stack is small (see
+ * the note on dirbuf above).
+ */
+static char path_work[HOSTFS_MAX_PATH];
+static char path_canon[HOSTFS_MAX_PATH];
+static char path_comp[HOSTFS_MAX_NAME];
+static char path_host[HOSTFS_MAX_NAME];
+static char path_clipped[13];
+
+/* Drop the last component. Zero when already at the root. */
+static WORD path_pop(char *p)
+{
+    char *last = NULL;
+    char *q;
+
+    if (!strcmp(p, "\\"))
+        return 0;               /* already the root: nothing above it */
+
+    for (q = p; *q; q++)
+        if (*q == '\\')
+            last = q;
+
+    if (!last)
+        return 0;
+
+    /*
+     * The leading separator is part of the root, not of the component
+     * being dropped, so popping "\SUB" has to leave "\" rather than the
+     * empty string -- truncating at last would make the next ".." see a
+     * path it does not recognise as the root and let it through.
+     */
+    if (last == p)
+        p[1] = '\0';
+    else
+        *last = '\0';
+
+    return 1;
+}
+
+/* Append one component. Zero when it would not fit. */
+static WORD path_push(char *p, const char *comp)
+{
+    WORD len = (WORD)strlen(p);
+
+    if (len + 1 + (WORD)strlen(comp) + 1 > HOSTFS_MAX_PATH)
+        return 0;
+
+    if (len == 0 || p[len - 1] != '\\')    /* the root already ends in one */
+        p[len++] = '\\';
+    strcpy(p + len, comp);
+
+    return 1;
+}
+
+/*
+ * Reduce PATH to a canonical drive-relative path in OUT, applying "."
+ * and ".." textually. Both separators are accepted, since a path can
+ * reach GEMDOS from either convention and rejecting '/' here would only
+ * move the failure somewhere less obvious.
+ */
+static LONG path_build(const char *path, char *out)
+{
+    const char *p = path;
+
+    if (p[0] && p[1] == ':')            /* drop a leading drive specifier */
+        p += 2;
+
+    if (*p == '\\' || *p == '/')
+        strcpy(out, "\\");              /* absolute: start at the root */
+    else
+        strcpy(out, hostfs_path);       /* relative: start where we are */
+
+    while (*p)
+    {
+        WORD n = 0;
+
+        while (*p == '\\' || *p == '/')
+            p++;
+
+        while (*p && *p != '\\' && *p != '/')
+        {
+            if (*p == '*' || *p == '?')     /* xchdir() refuses these too */
+                return EPTHNF;
+            if (n >= (WORD)sizeof(path_comp) - 1)
+                return EPTHNF;
+            path_comp[n++] = *p++;
+        }
+        path_comp[n] = '\0';
+
+        if (n == 0)                     /* doubled or trailing separator */
+            continue;
+        if (!strcmp(path_comp, "."))
+            continue;
+        if (!strcmp(path_comp, ".."))
+        {
+            if (!path_pop(out))
+                return EPTHNF;          /* refuse to climb out of the drive */
+            continue;
+        }
+        if (!path_push(out, path_comp))
+            return EPTHNF;
+    }
+
+    return E_OK;
+}
+
+/*
+ * Confirm WANT names a real directory, and write the same path spelled
+ * in the host's own capitalisation-then-clipped form into CANON.
+ *
+ * The walk is a component at a time because p9_walk() carries a single
+ * name element, and each component has to be resolved through a
+ * directory scan first: host names are longer than 8.3, so "LONGDIR"
+ * as typed by the caller is not the name the host knows.
+ */
+static LONG path_validate(const char *want, char *canon)
+{
+    const char *p = want;
+    LONG rc = E_OK;
+
+    strcpy(canon, "\\");
+
+    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, 0) != 0)
+        return EDRIVE;
+
+    while (*p && rc == E_OK)
+    {
+        ULONG size, mtime;
+        UWORD is_dir, writable;
+        WORD n = 0;
+
+        while (*p == '\\')
+            p++;
+        while (*p && *p != '\\' && n < (WORD)sizeof(path_comp) - 1)
+            path_comp[n++] = *p++;
+        path_comp[n] = '\0';
+
+        if (n == 0)
+            break;
+
+        if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_comp, path_host))
+            rc = EPTHNF;
+        else if (p9_walk(HOSTFS_WALK_FID, HOSTFS_WALK_FID, path_host) != 0)
+            rc = EPTHNF;
+        else if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime,
+                            &writable) != 0)
+            rc = EPTHNF;
+        else if (!is_dir)
+            rc = EPTHNF;        /* a file is not a path */
+        else
+        {
+            hostfs_host_to_atari(path_host, path_clipped);
+            if (!path_push(canon, path_clipped))
+                rc = EPTHNF;
+        }
+    }
+
+    p9_clunk(HOSTFS_WALK_FID);
+
+    return rc;
+}
+
+static LONG hostfs_setpath(const char *path)
+{
+    LONG rc;
+
+    rc = path_build(path, path_work);
+    if (rc < 0)
+        return rc;
+
+    rc = path_validate(path_work, path_canon);
+    if (rc < 0)
+        return rc;
+
+    strcpy(hostfs_path, path_canon);
+
+    return E_OK;
+}
+
+/*
+ * Dgetpath returns the path with neither the drive letter nor a
+ * trailing separator, so the root is the EMPTY string, not "\". That
+ * is what stock EmuTOS produces -- xgetdir() builds "\SUB\" and then
+ * overwrites the final separator with a NUL (fsdir.c:1246-1247) -- and
+ * software concatenates the result with "\NAME", so returning "\" here
+ * would hand it "\\NAME".
+ */
+static LONG hostfs_getpath(char *buf)
+{
+    if (!strcmp(hostfs_path, "\\"))
+        *buf = '\0';
+    else
+        strcpy(buf, hostfs_path);
+
+    return E_OK;
+}
+
+/*
+ * Dfree.
+ *
+ * 9P2000.L has a statfs, but the host folder's real free space is the
+ * wrong answer anyway: it is the free space of a filesystem that may be
+ * terabytes, and every field here is a 32-bit cluster count that GEM
+ * multiplies out into a LONG. So this reports a fixed 64MB, which is
+ * large enough that nothing refuses to write and small enough that
+ * free * clsiz * secsiz cannot overflow a signed 32-bit byte count in
+ * the caller.
+ *
+ * Reporting zero would be the honest-looking choice and is the one
+ * thing that must not happen: GEM checks free space before a copy and
+ * would refuse every write on the drive.
+ */
+#define HOSTFS_SECSIZ    512L
+#define HOSTFS_CLSIZ     2L         /* sectors per cluster: 1KB clusters */
+#define HOSTFS_CLUSTERS  65535L     /* ~64MB, free and total alike */
+
+static LONG hostfs_dfree(LONG *buf)
+{
+    buf[0] = HOSTFS_CLUSTERS;       /* free clusters */
+    buf[1] = HOSTFS_CLUSTERS;       /* total clusters */
+    buf[2] = HOSTFS_SECSIZ;         /* bytes per sector */
+    buf[3] = HOSTFS_CLSIZ;          /* sectors per cluster */
+
+    return E_OK;
+}
+
+static char attrib_host[HOSTFS_MAX_NAME];
+
+/*
+ * Fattrib, query only.
+ *
+ * Setting is refused with EACCDN rather than silently accepted: there
+ * is no Tsetattr path yet, and pretending the attribute changed would
+ * leave the caller believing something about the file that is not true.
+ *
+ * Folders return EFILNF, which is what TOS 1-3 and stock EmuTOS do --
+ * see the commentary above xchmod() (fsdir.c:390-401).
+ */
+static LONG hostfs_attrib(const char *path, WORD wrt)
+{
+    ULONG size, mtime;
+    UWORD is_dir, writable;
+    const char *name;
+
+    name = hostfs_rootname(path);
+    if (!name || !*name)
+        return EPTHNF;
+
+    if (!hostfs_resolve(name, attrib_host))
+        return EFILNF;
+
+    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, attrib_host) != 0)
+        return EFILNF;
+
+    if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime, &writable) != 0)
+    {
+        p9_clunk(HOSTFS_WALK_FID);
+        return EFILNF;
+    }
+    p9_clunk(HOSTFS_WALK_FID);
+
+    if (is_dir)
+        return EFILNF;
+
+    if (wrt)
+        return EACCDN;
+
+    return hostfs_attr(is_dir, writable);
+}
+
 void hostfs_init(void)
 {
+    strcpy(hostfs_path, "\\");
+
+
     if (!virtio_9p_present())
         return;
 
@@ -424,7 +795,13 @@ WORD hostfs_claims(WORD fn, short *pw)
     if (fn == 0x4F)                 /* Fsnext: continue whatever Fsfirst started */
         return hostfs_active;
 
-    if (fn == 0x3D)                 /* Fopen: the path says the drive */
+    /*
+     * Calls whose drive is named by a path: an explicit drive letter if
+     * there is one, otherwise the process's current drive.
+     */
+    if (fn == 0x3D                  /* Fopen   */
+     || fn == 0x3B                  /* Dsetpath */
+     || fn == 0x43)                 /* Fattrib */
     {
         const char *name = *(const char * const *)&pw[1];
         WORD drv = extract_drive_number(name);
@@ -434,6 +811,21 @@ WORD hostfs_claims(WORD fn, short *pw)
 
         return drv == HOSTFS_DRIVE;
     }
+
+    /*
+     * Calls whose drive is a numbered argument, 0 meaning the current
+     * one. Claiming only when that resolves to C: is what leaves every
+     * other drive to EmuTOS.
+     */
+    if (fn == 0x36                  /* Dfree:    drive in pw[3] */
+     || fn == 0x47)                 /* Dgetpath: drive in pw[3] */
+        return (pw[3] ? pw[3] - 1 : run->p_curdrv) == HOSTFS_DRIVE;
+
+    if (fn == 0x0E)                 /* Dsetdrv: only the switch TO C: */
+        return pw[1] == HOSTFS_DRIVE;
+
+    if (fn == 0x19)                 /* Dgetdrv: only while C: is current */
+        return run->p_curdrv == HOSTFS_DRIVE;
 
     /*
      * Handle-bearing calls. Claiming these is a memory-safety
@@ -527,25 +919,21 @@ static LONG hostfs_fill_dta(const char *host)
     UWORD is_dir, writable;
     char clipped[13];
 
-    if (p9_walk(P9_ROOT_FID, 1, host) != 0)
+    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, host) != 0)
         return EFILNF;
 
-    if (p9_getattr(1, &size, &is_dir, &mtime, &writable) != 0)
+    if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime, &writable) != 0)
     {
-        p9_clunk(1);
+        p9_clunk(HOSTFS_WALK_FID);
         return EFILNF;
     }
-    p9_clunk(1);
+    p9_clunk(HOSTFS_WALK_FID);
 
     hostfs_host_to_atari(host, clipped);
     strcpy(dta->d_fname, clipped);
 
     dta->d_length = (LONG)size;
-    dta->d_attrib = 0;
-    if (is_dir)
-        dta->d_attrib |= FA_SUBDIR;
-    if (!writable)
-        dta->d_attrib |= FA_RO;
+    dta->d_attrib = hostfs_attr(is_dir, writable);
 
     epoch_to_dos(mtime, &dta->d_date, &dta->d_time);
 
@@ -589,6 +977,33 @@ LONG hostfs_dispatch(WORD fn, short *pw)
 
     case 0x42:                  /* Fseek(offset, handle, mode) */
         return hostfs_seek(*(const LONG *)&pw[1], pw[3], pw[4]);
+
+    /*
+     * Dsetdrv and Dgetdrv are claimed only for C: and do exactly what
+     * xsetdrv()/xgetdrv() would have done (fsmain.c:420-441). They are
+     * handled here rather than left to stock code so that owning the
+     * drive is stated in one place instead of resting on the accident
+     * that stock code happens to do the right thing for a drive it
+     * knows nothing about.
+     */
+    case 0x0E:                  /* Dsetdrv(drive) */
+        run->p_curdrv = HOSTFS_DRIVE;
+        return Drvmap();
+
+    case 0x19:                  /* Dgetdrv() */
+        return HOSTFS_DRIVE;
+
+    case 0x3B:                  /* Dsetpath(path) */
+        return hostfs_setpath(*(const char * const *)&pw[1]);
+
+    case 0x47:                  /* Dgetpath(buf, drive) */
+        return hostfs_getpath(*(char * const *)&pw[1]);
+
+    case 0x36:                  /* Dfree(buf, drive) */
+        return hostfs_dfree(*(LONG * const *)&pw[1]);
+
+    case 0x43:                  /* Fattrib(path, wrt, attr) */
+        return hostfs_attrib(*(const char * const *)&pw[1], pw[3]);
     }
 
     if (fn == 0x4E)                     /* Fsfirst */

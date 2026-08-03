@@ -46,6 +46,24 @@
  */
 #define HOSTFS_FID_BASE    16
 
+/*
+ * Reserved scratch fids, below the per-slot range. Fid 1 is the cursor
+ * for one-off walks and directory reads; fid 2 is cloned from whatever
+ * fid 1 currently points at so a directory can be opened and read
+ * without destroying the cursor (an Rlopen fixes the fid to a stream,
+ * and the cursor still has to be walked deeper afterwards).
+ */
+#define HOSTFS_WALK_FID    1
+#define HOSTFS_SCAN_FID    2
+
+/*
+ * The current directory, as an Atari path relative to the drive root:
+ * "\" at the root, "\SUB\DEEP" below it. It is not a host path and
+ * never leaves the drive -- ".." is applied to this string and refuses
+ * to pop the root, which is what keeps a guest inside the shared folder.
+ */
+#define HOSTFS_MAX_PATH    128
+
 void hostfs_init(void);
 WORD hostfs_claims(WORD fn, short *pw);
 LONG hostfs_dispatch(WORD fn, short *pw);

@@ -225,6 +225,8 @@ static char selftest_dta[44];
 static UBYTE selftest_buf[64];
 static UBYTE selftest_big[SELFTEST_BIG];
 
+static void hostfs_pathtest(void);
+
 static void hostfs_selftest(void)
 {
     LONG fh, n, total;
@@ -338,6 +340,126 @@ static void hostfs_selftest(void)
 
         Fclose((WORD)fh);
     }
+
+    hostfs_pathtest();
+}
+
+/*
+ * Everything below runs AFTER the tests above, deliberately: opening a
+ * file rotates the slot table, so an extra open placed earlier would
+ * renumber the handles the read golden pins down.
+ */
+static const char * const selftest_escapes[] = {
+    "..",                       /* relative, from the root */
+    "\\..",                     /* absolute */
+    "\\SUB\\..\\..",            /* one level too many */
+    "C:/../..",                 /* host separators, with a drive letter */
+    "\\SUB/../..",              /* mixed separators */
+    "\\..\\..\\ETC",            /* climbing, then naming something outside */
+    "\\SUB\\..\\..\\SUB",       /* out and back: must not be reduced to \SUB */
+    "\\NOSUCH",                 /* not an escape, just absent */
+    "\\HELLO.TXT",              /* exists, but is not a directory */
+};
+
+static char selftest_path[128];
+static LONG selftest_dfree[4];
+
+static void hostfs_pathtest(void)
+{
+    LONG fh, n, saved_drive;
+    WORD i;
+
+    /*
+     * Nothing to say when there is no host folder: every call below
+     * would fall through to stock EmuTOS and report a missing drive C,
+     * which is correct but is two dozen alarming lines on the serial
+     * console of a machine that simply has no 9P device.
+     */
+    if (!(Drvmap() & (1L << HOSTFS_DRIVE)))
+        return;
+
+    /*
+     * Open for read/write and only read. The desktop itself opens with
+     * mode 0 everywhere (desk/deskdir.c:402, desk/desksupp.c:623,777,
+     * aes/gemrslib.c:839), but mode 2 is a common habit elsewhere and
+     * must not be the difference between a file opening and not.
+     */
+    fh = Fopen("C:\\HELLO.TXT", 2);
+    if (fh > 0)
+    {
+        KINFO(("hostfs: rwopen handle %ld\n", fh));
+
+        n = Fread((WORD)fh, 64L, selftest_buf);
+        if (n >= 0)
+        {
+            selftest_buf[n] = '\0';
+            KINFO(("hostfs: rwread %ld bytes: %s\n", n, selftest_buf));
+        }
+
+        /* Writing still has to fail, and fail without losing the handle. */
+        KINFO(("hostfs: rwwrite rc %ld\n",
+               Fwrite((WORD)fh, 5L, selftest_buf)));
+        KINFO(("hostfs: rwclose rc %ld\n", Fclose((WORD)fh)));
+    }
+    else
+    {
+        KINFO(("hostfs: rwopen failed %ld\n", fh));
+    }
+
+    /* Two statements, not one KINFO: argument order is unspecified. */
+    saved_drive = Dgetdrv();
+    n = Dsetdrv(HOSTFS_DRIVE);
+    KINFO(("hostfs: setdrv rc 0x%08lx curdrv %ld\n", n, Dgetdrv()));
+
+    Dgetpath(selftest_path, 0);
+    KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
+
+    /* Down, deeper, back up with a trailing separator, then all the way. */
+    KINFO(("hostfs: setpath \"SUB\" rc %ld\n", Dsetpath("SUB")));
+    Dgetpath(selftest_path, 0);
+    KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
+
+    KINFO(("hostfs: setpath \"\\SUB\\DEEP\" rc %ld\n", Dsetpath("C:\\SUB\\DEEP")));
+    Dgetpath(selftest_path, 0);
+    KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
+
+    KINFO(("hostfs: setpath \"..\\\" rc %ld\n", Dsetpath("..\\")));
+    Dgetpath(selftest_path, 0);
+    KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
+
+    KINFO(("hostfs: setpath \"\\SUB\\..\" rc %ld\n", Dsetpath("\\SUB\\..")));
+    Dgetpath(selftest_path, 0);
+    KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
+
+    /*
+     * Every one of these must be refused. The last line re-reads the
+     * path afterwards: a refusal that had already moved the current
+     * directory would be a containment failure even though it reported
+     * an error.
+     */
+    for (i = 0; i < (WORD)(sizeof(selftest_escapes)/sizeof(selftest_escapes[0])); i++)
+        KINFO(("hostfs: escape \"%s\" rc %ld\n", selftest_escapes[i],
+               Dsetpath(selftest_escapes[i])));
+
+    Dgetpath(selftest_path, 0);
+    KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
+
+    KINFO(("hostfs: fattrib HELLO.TXT rc 0x%08lx\n",
+           Fattrib("C:\\HELLO.TXT", 0, 0)));
+    KINFO(("hostfs: fattrib SUB rc %ld\n", Fattrib("C:\\SUB", 0, 0)));
+    KINFO(("hostfs: fattrib set rc %ld\n", Fattrib("C:\\HELLO.TXT", 1, 0)));
+
+    if (Dfree(selftest_dfree, HOSTFS_DRIVE + 1) == 0)
+        KINFO(("hostfs: dfree free %ld total %ld secsiz %ld clsiz %ld\n",
+               selftest_dfree[0], selftest_dfree[1],
+               selftest_dfree[2], selftest_dfree[3]));
+
+    /*
+     * Put the boot drive back. The switch to C: above is a test, not a
+     * policy: leaving it selected would silently change which drive the
+     * AES and the desktop start on.
+     */
+    Dsetdrv((WORD)saved_drive);
 }
 #endif /* MACHINE_QEMU_VIRT */
 
