@@ -11,6 +11,7 @@
 #define HOSTFS_H
 
 #include "portab.h"
+#include "sysconf.h"    /* LEN_ZPATH bounds HOSTFS_MAX_PATH -- see below */
 
 #define HOSTFS_DRIVE 2          /* C: */
 
@@ -83,8 +84,20 @@
  * "\" at the root, "\SUB\DEEP" below it. It is not a host path and
  * never leaves the drive -- ".." is applied to this string and refuses
  * to pop the root, which is what keeps a guest inside the shared folder.
+ *
+ * The size is dictated by the CALLER's buffer, not by this module.
+ * Dgetpath writes into whatever the application passed, and every
+ * EmuTOS caller sizes that by LEN_ZPATH (aes/gemshlib.c:82,87,
+ * desk/deskfpd.h:73, desk/deskapp.h:130); stock xgetdir() therefore
+ * bounds its output at LEN_ZPATH - 3 (fsdir.c). A path longer than that
+ * is refused with EPTHNF exactly as stock refuses a too-deep FAT path,
+ * which is the one behaviour a caller is already prepared for -- the
+ * alternative is writing past the end of a desktop structure.
+ *
+ * So this is LEN_ZPATH - 3 plus the terminator, and path_push() is
+ * where the refusal happens.
  */
-#define HOSTFS_MAX_PATH    128
+#define HOSTFS_MAX_PATH    (LEN_ZPATH - 3 + 1)      /* 112: 111 chars + NUL */
 
 void hostfs_init(void);
 WORD hostfs_claims(WORD fn, short *pw);
