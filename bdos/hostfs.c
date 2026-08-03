@@ -125,6 +125,7 @@ static LONG dir_snapshot(ULONG dirfid)
     ULONG diroff = 0;
     ULONG pages = 0;
     LONG dropped = 0;
+    LONG toolong = 0;
     LONG n;
 
     dir_count = 0;
@@ -161,6 +162,20 @@ static LONG dir_snapshot(ULONG dirfid)
             diroff = next;
             progress = 1;
 
+            /*
+             * An empty name is p9_dirent_next() saying the entry was
+             * stepped over but does not fit HOSTFS_MAX_NAME. It is
+             * counted and reported rather than passed on: a name this
+             * module cannot hold is a file the drive cannot show or
+             * open, and the one thing that must not happen is for it to
+             * disappear quietly.
+             */
+            if (!dirent_name[0])
+            {
+                toolong++;
+                continue;
+            }
+
             if (dir_count >= HOSTFS_MAX_ENTRIES)
             {
                 dropped++;
@@ -180,6 +195,10 @@ static LONG dir_snapshot(ULONG dirfid)
     if (dropped > 0)
         KINFO(("hostfs: directory has %ld entries, %ld not listed (limit %d)\n",
                (LONG)dir_count + dropped, dropped, (WORD)HOSTFS_MAX_ENTRIES));
+
+    if (toolong > 0)
+        KINFO(("hostfs: %ld name(s) longer than %d bytes not listed\n",
+               toolong, (WORD)HOSTFS_MAX_NAME - 1));
 
     dir_sort();
 

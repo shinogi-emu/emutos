@@ -265,8 +265,10 @@ LONG p9_attach(void)
                                       sizeof(name), &next);
                 if (off == 0)
                     break;
-                KINFO(("9p: dirent %s\n", name));
                 pos = off;
+                if (!name[0])
+                    continue;   /* stepped over: too long for name[] */
+                KINFO(("9p: dirent %s\n", name));
             }
             p9_clunk(1);
         }
@@ -509,6 +511,23 @@ LONG p9_read(ULONG fid, ULONG offset, UBYTE *buf, ULONG count)
  * in. Every offset used below is checked against that real length, so
  * a truncated or corrupt entry near the end of the data stops cleanly
  * instead of reading past it.
+ *
+ * "This entry is unusable" has to be distinguishable from "the buffer
+ * is finished", or one over-long name hides the whole rest of the
+ * directory: a return of 0 stops the caller's walk, the caller re-reads
+ * the same page, meets the same entry, makes no progress and gives up,
+ * so every file AFTER a 63-character name becomes both unlistable and
+ * unopenable with nothing said. So there are three outcomes:
+ *
+ *   0                 end of buffer, or an entry too corrupt to step
+ *                     over (its declared length runs past the data)
+ *   off + 24 + n      one entry consumed; name[] holds it
+ *   off + 24 + n      one entry consumed but NOT representable in the
+ *   with name empty   caller's buffer -- skip it and keep going
+ *
+ * The name is never truncated to make it fit. Truncating would change
+ * which host file a given Atari name maps to, and that mapping is the
+ * one thing the listing and the open path have to agree on.
  */
 ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
                      ULONG namemax, ULONG *next_off)
@@ -519,11 +538,18 @@ ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
         return 0;
 
     n = p9_ld16(buf + off + 22);
-    if (n == 0 || n >= namemax)
+    if (n == 0)
         return 0;
 
     if (off + 24 + n > buflen)
         return 0;
+
+    if (n >= namemax)
+    {
+        name[0] = '\0';             /* too long for the caller: skip it */
+        *next_off = p9_ld32(buf + off + 13);
+        return off + 24 + n;
+    }
 
     memcpy(name, buf + off + 24, n);
     name[n] = '\0';
