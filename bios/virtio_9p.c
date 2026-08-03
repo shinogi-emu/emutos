@@ -36,6 +36,23 @@ static UBYTE p9_tx[P9_MSIZE] __attribute__((aligned(4)));
 static UBYTE p9_rx[P9_MSIZE] __attribute__((aligned(4)));
 
 /*
+ * Msize is negotiated, not chosen: Tversion offers P9_MSIZE, but the
+ * server is free to return a smaller value in Rversion, and every
+ * message after that -- ours and its replies -- must respect what it
+ * actually agreed to, not what was offered. Nothing on the wire
+ * enforces this; it is on us. A reply larger than what was offered is
+ * nonsensical (buffers this size were never advertised) and is clamped
+ * down rather than trusted upward. A reply too small to hold the
+ * largest fixed message this code builds (currently the 100-byte
+ * Rgetattr) is treated as a failed attach rather than proceeding with
+ * a buffer too small to use -- hence the floor below. Default to
+ * P9_MSIZE until a real value is negotiated, so nothing can read this
+ * as zero before p9_attach() has run.
+ */
+#define P9_MSIZE_FLOOR 128
+static ULONG p9_msize = P9_MSIZE;
+
+/*
  * Bytes actually written into p9_rx by the last successful p9_rpc().
  * "min" only guarantees a floor for indexing fixed offsets; callers
  * that must trust a variable-length field carried in the reply (e.g.
@@ -177,8 +194,23 @@ LONG p9_attach(void)
     if (rc < 0)
         return rc;
 
+    {
+        ULONG server_msize = p9_ld32(p9_rx + 7);
+
+        if (server_msize > P9_MSIZE)
+            server_msize = P9_MSIZE;   /* never trust the server past what we offered */
+
+        if (server_msize < P9_MSIZE_FLOOR)
+        {
+            KINFO(("9p: msize %lu unusably small\n", server_msize));
+            return EDRIVE;
+        }
+
+        p9_msize = server_msize;
+    }
+
     KINFO(("9p: slot %d msize %ld version 9P2000.L\n",
-           p9_slot, p9_ld32(p9_rx + 7)));
+           p9_slot, p9_msize));
 
     /* Tattach: fid[4] afid[4] uname[s] aname[s] n_uname[4] */
     off = 7;
@@ -346,12 +378,22 @@ LONG p9_lopen(ULONG fid, ULONG flags)
  * actually came back) before clamping against the caller's buffer, so
  * a device that claims more data than it sent can never make this
  * function copy stale or out-of-bounds bytes out of p9_rx.
+ *
+ * The requested count is also capped to what the negotiated msize can
+ * actually deliver: the reply is count[4] data[count] starting at +7,
+ * so the whole Rreaddir must fit in p9_msize, leaving 11 bytes for its
+ * header. Asking for more than that would just get the server's own
+ * reply truncated or refused.
  */
 LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen)
 {
     ULONG off = 7;
-    ULONG count, avail;
+    ULONG count, avail, request;
     LONG rc;
+
+    request = buflen;
+    if (request > p9_msize - 11)
+        request = p9_msize - 11;
 
     p9_tx[4] = P9_TREADDIR;
     p9_st32(p9_tx + off, fid);
@@ -360,7 +402,7 @@ LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen)
     off += 4;
     p9_st32(p9_tx + off, 0);
     off += 4;
-    p9_st32(p9_tx + off, buflen);
+    p9_st32(p9_tx + off, request);
     off += 4;
 
     rc = p9_rpc(off, 1, P9_RREADDIR, 11);   /* count[4] at +7 */
