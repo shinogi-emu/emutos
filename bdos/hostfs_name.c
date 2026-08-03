@@ -15,6 +15,7 @@
  * (display) direction: extension is the text after the LAST dot.
  */
 
+#include "config.h"
 #include "hostfs_name.h"
 
 #ifdef MACHINE_QEMU_VIRT

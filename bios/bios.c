@@ -580,6 +580,17 @@ static void bios_init(void)
     KDEBUG(("after osinit_after_xmaddalt()\n"));
     boot_status |= DOS_AVAILABLE;   /* track progress */
 
+#ifdef MACHINE_QEMU_VIRT
+    {
+        static char selftest_dta[44];
+        LONG rc;
+
+        Fsetdta(selftest_dta);
+        for (rc = Fsfirst("C:\\*.*", 0); rc == 0; rc = Fsnext())
+            ;
+    }
+#endif
+
     /* Enable VBL processing */
     swv_vec = os_header.reseth; /* reset system on monitor change & jump to _main */
     vblsem = 1;

@@ -14,6 +14,9 @@
 
 #define HOSTFS_DRIVE 2          /* C: */
 
+#define HOSTFS_MAX_ENTRIES 128
+#define HOSTFS_MAX_NAME    64
+
 void hostfs_init(void);
 WORD hostfs_claims(WORD fn, short *pw);
 LONG hostfs_dispatch(WORD fn, short *pw);
