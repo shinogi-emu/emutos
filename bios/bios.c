@@ -228,6 +228,8 @@ static UBYTE selftest_big[SELFTEST_BIG];
 static void hostfs_pathtest(void);
 static void hostfs_subdirtest(void);
 static void hostfs_manytest(void);
+static void hostfs_longnametest(void);
+static void hostfs_dtatest(void);
 
 static void hostfs_selftest(void)
 {
@@ -413,6 +415,21 @@ static void hostfs_pathtest(void)
     n = Dsetdrv(HOSTFS_DRIVE);
     KINFO(("hostfs: setdrv rc 0x%08lx curdrv %ld\n", n, Dgetdrv()));
 
+    /*
+     * The character devices, opened while C: is the CURRENT drive.
+     *
+     * "CON:" carries no drive letter, so a hook that fell back to the
+     * current drive would claim it for the host folder -- and the hook
+     * sits above the special-name table, so the console would never be
+     * consulted and every one of these would answer EPTHNF. The handles
+     * are the fixed ones from that table (0xffff, 0xfffe, 0xfffd), not
+     * anything a filesystem allocates, which is why they are reported
+     * rather than read: getting a handle at all is the whole assertion.
+     */
+    KINFO(("hostfs: specname CON: rc 0x%08lx\n", Fopen("CON:", 0)));
+    KINFO(("hostfs: specname AUX: rc 0x%08lx\n", Fopen("AUX:", 0)));
+    KINFO(("hostfs: specname PRN: rc 0x%08lx\n", Fopen("PRN:", 0)));
+
     Dgetpath(selftest_path, 0);
     KINFO(("hostfs: getpath \"%s\"\n", selftest_path));
 
@@ -458,6 +475,8 @@ static void hostfs_pathtest(void)
 
     hostfs_subdirtest();
     hostfs_manytest();
+    hostfs_longnametest();
+    hostfs_dtatest();
 
     /*
      * Put the boot drive back. The switch to C: above is a test, not a
@@ -612,6 +631,115 @@ static void hostfs_manytest(void)
 
     KINFO(("hostfs: many count %d first %s last %s\n",
            count, selftest_first, selftest_last));
+}
+
+/*
+ * A guest name longer than 8.3, which must open the file that the
+ * listing shows clipped.
+ *
+ * TOS truncates a name to 8.3 on the way into GEMDOS, so an application
+ * asking for "VERYLONGNAME.TXT" is asking for "VERYLONG.TXT" and the
+ * reference implementation opens it. Clipping only the HOST side and
+ * comparing it against the raw guest string answers EFILNF instead --
+ * which looks like a missing file, on a name the drive has just listed.
+ *
+ * Both spellings are tried, because the fix must not cost the ordinary
+ * case: the already-clipped name has to keep working too.
+ *
+ * No handle number is reported. This runs last precisely so it cannot
+ * renumber the handles the other goldens pin down, and printing one
+ * here would re-create that coupling in the other direction.
+ */
+static void hostfs_longnametest(void)
+{
+    LONG fh, n;
+    WORD i;
+    static const char * const spellings[] = {
+        "C:\\VERYLONGNAME.TXT",     /* as the application would type it */
+        "C:\\VERYLONG.TXT",         /* as the listing displays it */
+    };
+
+    for (i = 0; i < (WORD)(sizeof(spellings)/sizeof(spellings[0])); i++)
+    {
+        fh = Fopen(spellings[i], 0);
+        if (fh <= 0)
+        {
+            KINFO(("hostfs: longname %s rc %ld\n", spellings[i], fh));
+            continue;
+        }
+
+        n = Fread((WORD)fh, 32L, selftest_buf);
+        if (n > 0)
+        {
+            selftest_buf[n - 1] = '\0';     /* drop the trailing newline */
+            KINFO(("hostfs: longname %s ok %ld bytes: %s\n",
+                   spellings[i], n, selftest_buf));
+        }
+        else
+        {
+            KINFO(("hostfs: longname %s read rc %ld\n", spellings[i], n));
+        }
+
+        Fclose((WORD)fh);
+    }
+}
+
+/*
+ * Where an Fsnext goes is decided by the DTA, not by a global.
+ *
+ * Both cases below produced wrong answers when the routing was "was the
+ * last Fsfirst anywhere in the system ours", and the second produced
+ * something worse than a wrong answer. A declined Fsnext lands in stock
+ * xsnext(), which reads dt_offset_drive out of the DTA; a DTA this
+ * module never stamped holds whatever the application left there, and
+ * ixsnext() masks it to five bits, checks only the top of the range and
+ * indexes drvtbl[] with no NULL test. There is no floppy on this
+ * machine, so a zeroed DTA means drvtbl[0], which is NULL -- a read of
+ * low memory followed by a real sector request, on a machine with no
+ * MMU to object.
+ *
+ * A second DTA is what makes the interleaving case reachable at all:
+ * with one DTA there is only one search and nothing to confuse.
+ */
+static char selftest_dta2[44];
+
+static void hostfs_dtatest(void)
+{
+    DTA *dta = (DTA *)selftest_dta;
+    LONG rc;
+
+    /*
+     * A failed Fsfirst must end the search, not leave the previous
+     * one running. Without this the sequence below answers with
+     * leftovers from the root listing -- entries of a directory the
+     * caller did not ask about, reported as if the missing one had
+     * them.
+     */
+    Fsetdta(selftest_dta);
+    if (Fsfirst("C:\\*.*", 0) != 0)
+        return;                         /* no drive: nothing to prove */
+
+    rc = Fsfirst("C:\\NOSUCH\\*.*", 0);
+    KINFO(("hostfs: dtaguard missing rc %ld\n", rc));
+    KINFO(("hostfs: dtaguard stale rc %ld\n", Fsnext()));
+
+    /*
+     * An unrelated search opened on ANOTHER DTA, in the middle of ours.
+     * The Fsnext that follows belongs to the first DTA and has to
+     * continue the C: listing -- here, with the drive's second entry,
+     * FIXED.TXT.
+     */
+    Fsetdta(selftest_dta);
+    if (Fsfirst("C:\\*.*", 0) != 0)
+        return;
+
+    Fsetdta(selftest_dta2);
+    KINFO(("hostfs: dtaguard other rc %ld\n", Fsfirst("A:\\*.*", 0)));
+
+    Fsetdta(selftest_dta);
+    rc = Fsnext();
+    KINFO(("hostfs: dtaguard resume rc %ld name %s\n",
+           rc, rc == 0 ? dta->d_fname : (char *)""));
 }
 #endif /* MACHINE_QEMU_VIRT */
 
