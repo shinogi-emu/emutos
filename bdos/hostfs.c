@@ -1142,6 +1142,22 @@ static LONG hostfs_fill_dta(const char *host)
     dta->d_length = is_dir ? 0L : (LONG)size;
     dta->d_attrib = hostfs_attr(is_dir, writable);
 
+    /*
+     * The timestamp is presented in UTC, and this is a KNOWN and
+     * deliberate divergence from the reference implementation, which
+     * passes st_mtime through localtime() and so reports the host's
+     * wall-clock time (see doc/hatari-gemdos-reference.md).
+     *
+     * Matching it would need the host's UTC offset, and there is no
+     * clean way to learn it here: 9P carries no timezone, the machine's
+     * RTC is UTC, and nothing in the guest holds a timezone database.
+     * The choices were therefore a rule that is simply wrong for part
+     * of the year, or a plainly documented constant offset of zero.
+     * Zero is chosen: it is consistent, it is what the same file will
+     * report on any host, and it can be corrected exactly once if a
+     * channel for the offset ever appears -- whereas a guessed offset
+     * silently produces a different answer on every machine.
+     */
     epoch_to_dos(mtime, &dta->d_date, &dta->d_time);
 
     KINFO(("hostfs: dta %s len %ld attr 0x%02x\n",
