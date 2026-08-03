@@ -323,7 +323,8 @@ endif
 #
 
 bdos_src = bdosmain.c console.c fsbuf.c fsdir.c fsdrive.c fsfat.c fsglob.c \
-           fshand.c fsio.c fsmain.c fsopnclo.c iumem.c kpgmld.c osmem.c \
+           fshand.c fsio.c fsmain.c fsopnclo.c hostfs.c hostfs_name.c \
+           iumem.c kpgmld.c osmem.c \
            proc.c rwa.S time.c umem.c
 
 #

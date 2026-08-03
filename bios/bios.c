@@ -23,6 +23,7 @@
 #include "biosext.h"
 #include "bios.h"
 #include "../bdos/bdosstub.h"
+#include "../bdos/hostfs.h"
 #include "../vdi/vdistub.h"
 #include "bdosbind.h"
 #include "gemerror.h"
@@ -503,6 +504,10 @@ static void bios_init(void)
     KDEBUG(("blkdev_init()\n"));
     blkdev_init();      /* floppy and harddisk initialisation */
     KDEBUG(("after blkdev_init()\n"));
+
+#ifdef MACHINE_QEMU_VIRT
+    hostfs_init();      /* register the host folder as drive C, if present */
+#endif
 
     /* initialize BIOS components */
 

@@ -32,6 +32,7 @@
 #include "string.h"
 #include "bdosstub.h"
 #include "tosvars.h"
+#include "hostfs.h"
 
 /*
 **  externals
@@ -443,6 +444,11 @@ restrt:
     fn = pw[0];
     if (fn > MAX_FNCALL)
         return EINVFN;
+
+#ifdef MACHINE_QEMU_VIRT
+    if (hostfs_claims(fn, pw))
+        return hostfs_dispatch(fn, pw);
+#endif
 
     KDEBUG(("BDOS (fn=0x%04x)\n",fn));
 
