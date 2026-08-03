@@ -47,9 +47,23 @@ static WORD hostfs_active;
  */
 static char hostfs_path[HOSTFS_MAX_PATH];
 
+/*
+ * The open Fsfirst/Fsnext scan. dir_names/dir_count/dir_pos are the
+ * snapshot and the cursor into it; dir_path is the canonical directory
+ * they were taken from, so Fsnext can re-reach it to fill the DTA; and
+ * dir_subdir says whether that directory is below the drive root, which
+ * is what decides the fate of the "." and ".." entries in hostfs_match().
+ *
+ * All of this belongs to the scan alone. Nothing on the Fopen path may
+ * write to it: the desktop's idiom is Fsfirst; { Fopen; Fread; Fclose }
+ * Fsnext, so a file call that disturbed the snapshot would truncate the
+ * very listing that produced the name it was asked to open.
+ */
 static char dir_names[HOSTFS_MAX_ENTRIES][HOSTFS_MAX_NAME];
 static WORD dir_count;
 static WORD dir_pos;
+static char dir_path[HOSTFS_MAX_PATH];
+static WORD dir_subdir;
 
 /* Insertion sort on raw host names, byte order. */
 static void dir_sort(void)
@@ -67,8 +81,12 @@ static void dir_sort(void)
 }
 
 /*
- * Snapshot the drive root. Dot entries are filtered by hostfs_match(),
- * not here.
+ * Snapshot the directory DIRFID is bound to. Dot entries are filtered
+ * by hostfs_match(), not here.
+ *
+ * The scan is done on a CLONE of dirfid rather than on dirfid itself:
+ * Tlopen fixes a fid to an open stream, and the caller still owns
+ * dirfid and has to clunk it afterwards.
  *
  * dirbuf and name are static, not locals: this runs on the BDOS's
  * dedicated internal stack (see rwa.S, "fstrt"), which is a couple of
@@ -80,7 +98,7 @@ static void dir_sort(void)
 static UBYTE dirbuf[1024];
 static char dirent_name[HOSTFS_MAX_NAME];
 
-static LONG dir_snapshot(void)
+static LONG dir_snapshot(ULONG dirfid)
 {
     ULONG pos, off, next = 0;
     LONG n;
@@ -88,15 +106,15 @@ static LONG dir_snapshot(void)
     dir_count = 0;
     dir_pos = 0;
 
-    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, 0) != 0)
+    if (p9_walk(dirfid, HOSTFS_SCAN_FID, 0) != 0)
         return EDRIVE;
-    if (p9_lopen(HOSTFS_WALK_FID, P9_O_RDONLY) != 0)
+    if (p9_lopen(HOSTFS_SCAN_FID, P9_O_RDONLY) != 0)
     {
-        p9_clunk(HOSTFS_WALK_FID);
+        p9_clunk(HOSTFS_SCAN_FID);
         return EDRIVE;
     }
 
-    n = p9_readdir(HOSTFS_WALK_FID, 0, dirbuf, sizeof(dirbuf));
+    n = p9_readdir(HOSTFS_SCAN_FID, 0, dirbuf, sizeof(dirbuf));
     for (pos = 0; n > 0 && pos < (ULONG)n && dir_count < HOSTFS_MAX_ENTRIES; )
     {
         off = p9_dirent_next(dirbuf, (ULONG)n, pos, dirent_name,
@@ -109,7 +127,7 @@ static LONG dir_snapshot(void)
         dir_count++;
     }
 
-    p9_clunk(HOSTFS_WALK_FID);
+    p9_clunk(HOSTFS_SCAN_FID);
     dir_sort();
 
     return 0;
@@ -235,52 +253,246 @@ static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
     return 0;
 }
 
-static WORD hostfs_resolve(const char *atari, char *out)
+/*
+ * Path resolution -- the ONE place where a path becomes a fid.
+ *
+ * Fopen, Fsfirst, Fattrib and Dsetpath all arrive here. A second
+ * resolver is exactly how the listing view and the open view drift
+ * apart: a directory that can be shown but whose files cannot be
+ * opened is what two of them look like from the desktop.
+ *
+ * There are two phases, and the order between them is the containment
+ * guarantee:
+ *
+ *   1. path_build() reduces the path TEXTUALLY, applying "." and ".."
+ *      to a string that never leaves this module. ".." at the root is
+ *      refused outright rather than clamped, so no walk is ever issued
+ *      for a name above the shared folder. Clamping would be friendlier
+ *      and wrong: "\..\..\ETC" would then quietly mean "\ETC", and a
+ *      caller probing for an escape would be told it succeeded.
+ *   2. path_walk() then walks the host, a component at a time. It runs
+ *      only after phase 1 has approved the whole path, so a refused
+ *      path costs no RPC at all.
+ *
+ * Static buffers, not locals: the BDOS's private stack is small (see
+ * the note on dirbuf above).
+ */
+static char path_work[HOSTFS_MAX_PATH];
+static char path_canon[HOSTFS_MAX_PATH];
+static char path_dir[HOSTFS_MAX_PATH];
+static char path_leaf[HOSTFS_MAX_NAME];
+static char path_comp[HOSTFS_MAX_NAME];
+static char path_host[HOSTFS_MAX_NAME];
+static char path_clipped[13];
+
+/* Drop the last component. Zero when already at the root. */
+static WORD path_pop(char *p)
 {
-    return hostfs_resolve_in(P9_ROOT_FID, atari, out);
+    char *last = NULL;
+    char *q;
+
+    if (!strcmp(p, "\\"))
+        return 0;               /* already the root: nothing above it */
+
+    for (q = p; *q; q++)
+        if (*q == '\\')
+            last = q;
+
+    if (!last)
+        return 0;
+
+    /*
+     * The leading separator is part of the root, not of the component
+     * being dropped, so popping "\SUB" has to leave "\" rather than the
+     * empty string -- truncating at last would make the next ".." see a
+     * path it does not recognise as the root and let it through.
+     */
+    if (last == p)
+        p[1] = '\0';
+    else
+        *last = '\0';
+
+    return 1;
+}
+
+/* Append one component. Zero when it would not fit. */
+static WORD path_push(char *p, const char *comp)
+{
+    WORD len = (WORD)strlen(p);
+
+    if (len + 1 + (WORD)strlen(comp) + 1 > HOSTFS_MAX_PATH)
+        return 0;
+
+    if (len == 0 || p[len - 1] != '\\')    /* the root already ends in one */
+        p[len++] = '\\';
+    strcpy(p + len, comp);
+
+    return 1;
 }
 
 /*
- * The file name within the drive root, or NULL if the path names
- * anything deeper.
- *
- * Only the root is reachable: hostfs_resolve() reads one directory, and
- * p9_walk() carries a single name element. Rejecting a deeper path is
- * not pedantry -- taking the last component and opening it in the root
- * instead would answer C:\SUB\FILE.TXT with the root's own FILE.TXT,
- * which is worse than failing, because the caller gets the wrong file
- * rather than an error. Subdirectory support is a separate change to
- * both the resolver and the walk.
- *
- * For the same reason a RELATIVE name is refused whenever Dsetpath has
- * moved the current directory off the root: the file the caller means
- * lives in that directory, and answering with the root's file of the
- * same name would again be the wrong file rather than an error.
- *
- * "." and ".." are refused outright. They are directories, so the
- * is_dir check downstream would catch them, but only by accident --
- * ".." names the host folder's PARENT, which is outside the drive, and
- * nothing outside the drive should ever reach a walk.
+ * Reduce PATH to a canonical drive-relative path in OUT, applying "."
+ * and ".." textually. Both separators are accepted, since a path can
+ * reach GEMDOS from either convention and rejecting '/' here would only
+ * move the failure somewhere less obvious.
  */
-static const char *hostfs_rootname(const char *path)
+static LONG path_build(const char *path, char *out)
 {
     const char *p = path;
 
-    if (p[0] && p[1] == ':')        /* drop a leading drive specifier */
+    if (p[0] && p[1] == ':')            /* drop a leading drive specifier */
         p += 2;
-    if (*p == '\\' || *p == '/')    /* and one root separator */
-        p++;
-    else if (strcmp(hostfs_path, "\\"))
-        return NULL;                /* relative, and we are not at the root */
 
-    for (path = p; *path; path++)
-        if (*path == '\\' || *path == '/' || *path == ':')
-            return NULL;
+    if (*p == '\\' || *p == '/')
+        strcpy(out, "\\");              /* absolute: start at the root */
+    else
+        strcpy(out, hostfs_path);       /* relative: start where we are */
 
-    if (!strcmp(p, ".") || !strcmp(p, ".."))
-        return NULL;
+    while (*p)
+    {
+        WORD n = 0;
 
-    return p;
+        while (*p == '\\' || *p == '/')
+            p++;
+
+        while (*p && *p != '\\' && *p != '/')
+        {
+            if (*p == '*' || *p == '?')     /* xchdir() refuses these too */
+                return EPTHNF;
+            if (n >= (WORD)sizeof(path_comp) - 1)
+                return EPTHNF;
+            path_comp[n++] = *p++;
+        }
+        path_comp[n] = '\0';
+
+        if (n == 0)                     /* doubled or trailing separator */
+            continue;
+        if (!strcmp(path_comp, "."))
+            continue;
+        if (!strcmp(path_comp, ".."))
+        {
+            if (!path_pop(out))
+                return EPTHNF;          /* refuse to climb out of the drive */
+            continue;
+        }
+        if (!path_push(out, path_comp))
+            return EPTHNF;
+    }
+
+    return E_OK;
+}
+
+/*
+ * Walk HOSTFS_WALK_FID to the directory named by the canonical path
+ * WANT, and write the same path spelled in the host's own
+ * capitalisation-then-clipped form into path_canon.
+ *
+ * On success the fid is left BOUND and the caller must clunk it. On
+ * failure it has already been clunked, so an error return never leaves
+ * a fid behind.
+ *
+ * The walk is a component at a time because p9_walk() carries a single
+ * name element, and each component has to be resolved through a
+ * directory scan first: host names are longer than 8.3, so "LONGDIR"
+ * as typed by the caller is not the name the host knows.
+ */
+static LONG path_walk(const char *want)
+{
+    const char *p = want;
+    LONG rc = E_OK;
+
+    strcpy(path_canon, "\\");
+
+    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, 0) != 0)
+        return EDRIVE;
+
+    while (*p && rc == E_OK)
+    {
+        ULONG size, mtime;
+        UWORD is_dir, writable;
+        WORD n = 0;
+
+        while (*p == '\\')
+            p++;
+        while (*p && *p != '\\' && n < (WORD)sizeof(path_comp) - 1)
+            path_comp[n++] = *p++;
+        path_comp[n] = '\0';
+
+        if (n == 0)
+            break;
+
+        if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_comp, path_host))
+            rc = EPTHNF;
+        else if (p9_walk(HOSTFS_WALK_FID, HOSTFS_WALK_FID, path_host) != 0)
+            rc = EPTHNF;
+        else if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime,
+                            &writable) != 0)
+            rc = EPTHNF;
+        else if (!is_dir)
+            rc = EPTHNF;        /* a file is not a path */
+        else
+        {
+            hostfs_host_to_atari(path_host, path_clipped);
+            if (!path_push(path_canon, path_clipped))
+                rc = EPTHNF;
+        }
+    }
+
+    if (rc != E_OK)
+        p9_clunk(HOSTFS_WALK_FID);
+
+    return rc;
+}
+
+/*
+ * Resolve PATH into the directory holding its final component, plus
+ * that component. HOSTFS_WALK_FID is left bound to the directory and
+ * the CALLER must clunk it; path_leaf holds the component and
+ * path_canon the directory's canonical spelling.
+ *
+ * WANT_FILE asks for the checks that make sense only when the final
+ * component names one object rather than a search pattern: it must be
+ * present, and it must not be "." or "..". Those two are directories,
+ * so a downstream is_dir test would catch them, but only by accident --
+ * ".." at the root names the host folder's PARENT, and nothing outside
+ * the drive should ever reach a walk.
+ *
+ * The component itself can contain no separator and no drive colon by
+ * construction, because the split is at the LAST one of those in the
+ * path: everything structural ends up in the directory part, which
+ * phase 1 has already reduced and approved.
+ */
+static LONG hostfs_locate(const char *path, WORD want_file)
+{
+    const char *base = path;
+    const char *p;
+    WORD n;
+    LONG rc;
+
+    for (p = path; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            base = p + 1;
+
+    if (strlen(base) >= sizeof(path_leaf))
+        return EPTHNF;
+    strcpy(path_leaf, base);
+
+    if (want_file && (!path_leaf[0]
+                   || !strcmp(path_leaf, ".") || !strcmp(path_leaf, "..")))
+        return EPTHNF;
+
+    /* Measured as a LONG: a pointer difference does not fit a WORD. */
+    if (base - path >= (LONG)sizeof(path_dir))
+        return EPTHNF;
+    n = (WORD)(base - path);
+    memcpy(path_dir, path, n);
+    path_dir[n] = '\0';
+
+    rc = path_build(path_dir, path_work);
+    if (rc < 0)
+        return rc;
+
+    return path_walk(path_work);
 }
 
 static char open_host[HOSTFS_MAX_NAME];
@@ -301,19 +513,20 @@ static LONG hostfs_open(const char *path, WORD mode)
 {
     ULONG fid, size, mtime;
     UWORD is_dir, writable;
-    const char *name;
     WORD slot = 0, i;
+    LONG rc;
 
     mode &= HOSTFS_FOPEN_BITS;      /* 0 = read, 1 = write, 2 = read/write */
 
-    name = hostfs_rootname(path);
-    if (!name || !*name)
-        return EPTHNF;
+    rc = hostfs_locate(path, 1);
+    if (rc < 0)
+        return rc;
 
     /*
-     * Claim the slot before touching the wire, so the no-free-slot case
-     * has no fid to release, and so the fid about to be walked is known
-     * unbound (slot free <=> fid unbound).
+     * Claim the slot before walking, so the fid about to be walked is
+     * known unbound (slot free <=> fid unbound). From here every early
+     * return has to release the directory fid hostfs_locate() left
+     * bound.
      */
     for (i = 0; i < HOSTFS_MAX_FILES; i++)
     {
@@ -322,10 +535,16 @@ static LONG hostfs_open(const char *path, WORD mode)
             break;
     }
     if (i == HOSTFS_MAX_FILES)
+    {
+        p9_clunk(HOSTFS_WALK_FID);
         return ENHNDL;
+    }
 
-    if (!hostfs_resolve(name, open_host))
+    if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_leaf, open_host))
+    {
+        p9_clunk(HOSTFS_WALK_FID);
         return EFILNF;
+    }
 
     fid = HOSTFS_FID_BASE + slot;
 
@@ -335,8 +554,12 @@ static LONG hostfs_open(const char *path, WORD mode)
      * failure must, or the fid stays bound with no slot pointing at it
      * and that slot is dead until reboot.
      */
-    if (p9_walk(P9_ROOT_FID, fid, open_host) != 0)
+    if (p9_walk(HOSTFS_WALK_FID, fid, open_host) != 0)
+    {
+        p9_clunk(HOSTFS_WALK_FID);
         return EFILNF;
+    }
+    p9_clunk(HOSTFS_WALK_FID);
 
     if (p9_getattr(fid, &size, &is_dir, &mtime, &writable) != 0)
     {
@@ -480,179 +703,6 @@ static UBYTE hostfs_attr(UWORD is_dir, UWORD writable)
     return attr;
 }
 
-/*
- * Current-directory handling.
- *
- * hostfs_path is built and compared textually, never handed to the
- * host. That is the containment guarantee: ".." pops a component off
- * this string and, at the root, is refused outright rather than clamped
- * silently, so no walk is ever issued for a name above the shared
- * folder. Clamping would be friendlier and wrong -- "\..\..\ETC" would
- * then quietly mean "\ETC", and a caller probing for an escape would be
- * told it succeeded.
- *
- * Static buffers, not locals: the BDOS's private stack is small (see
- * the note on dirbuf above).
- */
-static char path_work[HOSTFS_MAX_PATH];
-static char path_canon[HOSTFS_MAX_PATH];
-static char path_comp[HOSTFS_MAX_NAME];
-static char path_host[HOSTFS_MAX_NAME];
-static char path_clipped[13];
-
-/* Drop the last component. Zero when already at the root. */
-static WORD path_pop(char *p)
-{
-    char *last = NULL;
-    char *q;
-
-    if (!strcmp(p, "\\"))
-        return 0;               /* already the root: nothing above it */
-
-    for (q = p; *q; q++)
-        if (*q == '\\')
-            last = q;
-
-    if (!last)
-        return 0;
-
-    /*
-     * The leading separator is part of the root, not of the component
-     * being dropped, so popping "\SUB" has to leave "\" rather than the
-     * empty string -- truncating at last would make the next ".." see a
-     * path it does not recognise as the root and let it through.
-     */
-    if (last == p)
-        p[1] = '\0';
-    else
-        *last = '\0';
-
-    return 1;
-}
-
-/* Append one component. Zero when it would not fit. */
-static WORD path_push(char *p, const char *comp)
-{
-    WORD len = (WORD)strlen(p);
-
-    if (len + 1 + (WORD)strlen(comp) + 1 > HOSTFS_MAX_PATH)
-        return 0;
-
-    if (len == 0 || p[len - 1] != '\\')    /* the root already ends in one */
-        p[len++] = '\\';
-    strcpy(p + len, comp);
-
-    return 1;
-}
-
-/*
- * Reduce PATH to a canonical drive-relative path in OUT, applying "."
- * and ".." textually. Both separators are accepted, since a path can
- * reach GEMDOS from either convention and rejecting '/' here would only
- * move the failure somewhere less obvious.
- */
-static LONG path_build(const char *path, char *out)
-{
-    const char *p = path;
-
-    if (p[0] && p[1] == ':')            /* drop a leading drive specifier */
-        p += 2;
-
-    if (*p == '\\' || *p == '/')
-        strcpy(out, "\\");              /* absolute: start at the root */
-    else
-        strcpy(out, hostfs_path);       /* relative: start where we are */
-
-    while (*p)
-    {
-        WORD n = 0;
-
-        while (*p == '\\' || *p == '/')
-            p++;
-
-        while (*p && *p != '\\' && *p != '/')
-        {
-            if (*p == '*' || *p == '?')     /* xchdir() refuses these too */
-                return EPTHNF;
-            if (n >= (WORD)sizeof(path_comp) - 1)
-                return EPTHNF;
-            path_comp[n++] = *p++;
-        }
-        path_comp[n] = '\0';
-
-        if (n == 0)                     /* doubled or trailing separator */
-            continue;
-        if (!strcmp(path_comp, "."))
-            continue;
-        if (!strcmp(path_comp, ".."))
-        {
-            if (!path_pop(out))
-                return EPTHNF;          /* refuse to climb out of the drive */
-            continue;
-        }
-        if (!path_push(out, path_comp))
-            return EPTHNF;
-    }
-
-    return E_OK;
-}
-
-/*
- * Confirm WANT names a real directory, and write the same path spelled
- * in the host's own capitalisation-then-clipped form into CANON.
- *
- * The walk is a component at a time because p9_walk() carries a single
- * name element, and each component has to be resolved through a
- * directory scan first: host names are longer than 8.3, so "LONGDIR"
- * as typed by the caller is not the name the host knows.
- */
-static LONG path_validate(const char *want, char *canon)
-{
-    const char *p = want;
-    LONG rc = E_OK;
-
-    strcpy(canon, "\\");
-
-    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, 0) != 0)
-        return EDRIVE;
-
-    while (*p && rc == E_OK)
-    {
-        ULONG size, mtime;
-        UWORD is_dir, writable;
-        WORD n = 0;
-
-        while (*p == '\\')
-            p++;
-        while (*p && *p != '\\' && n < (WORD)sizeof(path_comp) - 1)
-            path_comp[n++] = *p++;
-        path_comp[n] = '\0';
-
-        if (n == 0)
-            break;
-
-        if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_comp, path_host))
-            rc = EPTHNF;
-        else if (p9_walk(HOSTFS_WALK_FID, HOSTFS_WALK_FID, path_host) != 0)
-            rc = EPTHNF;
-        else if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime,
-                            &writable) != 0)
-            rc = EPTHNF;
-        else if (!is_dir)
-            rc = EPTHNF;        /* a file is not a path */
-        else
-        {
-            hostfs_host_to_atari(path_host, path_clipped);
-            if (!path_push(canon, path_clipped))
-                rc = EPTHNF;
-        }
-    }
-
-    p9_clunk(HOSTFS_WALK_FID);
-
-    return rc;
-}
-
 static LONG hostfs_setpath(const char *path)
 {
     LONG rc;
@@ -661,9 +711,10 @@ static LONG hostfs_setpath(const char *path)
     if (rc < 0)
         return rc;
 
-    rc = path_validate(path_work, path_canon);
+    rc = path_walk(path_work);
     if (rc < 0)
         return rc;
+    p9_clunk(HOSTFS_WALK_FID);
 
     strcpy(hostfs_path, path_canon);
 
@@ -733,24 +784,31 @@ static LONG hostfs_attrib(const char *path, WORD wrt)
 {
     ULONG size, mtime;
     UWORD is_dir, writable;
-    const char *name;
+    LONG rc;
 
-    name = hostfs_rootname(path);
-    if (!name || !*name)
-        return EPTHNF;
+    rc = hostfs_locate(path, 1);
+    if (rc < 0)
+        return rc;
 
-    if (!hostfs_resolve(name, attrib_host))
+    if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_leaf, attrib_host))
+    {
+        p9_clunk(HOSTFS_WALK_FID);
         return EFILNF;
+    }
 
-    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, attrib_host) != 0)
-        return EFILNF;
-
-    if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime, &writable) != 0)
+    if (p9_walk(HOSTFS_WALK_FID, HOSTFS_ITEM_FID, attrib_host) != 0)
     {
         p9_clunk(HOSTFS_WALK_FID);
         return EFILNF;
     }
     p9_clunk(HOSTFS_WALK_FID);
+
+    if (p9_getattr(HOSTFS_ITEM_FID, &size, &is_dir, &mtime, &writable) != 0)
+    {
+        p9_clunk(HOSTFS_ITEM_FID);
+        return EFILNF;
+    }
+    p9_clunk(HOSTFS_ITEM_FID);
 
     if (is_dir)
         return EFILNF;
@@ -764,7 +822,7 @@ static LONG hostfs_attrib(const char *path, WORD wrt)
 void hostfs_init(void)
 {
     strcpy(hostfs_path, "\\");
-
+    strcpy(dir_path, "\\");
 
     if (!virtio_9p_present())
         return;
@@ -911,7 +969,16 @@ static WORD hostfs_match(const char *pat, const char *name, WORD subdir)
     return p[0] == '\0';
 }
 
-/* Fill the caller's DTA from one snapshot entry. */
+/*
+ * Fill the caller's DTA from one snapshot entry.
+ *
+ * The directory is re-walked for every entry rather than held open
+ * across the whole Fsfirst/Fsnext sequence. Holding a fid between BDOS
+ * calls would mean it had to survive every Fopen and Fclose the caller
+ * makes in between, and the desktop makes them constantly; re-walking
+ * costs a few messages per entry and cannot be disturbed. The snapshot
+ * itself -- dir_names, dir_pos, dir_pattern -- is not touched here.
+ */
 static LONG hostfs_fill_dta(const char *host)
 {
     DTA *dta = (DTA *)run->p_xdta;
@@ -919,20 +986,33 @@ static LONG hostfs_fill_dta(const char *host)
     UWORD is_dir, writable;
     char clipped[13];
 
-    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, host) != 0)
+    if (path_walk(dir_path) < 0)
         return EFILNF;
 
-    if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime, &writable) != 0)
+    if (p9_walk(HOSTFS_WALK_FID, HOSTFS_ITEM_FID, host) != 0)
     {
         p9_clunk(HOSTFS_WALK_FID);
         return EFILNF;
     }
     p9_clunk(HOSTFS_WALK_FID);
 
+    if (p9_getattr(HOSTFS_ITEM_FID, &size, &is_dir, &mtime, &writable) != 0)
+    {
+        p9_clunk(HOSTFS_ITEM_FID);
+        return EFILNF;
+    }
+    p9_clunk(HOSTFS_ITEM_FID);
+
     hostfs_host_to_atari(host, clipped);
     strcpy(dta->d_fname, clipped);
 
-    dta->d_length = (LONG)size;
+    /*
+     * A subdirectory reports length 0, as a FAT directory entry does:
+     * the host's own st_size for a directory is a filesystem-internal
+     * number that means nothing to GEM, and it changes when files are
+     * added to the folder.
+     */
+    dta->d_length = is_dir ? 0L : (LONG)size;
     dta->d_attrib = hostfs_attr(is_dir, writable);
 
     epoch_to_dos(mtime, &dta->d_date, &dta->d_time);
@@ -1009,20 +1089,42 @@ LONG hostfs_dispatch(WORD fn, short *pw)
     if (fn == 0x4E)                     /* Fsfirst */
     {
         const char *spec = *(const char **)&pw[1];
-        const char *base;
         LONG rc;
 
-        /* Keep only the final component as the match pattern. */
-        base = spec;
-        while (*spec)
-        {
-            if (*spec == '\\' || *spec == '/' || *spec == ':')
-                base = spec + 1;
-            spec++;
-        }
-        strcpy(dir_pattern, base);
+        /*
+         * The same resolver every other path-taking call uses: the
+         * leading components name the directory to scan, the final one
+         * is the match pattern. Routing Fsfirst through it is what
+         * makes a folder the desktop can open also a folder whose
+         * files it can open.
+         */
+        rc = hostfs_locate(spec, 0);
+        if (rc < 0)
+            return rc;
 
-        rc = dir_snapshot();
+        /*
+         * No 8.3 name is this long, so such a pattern can match
+         * nothing; saying so here is also what keeps the copy below
+         * inside dir_pattern.
+         */
+        if (strlen(path_leaf) >= sizeof(dir_pattern))
+        {
+            p9_clunk(HOSTFS_WALK_FID);
+            return ENMFIL;
+        }
+        strcpy(dir_pattern, path_leaf);
+
+        /*
+         * Remember which directory this scan covers, both so Fsnext can
+         * reach it again and so hostfs_match() knows whether to keep
+         * the "." and ".." entries: the drive root has no parent to
+         * offer, but a subdirectory does and GEM expects to see it.
+         */
+        strcpy(dir_path, path_canon);
+        dir_subdir = strcmp(dir_path, "\\") ? 1 : 0;
+
+        rc = dir_snapshot(HOSTFS_WALK_FID);
+        p9_clunk(HOSTFS_WALK_FID);
         if (rc < 0)
             return rc;
 
@@ -1037,7 +1139,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         LONG rc;
 
         dir_pos++;
-        if (!hostfs_match(dir_pattern, host, 0))
+        if (!hostfs_match(dir_pattern, host, dir_subdir))
             continue;
 
         rc = hostfs_fill_dta(host);

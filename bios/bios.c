@@ -226,6 +226,7 @@ static UBYTE selftest_buf[64];
 static UBYTE selftest_big[SELFTEST_BIG];
 
 static void hostfs_pathtest(void);
+static void hostfs_subdirtest(void);
 
 static void hostfs_selftest(void)
 {
@@ -454,12 +455,111 @@ static void hostfs_pathtest(void)
                selftest_dfree[0], selftest_dfree[1],
                selftest_dfree[2], selftest_dfree[3]));
 
+    hostfs_subdirtest();
+
     /*
      * Put the boot drive back. The switch to C: above is a test, not a
      * policy: leaving it selected would silently change which drive the
      * AES and the desktop start on.
      */
     Dsetdrv((WORD)saved_drive);
+}
+
+/*
+ * Subdirectories: the same calls again, one level down.
+ *
+ * This runs LAST, after everything above, for the same reason the path
+ * test does: opening a file rotates the slot table, so extra opens
+ * placed earlier would renumber the handles the read goldens pin down.
+ * It also runs while C: is still the current drive, so the relative
+ * cases below mean what they say.
+ */
+static void hostfs_subdirtest(void)
+{
+    DTA *dta = (DTA *)selftest_dta;
+    LONG fh, n, rc;
+
+    /*
+     * Nothing to say on a host folder without the fixture subdirectory:
+     * every line below would report a failure that is about the fixture
+     * rather than about the code, on the console of a run that is
+     * testing something else entirely.
+     */
+    if (Dsetpath("C:\\SUB") != 0)
+        return;
+    Dsetpath("C:\\");
+
+    /*
+     * List the subdirectory, opening a file inside it in the middle of
+     * the scan. The interleaving is the point: the snapshot, the cursor
+     * and the pattern are single globals, so an Fopen that reached them
+     * would truncate the very listing that produced the name it is
+     * being asked to open -- and Fsfirst; { Fopen; Fread; Fclose }
+     * Fsnext is the desktop's own idiom, not a contrived case.
+     *
+     * "." and ".." must appear here and must NOT appear in the drive
+     * root's listing: the root has no parent inside the drive to offer.
+     */
+    Fsetdta(selftest_dta);
+    for (rc = Fsfirst("C:\\SUB\\*.*", 0); rc == 0; rc = Fsnext())
+    {
+        fh = Fopen("C:\\SUB\\INNER.TXT", 0);
+        if (fh > 0)
+            Fclose((WORD)fh);
+        KINFO(("hostfs: sublist %s\n", dta->d_fname));
+    }
+
+    /* Open and read a file inside the subdirectory, by absolute path. */
+    fh = Fopen("C:\\SUB\\INNER.TXT", 0);
+    KINFO(("hostfs: subopen rc %ld\n", fh));
+    if (fh > 0)
+    {
+        n = Fread((WORD)fh, 32L, selftest_buf);
+        if (n > 0)
+        {
+            selftest_buf[n - 1] = '\0';     /* drop the trailing newline */
+            KINFO(("hostfs: subread %ld bytes: %s\n", n, selftest_buf));
+        }
+        Fclose((WORD)fh);
+    }
+
+    KINFO(("hostfs: subattrib rc 0x%08lx\n",
+           Fattrib("C:\\SUB\\INNER.TXT", 0, 0)));
+
+    /* The other file, by a RELATIVE name, from inside the directory. */
+    KINFO(("hostfs: subsetpath rc %ld\n", Dsetpath("C:\\SUB")));
+    fh = Fopen("DEEP.TXT", 0);
+    KINFO(("hostfs: subrelopen rc %ld\n", fh));
+    if (fh > 0)
+    {
+        n = Fread((WORD)fh, 32L, selftest_buf);
+        if (n > 0)
+        {
+            selftest_buf[n - 1] = '\0';
+            KINFO(("hostfs: subrelread %ld bytes: %s\n", n, selftest_buf));
+        }
+        Fclose((WORD)fh);
+    }
+
+    /* And a relative listing, which must scan the subdirectory. */
+    for (rc = Fsfirst("*.*", 0); rc == 0; rc = Fsnext())
+        KINFO(("hostfs: subrellist %s\n", dta->d_fname));
+
+    /*
+     * Containment on the file calls, not just on Dsetpath. Each of
+     * these names a file that really exists in the drive root, so a
+     * ".." that was clamped away instead of refused would find it and
+     * report success -- and the third would then list the whole root
+     * under the guise of listing a subdirectory.
+     */
+    KINFO(("hostfs: subescape open rc %ld\n",
+           Fopen("C:\\SUB\\..\\..\\HELLO.TXT", 0)));
+    KINFO(("hostfs: subescape attrib rc %ld\n",
+           Fattrib("..\\..\\HELLO.TXT", 0, 0)));
+    KINFO(("hostfs: subescape list rc %ld\n",
+           Fsfirst("C:\\SUB\\..\\..\\*.*", 0)));
+
+    Dsetpath("C:\\");
 }
 #endif /* MACHINE_QEMU_VIRT */
 

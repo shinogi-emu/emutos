@@ -51,10 +51,13 @@
  * for one-off walks and directory reads; fid 2 is cloned from whatever
  * fid 1 currently points at so a directory can be opened and read
  * without destroying the cursor (an Rlopen fixes the fid to a stream,
- * and the cursor still has to be walked deeper afterwards).
+ * and the cursor still has to be walked deeper afterwards). Fid 3 is
+ * the object named by the final path component, which has to be walked
+ * to from the cursor while the cursor itself stays where it is.
  */
 #define HOSTFS_WALK_FID    1
 #define HOSTFS_SCAN_FID    2
+#define HOSTFS_ITEM_FID    3
 
 /*
  * The current directory, as an Atari path relative to the drive root:
