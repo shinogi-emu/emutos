@@ -209,7 +209,15 @@ ELF = 0
 ifeq (1,$(ELF))
 # Standard ELF toolchain
 TOOLCHAIN_PREFIX = m68k-elf-
-TOOLCHAIN_CFLAGS = -fleading-underscore -Wa,--register-prefix-optional -fno-reorder-functions --param=min-pagesize=0 -DELF_TOOLCHAIN
+# --param=min-pagesize=0 silences a false -Warray-bounds on the absolute
+# low-memory addresses this code legitimately uses. The parameter only
+# exists from GCC 11 onwards, and an older compiler treats it as a hard
+# error rather than ignoring it, so probe for it rather than assume it.
+# The probe has to compile: -E alone does not reach cc1, which is where
+# the parameter is validated.
+MIN_PAGESIZE := $(shell $(TOOLCHAIN_PREFIX)gcc --param=min-pagesize=0 \
+    -c -x c /dev/null -o /dev/null > /dev/null 2>&1 && echo --param=min-pagesize=0)
+TOOLCHAIN_CFLAGS = -fleading-underscore -Wa,--register-prefix-optional -fno-reorder-functions $(MIN_PAGESIZE) -DELF_TOOLCHAIN
 else
 # MiNT toolchain
 TOOLCHAIN_PREFIX = m68k-atari-mint-
