@@ -33,6 +33,8 @@
 #include "../bdos/bdosstub.h"
 #include "amiga.h"
 #include "lisa.h"
+#include "qemuvirt.h"
+#include "epochtime.h"
 #include "disk.h"
 #include "acsi.h"
 
@@ -1157,6 +1159,14 @@ void clock_init(void)
         return amiga_clock_init();
     }
 #endif /* MACHINE_AMIGA */
+#ifdef MACHINE_QEMU_VIRT
+    else if (TRUE)
+    {
+        /* The goldfish RTC free-runs at real host time from the moment
+         * QEMU starts the machine; there is nothing to initialize. */
+        return;
+    }
+#endif /* MACHINE_QEMU_VIRT */
 #if CONF_WITH_NVRAM
     else if (has_nvram)
     {
@@ -1281,6 +1291,15 @@ LONG gettime(void)
         return lisa_getdt();
     }
 #endif /* MACHINE_LISA */
+#ifdef MACHINE_QEMU_VIRT
+    else if (TRUE)
+    {
+        UWORD dos_date, dos_time;
+
+        epoch_to_dos(qemuvirt_epoch_secs(), &dos_date, &dos_time);
+        return MAKE_ULONG(dos_date, dos_time);
+    }
+#endif /* MACHINE_QEMU_VIRT */
 #if CONF_WITH_NVRAM
     else if (has_nvram)
     {

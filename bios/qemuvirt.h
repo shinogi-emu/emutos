@@ -209,6 +209,9 @@ ULONG qemuvirt_altram_base(void);
 ULONG qemuvirt_altram_size(void);
 WORD qemuvirt_cputype(void);
 
+/* Host wall-clock time (UTC), from the goldfish RTC used for RTC #0. */
+ULONG qemuvirt_epoch_secs(void);
+
 #endif /* MACHINE_QEMU_VIRT */
 
 #endif /* QEMUVIRT_H */

@@ -457,4 +457,79 @@ WORD qemuvirt_cputype(void)
     return 40;
 }
 
+/*
+ * Divide a 64-bit value (hi:lo, big-endian pair of longwords) by
+ * 1,000,000,000, discarding the remainder.  Used to turn the RTC's
+ * nanosecond counter into seconds.
+ *
+ * There is no 64-bit integer type available (-mshort keeps this build
+ * free of anything wider than LONG/ULONG), and a naive hi*4 plus
+ * hi*(2^32 mod 1e9) correction would itself need a 32x32->64 multiply
+ * to get the correction term, which is exactly the width we do not
+ * have -- so this is plain shift-and-subtract binary long division
+ * instead, 64 bits of dividend, one bit at a time.
+ *
+ * It needs only a 32-bit remainder register, not a 64-bit one: the
+ * restoring-division invariant keeps the remainder below the divisor
+ * before each step, and the divisor (1e9) is under 2^31, so remainder
+ * shifted left one bit and or'd with the next dividend bit is always
+ * under 2^32 and never overflows a single ULONG.
+ *
+ * The quotient is returned in a single ULONG too. That is exact for
+ * any input this machine can actually produce: the largest quotient
+ * this function is ever asked for is a count of seconds, and seconds
+ * since the epoch do not exceed ULONG range until year 2106 -- the
+ * same ceiling ULONG-typed epoch seconds already have everywhere else
+ * in this codebase. Concretely, that means the first 32 bits taken
+ * from the dividend (the whole of "hi") always produce quotient bits
+ * of 0, so those iterations only need to fold hi's bits into the
+ * remainder; only the second 32 iterations, processing "lo", produce
+ * a quotient bit worth keeping.
+ */
+static ULONG div64_by_1e9(ULONG hi, ULONG lo)
+{
+    const ULONG divisor = 1000000000UL;
+    ULONG remainder = 0;
+    ULONG quotient = 0;
+    WORD bit;
+
+    for (bit = 31; bit >= 0; bit--)
+    {
+        remainder = (remainder << 1) | ((hi >> bit) & 1UL);
+        if (remainder >= divisor)
+            remainder -= divisor;
+    }
+
+    for (bit = 31; bit >= 0; bit--)
+    {
+        remainder = (remainder << 1) | ((lo >> bit) & 1UL);
+        quotient <<= 1;
+        if (remainder >= divisor)
+        {
+            remainder -= divisor;
+            quotient |= 1UL;
+        }
+    }
+
+    return quotient;
+}
+
+/*
+ * Host wall-clock time, in Unix epoch seconds (UTC).
+ *
+ * The goldfish RTC free-runs at real host time regardless of alarm
+ * state, so this is independent of the tick/VBL scheduling above --
+ * it just takes a fresh reading. TIME_LOW must be read first: it
+ * latches TIME_HIGH (see rtc_now()).
+ */
+ULONG qemuvirt_epoch_secs(void)
+{
+    ULONG lo, hi;
+
+    lo = GF_RTC_REG(QEMUVIRT_RTC_TICK, GF_RTC_TIME_LOW);
+    hi = GF_RTC_REG(QEMUVIRT_RTC_TICK, GF_RTC_TIME_HIGH);
+
+    return div64_by_1e9(hi, lo);
+}
+
 #endif /* MACHINE_QEMU_VIRT */
