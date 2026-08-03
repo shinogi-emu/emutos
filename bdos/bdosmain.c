@@ -110,6 +110,25 @@ static const SPECNAME specname_table[] =
 };
 #define SN_ENTRIES  ARRAY_SIZE(specname_table)
 
+/*
+ * The handle for a character-device special name, or 0 if NAME is not
+ * one. Extracted from osif() so that a caller which has to decide
+ * whether a name reaches a filesystem at all can ask the same table,
+ * instead of carrying a second copy of it that will eventually disagree
+ * with this one.
+ */
+LONG specname_handle(const char *name)
+{
+    const SPECNAME *entry;
+    int i;
+
+    for (i = 0, entry = specname_table; i < SN_ENTRIES; i++, entry++)
+        if (strcmp(name, entry->name) == 0)
+            return entry->handle;
+
+    return 0;
+}
+
 
 /*
  * FND - Function Descriptor
@@ -656,16 +675,8 @@ restrt:
     rc = 0;
     if ((fn == GEMDOS_FOPEN) || (fn == GEMDOS_FCREATE)) /* open, create */
     {
-        const SPECNAME *entry;
         p = *((char **) &pw[1]);
-        for (i = 0, entry = specname_table; i < SN_ENTRIES; i++, entry++)
-        {
-            if (strcmp(p,entry->name) == 0)
-            {
-                rc = entry->handle;
-                break;
-            }
-        }
+        rc = specname_handle(p);
     }
 
     if (!rc)

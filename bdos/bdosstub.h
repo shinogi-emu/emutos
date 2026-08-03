@@ -35,6 +35,13 @@ extern WORD *root[MAXQUICK];
  * and also by bios/kprint.c */
 extern PD *run;
 
+/* The handle for a character-device special name ("CON:", "AUX:",
+ * "PRN:"), or 0 when the name is not one of them. Fopen()/Fcreate()
+ * answer these from a table instead of from any filesystem, so a
+ * caller deciding whether a name reaches a filesystem at all has to
+ * consult the same table. */
+LONG specname_handle(const char *name);
+
 /* BDOS current date/time.
  * Declared here because also updated by XBIOS Settime() */
 extern UWORD current_date, current_time;
