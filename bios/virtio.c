@@ -15,6 +15,7 @@
 #include "virtio_gpu.h"
 #include "qemuvirt.h"
 #include "virtio_input.h"
+#include "virtio_9p.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -482,6 +483,8 @@ WORD virtio_probe(void)
                 virtio_selftest(slot);
             if (id == VIRTIO_ID_INPUT)
                 virtio_input_attach(slot);
+            if (id == VIRTIO_ID_9P)
+                virtio_9p_attach(slot);
             if (id == VIRTIO_ID_GPU)
             {
                 if (virtio_gpu_init(slot, QEMUVIRT_ARGB_FB,
