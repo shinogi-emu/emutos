@@ -75,3 +75,55 @@ void hostfs_host_to_atari(const char *host, char *out)
 
     out[n] = '\0';
 }
+
+/*
+ * The lookup direction. Note the differences from the display
+ * direction above: the extension starts at the FIRST dot, characters
+ * are neither substituted nor upcased, and nothing is exempt.
+ */
+void hostfs_atari_clip(const char *name, char *out)
+{
+    const char *p;
+    int base = 0, ext = 0, n = 0;
+
+    for (p = name; *p && *p != '.'; p++)    /* strchr: the FIRST dot */
+    {
+        if (base < 8)
+        {
+            out[n++] = *p;
+            base++;
+        }
+    }
+
+    if (*p == '.')
+    {
+        out[n++] = '.';
+        for (p++; *p && *p != '.' && ext < 3; p++, ext++)
+            out[n++] = *p;
+    }
+
+    out[n] = '\0';
+}
+
+/*
+ * Plain byte order, deliberately case sensitive.
+ *
+ * The reference implementation sorts with alphasort, which is strcoll,
+ * but never calls setlocale -- so the locale stays "C" and strcoll
+ * degenerates to strcmp. All A-Z therefore sort before all a-z. Its
+ * manual documents this as case-insensitive and is wrong; matching the
+ * manual here would reorder AUTO folder execution.
+ */
+int hostfs_name_compare(const char *a, const char *b)
+{
+    const unsigned char *x = (const unsigned char *)a;
+    const unsigned char *y = (const unsigned char *)b;
+
+    while (*x && *x == *y)
+    {
+        x++;
+        y++;
+    }
+
+    return (int)*x - (int)*y;
+}
