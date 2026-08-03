@@ -917,10 +917,23 @@ WORD hostfs_claims(WORD fn, short *pw)
         const char *name = *(const char * const *)&pw[1];
         WORD drv = extract_drive_number(name);
 
-        if (drv < 0)
-            drv = run->p_curdrv;
+        if (drv >= 0)
+            return drv == HOSTFS_DRIVE;
 
-        return drv == HOSTFS_DRIVE;
+        /*
+         * No drive letter, so the call would fall to the current drive
+         * -- but the character devices have no drive at all. "CON:",
+         * "AUX:" and "PRN:" are answered by osif()'s special-name table
+         * (bdosmain.c), and this hook sits ABOVE that lookup, so
+         * claiming them while C: happened to be current would take the
+         * console away from every program that opens it by name and
+         * hand back EPTHNF instead. The same table decides here, rather
+         * than a copy of it that could drift.
+         */
+        if (fn == 0x3D && specname_handle(name))
+            return 0;
+
+        return run->p_curdrv == HOSTFS_DRIVE;
     }
 
     /*
