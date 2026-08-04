@@ -58,6 +58,33 @@ LONG hostfs_link_close(ULONG handle);
 /* Returns the byte count actually read, chunking internally. */
 LONG hostfs_link_read(ULONG handle, ULONG offset, UBYTE *buf, ULONG count);
 
+/*
+ * Returns the byte count actually written, chunking internally.  A
+ * return smaller than COUNT is a short write and not an error: the
+ * caller reports it exactly as GEMDOS Fwrite does, which is how a full
+ * host filesystem reaches an application.
+ */
+LONG hostfs_link_write(ULONG handle, ULONG offset, const UBYTE *buf,
+                       ULONG count);
+
+/*
+ * Create or truncate, and open the result for writing.  ATTR is the
+ * GEMDOS attribute byte; only the read-only bit has a host meaning.
+ * Returns a host handle, like hostfs_link_open().
+ */
+LONG hostfs_link_create(const char *path, UWORD attr);
+
+LONG hostfs_link_delete(const char *path);
+
+/* Both paths are wire paths, and both must already exist as such. */
+LONG hostfs_link_rename(const char *from, const char *to);
+
+LONG hostfs_link_mkdir(const char *path);
+LONG hostfs_link_rmdir(const char *path);
+
+/* Only the read-only bit of ATTR reaches the host; see the helper. */
+LONG hostfs_link_setattr(const char *path, UWORD attr);
+
 LONG hostfs_link_opendir(const char *path);
 
 /*

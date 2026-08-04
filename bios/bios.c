@@ -232,6 +232,7 @@ static void hostfs_subdirtest(void);
 static void hostfs_manytest(void);
 static void hostfs_longnametest(void);
 static void hostfs_dtatest(void);
+static void hostfs_writetest(void);
 
 static void hostfs_selftest(void)
 {
@@ -412,9 +413,25 @@ static void hostfs_pathtest(void)
             KINFO(("hostfs: rwread %ld bytes: %s\n", n, selftest_buf));
         }
 
-        /* Writing still has to fail, and fail without losing the handle. */
-        KINFO(("hostfs: rwwrite rc %ld\n",
-               Fwrite((WORD)fh, 5L, selftest_buf)));
+        /*
+         * Write through the read/write handle -- and write back
+         * exactly the bytes just read, to the offset they came from.
+         *
+         * This runs against the goldens' own fixture folder, so the
+         * only write that belongs here is the one that cannot change a
+         * byte of it: the file is identical afterwards and every
+         * listing golden over it still holds. What is asserted is that
+         * a mode-2 handle now takes a write and reports the count,
+         * where it used to answer EACCDN.
+         *
+         * Whether the bytes REACHED the host is not a question the
+         * guest can answer -- everything it could read back comes
+         * through the same path that took the write. That claim is
+         * made by tools/check-hostfs-write.py, which asks the folder.
+         */
+        if (n > 0 && Fseek(0L, (WORD)fh, 0) == 0)
+            KINFO(("hostfs: rwwrite rc %ld\n",
+                   Fwrite((WORD)fh, n, selftest_buf)));
         KINFO(("hostfs: rwclose rc %ld\n", Fclose((WORD)fh)));
     }
     else
@@ -489,6 +506,7 @@ static void hostfs_pathtest(void)
     hostfs_manytest();
     hostfs_longnametest();
     hostfs_dtatest();
+    hostfs_writetest();
 
     /*
      * Put the boot drive back. The switch to C: above is a test, not a
@@ -752,6 +770,239 @@ static void hostfs_dtatest(void)
     rc = Fsnext();
     KINFO(("hostfs: dtaguard resume rc %ld name %s\n",
            rc, rc == 0 ? dta->d_fname : (char *)""));
+}
+
+/*
+ * The WRITE half of the drive.
+ *
+ * GATED ON C:\WTEST BEING THERE, and that is the whole point of the
+ * gate rather than a convenience. The thirteen goldens run against a
+ * fixture folder whose every file and every listing they assert; a
+ * self-test that created, renamed and deleted things in it would break
+ * half of them and would leave the folder different after each run.
+ * tools/check-hostfs-write.py builds a THROWAWAY folder that has a
+ * WTEST directory in it, and only there does any of this happen. On the
+ * goldens' folder, and on a person's own drive C, the first call below
+ * fails and the test says nothing at all.
+ *
+ * Every line it prints is what the GUEST was told. None of it is
+ * evidence that a byte reached the host: everything the guest could
+ * read back arrives through the same transport that took the write, so
+ * a transport that dropped, duplicated or truncated data could satisfy
+ * every check here. That claim belongs to the host side and is made by
+ * tools/check-hostfs-write.py, which hashes the folder itself. These
+ * lines are the other half of the story -- they say which calls the
+ * guest even made, so a missing file on the host can be told from a
+ * call the guest never issued.
+ *
+ * The names and the bodies are declared once on the host, in
+ * tools/make-fixtures.py, and repeated here in C. That the two agree is
+ * exactly what the host-side script measures.
+ */
+#define WTEST_BIG_SIZE  40960L
+
+static const char wtest_new_body[]   = "hostfs write test\n";
+static const char wtest_over_body[]  = "overwritten\n";
+static const char wtest_after_body[] = "written after the delete\n";
+static const char wtest_ren_body[]   = "rename me\n";
+static const char wtest_inner_body[] = "inside a folder the guest made\n";
+
+/* Create, write one string, close. Reports each step separately so a
+ * failure says which of the three it was. */
+static void wtest_put(const char *path, const char *what, const char *body)
+{
+    LONG fh = Fcreate(path, 0);
+
+    if (fh <= 0)
+    {
+        KINFO(("hostfs: wtest %s create rc %ld\n", what, fh));
+        return;
+    }
+
+    KINFO(("hostfs: wtest %s write rc %ld\n", what,
+           Fwrite((WORD)fh, (LONG)strlen(body), (char *)body)));
+    KINFO(("hostfs: wtest %s close rc %ld\n", what, Fclose((WORD)fh)));
+}
+
+static void hostfs_writetest(void)
+{
+    UWORD wtest_td[2];      /* Fdatime's two words: time, then date */
+    LONG fh, n, total, j;
+    ULONG hash;
+
+    /*
+     * Is this a folder that has asked to be written to? Dsetpath is the
+     * cheapest question that distinguishes a directory from a file and
+     * from nothing at all, and the current directory is put straight
+     * back so nothing below depends on where it left it.
+     */
+    if (Dsetpath("C:\\WTEST") != 0)
+        return;
+    Dsetpath("C:\\");
+
+    KINFO(("hostfs: wtest begin\n"));
+
+    /* Create, write, close -- the ordinary case. */
+    wtest_put("C:\\WTEST\\NEW.TXT", "new", wtest_new_body);
+
+    /*
+     * Overwrite something that was already on the host, and make it
+     * SHORTER. Fcreate truncates, so a host that opened the file
+     * without O_TRUNC would leave the tail of the old contents behind
+     * and the guest would never see it: the length it reads back is its
+     * own idea of the file, not the folder's.
+     */
+    wtest_put("C:\\WTEST\\OVER.TXT", "over", wtest_over_body);
+
+    /*
+     * A file far larger than one transport frame (4080 bytes of
+     * payload), written in buffers larger than one frame as well. Both
+     * loops have to be right: the one in this function, which moves the
+     * file position between calls, and the one in hostfs_link_write(),
+     * which cuts a single Fwrite into frames. A write that issued one
+     * frame per Fwrite and reported the whole count would produce a
+     * file 4080 bytes long and tell the guest it wrote 40960.
+     */
+    fh = Fcreate("C:\\WTEST\\BIGW.DAT", 0);
+    if (fh <= 0)
+    {
+        KINFO(("hostfs: wtest big create rc %ld\n", fh));
+    }
+    else
+    {
+        total = 0;
+        while (total < WTEST_BIG_SIZE)
+        {
+            LONG chunk = WTEST_BIG_SIZE - total;
+
+            if (chunk > (LONG)SELFTEST_BIG)
+                chunk = (LONG)SELFTEST_BIG;
+
+            for (j = 0; j < chunk; j++)
+                selftest_big[j] = (UBYTE)(((total + j) * 13 + 5) & 0xff);
+
+            n = Fwrite((WORD)fh, chunk, selftest_big);
+            if (n != chunk)
+            {
+                KINFO(("hostfs: wtest big short %ld of %ld\n", n, chunk));
+                break;
+            }
+            total += n;
+        }
+        KINFO(("hostfs: wtest big write %ld bytes\n", total));
+        KINFO(("hostfs: wtest big close rc %ld\n", Fclose((WORD)fh)));
+    }
+
+    /*
+     * Read it back and hash it. This proves the guest's own view is
+     * self-consistent and nothing more -- see the note at the top --
+     * but a hash that differs from the host's says something is wrong
+     * without needing the folder at all.
+     */
+    fh = Fopen("C:\\WTEST\\BIGW.DAT", 0);
+    if (fh > 0)
+    {
+        total = 0;
+        hash = 2166136261UL;
+
+        while ((n = Fread((WORD)fh, (LONG)SELFTEST_BIG, selftest_big)) > 0)
+        {
+            for (j = 0; j < n; j++)
+            {
+                hash ^= selftest_big[j];
+                hash *= 16777619UL;
+            }
+            total += n;
+        }
+
+        if (n == 0)
+            KINFO(("hostfs: wtest big reread %ld bytes fnv1a 0x%08lx\n",
+                   total, hash));
+
+        Fclose((WORD)fh);
+    }
+
+    /*
+     * Delete, and then write a DIFFERENT file.
+     *
+     * This exact sequence is what corrupted the folder under QEMU's
+     * vvfat driver: the delete was accepted, the following file's data
+     * arrived, and its LENGTH came out as the deleted file's, with the
+     * guest told the write had succeeded. It is repeated here as the
+     * one ordering most likely to expose the same class of bug, and
+     * AFTER.TXT is deliberately a different length from DEL.TXT.
+     */
+    KINFO(("hostfs: wtest delete rc %ld\n", Fdelete("C:\\WTEST\\DEL.TXT")));
+    wtest_put("C:\\WTEST\\AFTER.TXT", "afterdel", wtest_after_body);
+
+    /* Rename. The source is created here so the test is repeatable. */
+    wtest_put("C:\\WTEST\\REN1.TXT", "ren", wtest_ren_body);
+    KINFO(("hostfs: wtest rename rc %ld\n",
+           Frename("C:\\WTEST\\REN1.TXT", "C:\\WTEST\\REN2.TXT")));
+
+    /* A folder the guest makes, and a file written INSIDE it. */
+    KINFO(("hostfs: wtest mkdir rc %ld\n", Dcreate("C:\\WTEST\\NEWDIR")));
+    wtest_put("C:\\WTEST\\NEWDIR\\INSIDE.TXT", "inner", wtest_inner_body);
+
+    /* And a folder the guest makes and removes again. */
+    KINFO(("hostfs: wtest mktmp rc %ld\n", Dcreate("C:\\WTEST\\TMPDIR")));
+    KINFO(("hostfs: wtest rmdir rc %ld\n", Ddelete("C:\\WTEST\\TMPDIR")));
+
+    /*
+     * A handle opened for READING refuses a write, and KEEP.TXT is
+     * still exactly what it was afterwards -- which the host-side
+     * script checks, since this is the assertion the guest cannot make
+     * for itself.
+     */
+    fh = Fopen("C:\\WTEST\\KEEP.TXT", 0);
+    if (fh > 0)
+    {
+        KINFO(("hostfs: wtest ro write rc %ld\n",
+               Fwrite((WORD)fh, 4L, (char *)"junk")));
+
+        /*
+         * Fdatime, both halves, on a handle that is definitely ours.
+         * The query answers from the host's own timestamp; the set half
+         * is refused, because no request on this wire carries a time --
+         * see hostfs_datime() in bdos/hostfs.c. Refusing it is the
+         * honest answer and is asserted here so it cannot quietly
+         * become a silent success.
+         */
+        KINFO(("hostfs: wtest datime rc %ld\n",
+               Fdatime(wtest_td, (WORD)fh, 0)));
+        KINFO(("hostfs: wtest datime set rc %ld\n",
+               Fdatime(wtest_td, (WORD)fh, 1)));
+
+        Fclose((WORD)fh);
+    }
+
+    /* Fattrib's set half: mark it read-only, read that back, clear it. */
+    KINFO(("hostfs: wtest attr set rc %ld\n",
+           Fattrib("C:\\WTEST\\NEW.TXT", 1, 0x01)));
+    KINFO(("hostfs: wtest attr get rc %ld\n",
+           Fattrib("C:\\WTEST\\NEW.TXT", 0, 0)));
+    KINFO(("hostfs: wtest attr clear rc %ld\n",
+           Fattrib("C:\\WTEST\\NEW.TXT", 1, 0x00)));
+
+    /*
+     * Containment, asked of the calls that CREATE.
+     *
+     * The read side has its own escape list in hostfs_pathtest(); this
+     * is the same question put to the three calls that would leave
+     * something behind if the answer were ever wrong. Each names a
+     * place outside the shared folder and each must be refused before
+     * any request is built. A refusal reported HERE would prove little
+     * on its own, so tools/check-hostfs-write.py looks at the folder's
+     * parent directory afterwards as well.
+     */
+    KINFO(("hostfs: wtest escape create rc %ld\n",
+           Fcreate("C:\\WTEST\\..\\..\\ESCAPE.TXT", 0)));
+    KINFO(("hostfs: wtest escape mkdir rc %ld\n",
+           Dcreate("C:\\..\\ESCAPEDIR")));
+    KINFO(("hostfs: wtest escape delete rc %ld\n",
+           Fdelete("C:\\..\\..\\ESCAPE.TXT")));
+
+    KINFO(("hostfs: wtest end\n"));
 }
 
 #if CONF_WITH_VIRTIO_BLK

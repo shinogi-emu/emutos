@@ -291,14 +291,27 @@ static LONG dir_snapshot(const char *dirwire)
  *
  * size is cached at open time so Fseek can validate against the file
  * length and Fread can clamp to it without an RPC per call, matching
- * what ixread() does with the OFD's length on a real drive.
+ * what ixread() does with the OFD's length on a real drive. A write
+ * that lands past the old end updates it, exactly as ixwrite() updates
+ * the OFD's length, so a following Fseek from the end goes where the
+ * writer expects.
+ *
+ * wr records that the file was opened for writing, and is the ONLY
+ * thing Fwrite consults. The host's permission was checked once, at
+ * open time; asking again per write would let a file that became
+ * writable meanwhile be written through a handle that was refused one.
+ *
+ * mtime is likewise the value at open time, and is what Fdatime
+ * reports -- see hostfs_datime().
  */
 static struct
 {
     WORD  used;
+    WORD  wr;
     ULONG handle;
     ULONG pos;
     ULONG size;
+    ULONG mtime;
 } hostfs_files[HOSTFS_MAX_FILES];
 
 /*
@@ -712,30 +725,179 @@ static LONG hostfs_open(const char *path, WORD mode)
         return EACCDN;
 
     /*
-     * A write-capable open is accepted, and the file is still opened
-     * read-only on the wire, because this module has no write path yet:
-     * opening for read/write and then only reading has to work, since
-     * plenty of software asks for mode 2 out of habit and would
-     * otherwise fail on C: where it succeeds everywhere else. Fwrite
-     * refuses cleanly with EACCDN until the write path lands; that is
-     * the same error the caller would have got from the open, only
-     * later, and it costs nothing to the reader.
-     *
-     * The one rule kept exactly is stock's: a file the host will not
-     * let us write cannot be opened for writing at all, which mirrors
-     * ixopen()'s FA_RO test (fsopnclo.c:259-261).
+     * A file the host will not let us write cannot be opened for
+     * writing at all, which is stock's rule -- ixopen()'s FA_RO test
+     * (fsopnclo.c:259-261) -- and the reason it is kept exactly is that
+     * an application which got a handle and then failed every write
+     * would have no way of telling that from a full disk.
      */
     if (mode != 0 && !writable)
         return EACCDN;
 
-    handle = hostfs_link_open(open_wire, HOSTFS_LINK_O_RDONLY);
+    /*
+     * The mode goes to the host as it stands, rather than always
+     * opening read-only as this module did while it could not write.
+     * Mode 1 really does open write-only on the host, so a read through
+     * such a handle fails there -- which is what GEMDOS says it should
+     * do, and a private widening to read/write here would make C: the
+     * one drive on which a write-only handle can be read.
+     */
+    handle = hostfs_link_open(open_wire,
+                              (mode == 1) ? HOSTFS_LINK_O_WRONLY
+                            : (mode == 2) ? HOSTFS_LINK_O_RDWR
+                                          : HOSTFS_LINK_O_RDONLY);
     if (handle < 0)
         return EACCDN;
 
     hostfs_files[slot].used = 1;
+    hostfs_files[slot].wr = (mode != 0);
     hostfs_files[slot].handle = (ULONG)handle;
     hostfs_files[slot].pos = 0;
     hostfs_files[slot].size = size;
+    hostfs_files[slot].mtime = mtime;
+    hostfs_next_slot = (WORD)((slot + 1) % HOSTFS_MAX_FILES);
+
+    return HOSTFS_HANDLE_BASE + slot;
+}
+
+/*
+ * Fcreate.
+ *
+ * Create or truncate, and hand back a handle open for writing. The
+ * directory is resolved by hostfs_locate(), the same resolver every
+ * other path-taking call uses, so a path this module would refuse to
+ * open is one it also refuses to create in -- there is no second way
+ * out of the shared folder.
+ *
+ * The final component is the interesting part, because it is the one
+ * name here that does NOT already exist on the host:
+ *
+ *   - if something of that name is there, the file is truncated under
+ *     the name the HOST spells it with. Creating "VERYLONG.TXT" over
+ *     an existing "verylongname.txt" has to hit that file, not leave
+ *     it alone and make a second one beside it that shadows it in
+ *     every listing.
+ *   - if not, the name is clipped to 8.3 before it becomes a host
+ *     name. A guest cannot see more than that, so creating a file
+ *     under a name it could never open again is the one outcome that
+ *     must not be possible.
+ */
+static char create_wire[HOSTFS_LINK_MAX_PATH];
+static char create_host[HOSTFS_MAX_NAME];
+static char create_name[13];
+
+/*
+ * A final component this module is willing to CREATE on the host.
+ *
+ * Reading resolves a name against what is already there, so a strange
+ * one simply fails to match; creating writes it into the folder, and a
+ * wildcard or a separator that got that far would make a host name no
+ * guest could ever name again -- or, for a separator, a path outside
+ * the directory the caller's path named. Rejected here, before the
+ * name reaches the wire, so the check sits beside the other GEMDOS
+ * rules rather than in the transport.
+ */
+static WORD leaf_creatable(const char *name)
+{
+    const char *p;
+
+    if (!name[0])
+        return 0;
+
+    if (!strcmp(name, ".") || !strcmp(name, ".."))
+        return 0;
+
+    for (p = name; *p; p++)
+        if (*p == '*' || *p == '?' || *p == '\\' || *p == '/' || *p == ':')
+            return 0;
+
+    return 1;
+}
+
+static LONG hostfs_create(const char *path, WORD attr)
+{
+    ULONG size, mtime;
+    UWORD is_dir, writable;
+    WORD slot = 0, i;
+    LONG rc, handle;
+
+    /*
+     * stock xcreat() drops FA_SUBDIR before it does anything else
+     * (fsopnclo.c:85); a directory is made by Dcreate, not by asking
+     * Fcreate for one. A volume label has nowhere to live in a host
+     * folder at all, so it is refused rather than quietly made into an
+     * ordinary file of that name.
+     */
+    attr &= ~FA_SUBDIR;
+    if (attr & FA_VOL)
+        return EACCDN;
+
+    rc = hostfs_locate(path, 1);
+    if (rc < 0)
+        return rc;
+
+    if (!leaf_creatable(path_leaf))
+        return EACCDN;
+
+    /* The slot is picked first but not marked used until the file is
+     * open, exactly as in hostfs_open(). */
+    for (i = 0; i < HOSTFS_MAX_FILES; i++)
+    {
+        slot = (WORD)((hostfs_next_slot + i) % HOSTFS_MAX_FILES);
+        if (!hostfs_files[slot].used)
+            break;
+    }
+    if (i == HOSTFS_MAX_FILES)
+        return ENHNDL;
+
+    strcpy(create_wire, path_wire);
+
+    if (hostfs_resolve_in(path_wire, path_leaf, create_host))
+    {
+        if (!wire_push(create_wire, create_host))
+            return EPTHNF;
+
+        if (hostfs_link_stat(create_wire, &size, &is_dir, &mtime,
+                             &writable) < 0)
+            return EFILNF;
+
+        /*
+         * Truncating a directory is meaningless and truncating a
+         * read-only file is what the read-only bit exists to prevent;
+         * both are EACCDN, which is what stock ixcreat() answers for
+         * an existing entry it may not replace (fsopnclo.c).
+         */
+        if (is_dir || !writable)
+            return EACCDN;
+    }
+    else
+    {
+        hostfs_atari_clip(path_leaf, create_name);
+        if (!wire_push(create_wire, create_name))
+            return EPTHNF;
+    }
+
+    handle = hostfs_link_create(create_wire, (UWORD)attr);
+    if (handle < 0)
+        return handle;
+
+    /*
+     * The file is empty by construction -- CREATE truncates -- so the
+     * cached length is 0 and needs no round trip. The timestamp does
+     * need one: it is whatever the host's clock said, which this side
+     * has no way to compute, and Fdatime on the new handle must not
+     * report the epoch. A failure here is not worth losing the file
+     * over, so the handle stands and the timestamp is simply unknown.
+     */
+    mtime = 0;
+    hostfs_link_stat(create_wire, &size, &is_dir, &mtime, &writable);
+
+    hostfs_files[slot].used = 1;
+    hostfs_files[slot].wr = 1;
+    hostfs_files[slot].handle = (ULONG)handle;
+    hostfs_files[slot].pos = 0;
+    hostfs_files[slot].size = 0;
+    hostfs_files[slot].mtime = mtime;
     hostfs_next_slot = (WORD)((slot + 1) % HOSTFS_MAX_FILES);
 
     return HOSTFS_HANDLE_BASE + slot;
@@ -763,9 +925,11 @@ static LONG hostfs_close(WORD h)
     hostfs_link_close(hostfs_files[slot].handle);
 
     hostfs_files[slot].used = 0;
+    hostfs_files[slot].wr = 0;
     hostfs_files[slot].handle = 0;
     hostfs_files[slot].pos = 0;
     hostfs_files[slot].size = 0;
+    hostfs_files[slot].mtime = 0;
 
     return E_OK;
 }
@@ -793,6 +957,54 @@ static LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
         return n;               /* still open: the caller may retry or close */
 
     hostfs_files[slot].pos += (ULONG)n;
+
+    return n;
+}
+
+/*
+ * Fwrite.
+ *
+ * count is a ULONG and every intermediate is a LONG: `int` is 16 bits
+ * under -mshort, and a file copy hands GEMDOS whole buffers at a time,
+ * so a count kept in an int would wrap at 32767 and write a fraction of
+ * what was asked for while reporting a plausible number.
+ *
+ * The chunking into frames is hostfs_link_write()'s job, and a short
+ * return from it is passed straight on: GEMDOS Fwrite already means
+ * "this many bytes were written", and a caller that ignores the count
+ * ignores a full disk on every other drive too.
+ */
+static LONG hostfs_write(WORD h, ULONG count, const UBYTE *buf)
+{
+    WORD slot = h - HOSTFS_HANDLE_BASE;
+    LONG n;
+
+    if (!hostfs_in_range(h) || !hostfs_files[slot].used)
+        return EIHNDL;
+
+    /*
+     * A handle opened for reading refuses the write, and refuses it
+     * here rather than at the host: the host would answer EBADF, which
+     * the helper can only map to EACCDN by accident, and the rule that
+     * mode 0 means read-only is a GEMDOS rule that belongs beside the
+     * rest of them.
+     */
+    if (!hostfs_files[slot].wr)
+        return EACCDN;
+
+    if (count == 0)
+        return 0;
+
+    n = hostfs_link_write(hostfs_files[slot].handle, hostfs_files[slot].pos,
+                          buf, count);
+    if (n < 0)
+        return n;               /* still open: the caller may retry or close */
+
+    hostfs_files[slot].pos += (ULONG)n;
+
+    /* The file has grown if the write went past the old end. */
+    if (hostfs_files[slot].pos > hostfs_files[slot].size)
+        hostfs_files[slot].size = hostfs_files[slot].pos;
 
     return n;
 }
@@ -911,17 +1123,27 @@ static char attrib_host[HOSTFS_MAX_NAME];
 static char attrib_wire[HOSTFS_LINK_MAX_PATH];
 
 /*
- * Fattrib, query only.
+ * Fattrib, query and set.
  *
- * Setting is refused with EACCDN rather than silently accepted: the
- * SETATTR path is not wired up yet, and pretending the attribute
- * changed would leave the caller believing something about the file
- * that is not true.
+ * Only the read-only bit survives the trip: a host folder has nowhere
+ * to keep hidden, system or archive, and the helper drops them for the
+ * same reason (see its SETATTR). They are ACCEPTED rather than refused,
+ * because stock EmuTOS accepts them on a FAT drive and a program that
+ * tidies up after itself by clearing them would otherwise fail here
+ * alone -- but the query afterwards will not show them, and that
+ * divergence is documented rather than papered over.
+ *
+ * The one thing refused is an attribute stock refuses: xchmod() answers
+ * EACCDN for any bit outside FA_NORM on an ordinary file
+ * (fsdir.c:417-420), which is how "make this a directory" or "make this
+ * a volume label" is turned away.
+ *
+ * Both halves return the attribute byte, as xchmod() does.
  *
  * Folders return EFILNF, which is what TOS 1-3 and stock EmuTOS do --
  * see the commentary above xchmod() (fsdir.c:390-401).
  */
-static LONG hostfs_attrib(const char *path, WORD wrt)
+static LONG hostfs_attrib(const char *path, WORD wrt, UBYTE mod)
 {
     ULONG size, mtime;
     UWORD is_dir, writable;
@@ -944,10 +1166,233 @@ static LONG hostfs_attrib(const char *path, WORD wrt)
     if (is_dir)
         return EFILNF;
 
+    if (!wrt)
+        return hostfs_attr(is_dir, writable);
+
+    if (mod & ~FA_NORM)
+        return EACCDN;
+
+    rc = hostfs_link_setattr(attrib_wire, (UWORD)mod);
+    if (rc < 0)
+        return rc;
+
+    return mod;
+}
+
+/*
+ * Fdelete.
+ *
+ * The read-only bit is honoured here rather than left to the host,
+ * because a POSIX unlink() does not consult the file's own mode at all
+ * -- it consults the DIRECTORY's -- so a read-only file in a writable
+ * folder would vanish on C: while stock ixunlink() answers EACCDN for
+ * it (fsopnclo.c:607-608).
+ *
+ * A directory is EACCDN too: stock scans with FA_NORM, which excludes
+ * FA_SUBDIR, so a folder is simply not found by Fdelete. EFILNF would
+ * be the letter of that and is the wrong thing to tell a caller who
+ * can plainly see the name in a listing; Ddelete is what removes one.
+ */
+static char op_host[HOSTFS_MAX_NAME];
+static char op_wire[HOSTFS_LINK_MAX_PATH];
+static char op_from[HOSTFS_LINK_MAX_PATH];
+
+static LONG hostfs_delete(const char *path)
+{
+    ULONG size, mtime;
+    UWORD is_dir, writable;
+    LONG rc;
+
+    rc = hostfs_locate(path, 1);
+    if (rc < 0)
+        return rc;
+
+    if (!hostfs_resolve_in(path_wire, path_leaf, op_host))
+        return EFILNF;
+
+    strcpy(op_wire, path_wire);
+    if (!wire_push(op_wire, op_host))
+        return EPTHNF;
+
+    if (hostfs_link_stat(op_wire, &size, &is_dir, &mtime, &writable) < 0)
+        return EFILNF;
+
+    if (is_dir || !writable)
+        return EACCDN;
+
+    return hostfs_link_delete(op_wire);
+}
+
+/*
+ * Frename.
+ *
+ * Both paths go through hostfs_locate(), one after the other, and the
+ * source's wire spelling is COPIED out before the second call: the
+ * resolver's outputs are single global buffers, so a source path still
+ * sitting in path_wire when the destination is resolved would be
+ * overwritten by it and the rename would move a file onto itself.
+ *
+ * The rules are stock xrename()'s (fsdir.c:895-944): a destination that
+ * already exists is EACCDN, a missing source is EFILNF, and a
+ * read-only source is EACCDN. The last one is again not something the
+ * host would enforce on its own -- see hostfs_delete().
+ */
+static LONG hostfs_rename(const char *from, const char *to)
+{
+    ULONG size, mtime;
+    UWORD is_dir, writable;
+    LONG rc;
+
+    rc = hostfs_locate(from, 1);
+    if (rc < 0)
+        return rc;
+
+    if (!hostfs_resolve_in(path_wire, path_leaf, op_host))
+        return EFILNF;
+
+    strcpy(op_from, path_wire);
+    if (!wire_push(op_from, op_host))
+        return EPTHNF;
+
+    if (hostfs_link_stat(op_from, &size, &is_dir, &mtime, &writable) < 0)
+        return EFILNF;
+
+    if (!writable)
+        return EACCDN;
+
+    rc = hostfs_locate(to, 1);
+    if (rc < 0)
+        return rc;
+
+    if (!leaf_creatable(path_leaf))
+        return EACCDN;
+
+    if (hostfs_resolve_in(path_wire, path_leaf, op_host))
+        return EACCDN;          /* the destination is already taken */
+
+    hostfs_atari_clip(path_leaf, create_name);
+
+    strcpy(op_wire, path_wire);
+    if (!wire_push(op_wire, create_name))
+        return EPTHNF;
+
+    return hostfs_link_rename(op_from, op_wire);
+}
+
+/*
+ * Dcreate.
+ *
+ * hostfs_locate(path, 1) refuses an empty final component and refuses
+ * "." and "..", so the drive root can never be the thing being
+ * created, and nothing above the shared folder is ever named.
+ */
+static LONG hostfs_dcreate(const char *path)
+{
+    LONG rc;
+
+    rc = hostfs_locate(path, 1);
+    if (rc < 0)
+        return rc;
+
+    if (!leaf_creatable(path_leaf))
+        return EACCDN;
+
+    if (hostfs_resolve_in(path_wire, path_leaf, op_host))
+        return EACCDN;          /* a file or folder of that name is there */
+
+    hostfs_atari_clip(path_leaf, create_name);
+
+    strcpy(op_wire, path_wire);
+    if (!wire_push(op_wire, create_name))
+        return EPTHNF;
+
+    return hostfs_link_mkdir(op_wire);
+}
+
+/*
+ * Ddelete.
+ *
+ * The current directory is refused, which is stock's rule by a
+ * different route: on a FAT drive the folder is held open through its
+ * DND and cannot be removed while it is somebody's current path. Here
+ * there is nothing holding it, so the comparison is made explicitly --
+ * removing the folder the drive is standing in would leave every
+ * later path resolution on C: answering EPTHNF with no way back.
+ *
+ * A non-empty folder is refused by the host, whose rmdir() fails with
+ * ENOTEMPTY; the helper maps that to EACCDN, which is what stock
+ * xrmdir() returns for the same case.
+ */
+static LONG hostfs_ddelete(const char *path)
+{
+    ULONG size, mtime;
+    UWORD is_dir, writable;
+    LONG rc;
+
+    rc = hostfs_locate(path, 1);
+    if (rc < 0)
+        return rc;
+
+    if (!hostfs_resolve_in(path_wire, path_leaf, op_host))
+        return EPTHNF;
+
+    strcpy(op_wire, path_wire);
+    if (!wire_push(op_wire, op_host))
+        return EPTHNF;
+
+    if (hostfs_link_stat(op_wire, &size, &is_dir, &mtime, &writable) < 0)
+        return EPTHNF;
+
+    if (!is_dir)
+        return EPTHNF;          /* a file is not a path */
+
+    /*
+     * path_canon holds the directory the path was resolved in, so the
+     * folder being removed is that plus its own clipped name. Comparing
+     * canonical Atari spellings is what makes "\SUB" and "sub" the same
+     * answer, whatever the caller typed.
+     */
+    hostfs_host_to_atari(op_host, create_name);
+    if (path_push(path_canon, create_name)
+     && !strcmp(path_canon, hostfs_path))
+        return EACCDN;
+
+    return hostfs_link_rmdir(op_wire);
+}
+
+/*
+ * Fdatime.
+ *
+ * The query half answers from the timestamp cached when the handle was
+ * opened, in UTC, for the same reasons the DTA's timestamp is UTC --
+ * see hostfs_fill_dta().
+ *
+ * THE SET HALF IS REFUSED, and this is the one GEMDOS call on the
+ * drive that the host helper cannot serve: the wire has no field for a
+ * timestamp anywhere. SETATTR carries an attribute byte and nothing
+ * else, so there is no request that could carry the new time, and
+ * inventing one means a protocol version bump on both sides. EACCDN
+ * says so honestly; accepting it and doing nothing would leave a caller
+ * believing it had stamped a file it had not, and the next Fsfirst
+ * would quietly disagree with it.
+ */
+static LONG hostfs_datime(DOSTIME *buf, WORD h, WORD wrt)
+{
+    WORD slot = h - HOSTFS_HANDLE_BASE;
+    UWORD date, time;
+
+    if (!hostfs_in_range(h) || !hostfs_files[slot].used)
+        return EIHNDL;
+
     if (wrt)
         return EACCDN;
 
-    return hostfs_attr(is_dir, writable);
+    epoch_to_dos(hostfs_files[slot].mtime, &date, &time);
+
+    buf->date = date;
+    buf->time = time;
+
+    return E_OK;
 }
 
 void hostfs_init(void)
@@ -991,9 +1436,13 @@ WORD hostfs_claims(WORD fn, short *pw)
      * Calls whose drive is named by a path: an explicit drive letter if
      * there is one, otherwise the process's current drive.
      */
-    if (fn == 0x3D                  /* Fopen   */
+    if (fn == 0x3D                  /* Fopen    */
+     || fn == 0x3C                  /* Fcreate  */
+     || fn == 0x41                  /* Fdelete  */
+     || fn == 0x39                  /* Dcreate  */
+     || fn == 0x3A                  /* Ddelete  */
      || fn == 0x3B                  /* Dsetpath */
-     || fn == 0x43)                 /* Fattrib */
+     || fn == 0x43)                 /* Fattrib  */
     {
         const char *name = *(const char * const *)&pw[1];
         WORD drv = extract_drive_number(name);
@@ -1010,11 +1459,39 @@ WORD hostfs_claims(WORD fn, short *pw)
          * console away from every program that opens it by name and
          * hand back EPTHNF instead. The same table decides here, rather
          * than a copy of it that could drift.
+         *
+         * Fcreate is tested as well as Fopen because osif() looks the
+         * name up for both (bdosmain.c:676-680): Fcreate("CON:") is a
+         * console handle there too, and claiming it here would make a
+         * program that opens the console for output get EPTHNF from a
+         * host folder it never named.
          */
-        if (fn == 0x3D && specname_handle(name))
+        if ((fn == 0x3D || fn == 0x3C) && specname_handle(name))
             return 0;
 
         return run->p_curdrv == HOSTFS_DRIVE;
+    }
+
+    /*
+     * Frename names two paths (pw[1] is the unused word stock ignores),
+     * and either of them may be ours. Claiming when EITHER is on C: is
+     * what keeps a cross-drive rename from being half-executed: the
+     * dispatch below answers EPTHNF for it, which is the error stock
+     * produces for a rename that crosses a device.
+     */
+    if (fn == 0x56)
+    {
+        const char *from = *(const char * const *)&pw[2];
+        const char *to = *(const char * const *)&pw[4];
+        WORD dfrom = extract_drive_number(from);
+        WORD dto = extract_drive_number(to);
+
+        if (dfrom < 0)
+            dfrom = run->p_curdrv;
+        if (dto < 0)
+            dto = run->p_curdrv;
+
+        return dfrom == HOSTFS_DRIVE || dto == HOSTFS_DRIVE;
     }
 
     /*
@@ -1045,13 +1522,22 @@ WORD hostfs_claims(WORD fn, short *pw)
      * claimed too, and answered with EIHNDL here, which is the same
      * error stock EmuTOS would have produced had it been able to look.
      *
-     * Fwrite is claimed for exactly that reason although this module
-     * cannot write: declining it would be the corrupting case.
+     * Fdatime is claimed for a different reason, and the difference is
+     * worth spelling out so the two are not confused. Declining it
+     * would be SAFE: stock xgsdtof() reaches the sft through getofd(),
+     * which does bound the handle (fsmain.c:478) and answers NULL. But
+     * that answer is EIHNDL -- for a file that is genuinely open -- so
+     * declining it would have every host file report an invalid handle
+     * to a caller merely asking for its timestamp. This one is a
+     * correctness claim, not a memory-safety claim, and its set half is
+     * still refused inside hostfs_datime() for want of anywhere on the
+     * wire to carry a time.
      */
     if (fn == 0x3E || fn == 0x3F || fn == 0x40)     /* Fclose/Fread/Fwrite */
         return hostfs_in_range(pw[1]);
 
-    if (fn == 0x42)                                 /* Fseek: handle is pw[3] */
+    if (fn == 0x42                                  /* Fseek:   handle pw[3] */
+     || fn == 0x57)                                 /* Fdatime: handle pw[3] */
         return hostfs_in_range(pw[3]);
 
     return 0;
@@ -1222,11 +1708,49 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         return hostfs_read(pw[1], *(const ULONG *)&pw[2],
                            *(UBYTE * const *)&pw[4]);
 
-    case 0x40:                  /* Fwrite: claimed only so it cannot corrupt sft */
-        if (!hostfs_in_range(pw[1])
-         || !hostfs_files[pw[1] - HOSTFS_HANDLE_BASE].used)
-            return EIHNDL;
-        return EACCDN;          /* open, but this module is read-only */
+    case 0x40:                  /* Fwrite(handle, count, buf) */
+        return hostfs_write(pw[1], *(const ULONG *)&pw[2],
+                            *(const UBYTE * const *)&pw[4]);
+
+    case 0x3C:                  /* Fcreate(path, attr) */
+        return hostfs_create(*(const char * const *)&pw[1], pw[3]);
+
+    case 0x41:                  /* Fdelete(path) */
+        return hostfs_delete(*(const char * const *)&pw[1]);
+
+    case 0x39:                  /* Dcreate(path) */
+        return hostfs_dcreate(*(const char * const *)&pw[1]);
+
+    case 0x3A:                  /* Ddelete(path) */
+        return hostfs_ddelete(*(const char * const *)&pw[1]);
+
+    case 0x57:                  /* Fdatime(buf, handle, wrt) */
+        return hostfs_datime(*(DOSTIME * const *)&pw[1], pw[3], pw[4]);
+
+    case 0x56:                  /* Frename(unused, old, new) */
+    {
+        const char *from = *(const char * const *)&pw[2];
+        const char *to = *(const char * const *)&pw[4];
+        WORD dfrom = extract_drive_number(from);
+        WORD dto = extract_drive_number(to);
+
+        if (dfrom < 0)
+            dfrom = run->p_curdrv;
+        if (dto < 0)
+            dto = run->p_curdrv;
+
+        /*
+         * Claimed when EITHER path is ours, so this is where a rename
+         * that crosses a drive boundary is turned away. Stock cannot
+         * move a file between devices either (fsdir.c checks the DMD),
+         * and doing half of it -- reading here, writing there -- is
+         * not something a GEMDOS caller expects from Frename.
+         */
+        if (dfrom != dto)
+            return EPTHNF;
+
+        return hostfs_rename(from, to);
+    }
 
     case 0x42:                  /* Fseek(offset, handle, mode) */
         return hostfs_seek(*(const LONG *)&pw[1], pw[3], pw[4]);
@@ -1256,7 +1780,8 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         return hostfs_dfree(*(LONG * const *)&pw[1]);
 
     case 0x43:                  /* Fattrib(path, wrt, attr) */
-        return hostfs_attrib(*(const char * const *)&pw[1], pw[3]);
+        return hostfs_attrib(*(const char * const *)&pw[1], pw[3],
+                             (UBYTE)pw[4]);
     }
 
     if (fn == 0x4E)                     /* Fsfirst */

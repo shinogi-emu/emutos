@@ -705,6 +705,130 @@ LONG hostfs_link_read(ULONG handle, ULONG offset, UBYTE *buf, ULONG count)
     return (LONG)done;
 }
 
+/*
+ * Write, chunked.
+ *
+ * The mirror image of the read loop above, and it exists for the same
+ * reason: a frame carries at most HOSTFS_MAX_REQ_DATA bytes of payload,
+ * while GEMDOS Fwrite is handed whatever the application had -- tens of
+ * kilobytes at a time from a file copy.  A write that issued one frame
+ * and reported the caller's own count back would truncate the file on
+ * the host and tell the guest it had succeeded, which is the single
+ * worst failure this drive could have.
+ *
+ * The offset is explicit, as it is for READ, so the helper never has to
+ * remember where a handle was left: the guest's own file position is
+ * the only cursor, and one request cannot be spoiled by another.
+ *
+ * count and offset are ULONG throughout: with -mshort an int here wraps
+ * at 32767, a quarter of the way into one self-test buffer.
+ */
+LONG hostfs_link_write(ULONG handle, ULONG offset, const UBYTE *buf,
+                       ULONG count)
+{
+    ULONG done = 0;
+
+    while (done < count)
+    {
+        ULONG chunk = count - done;
+        ULONG put;
+        LONG rc;
+
+        if (chunk > (ULONG)HOSTFS_MAX_REQ_DATA)
+            chunk = (ULONG)HOSTFS_MAX_REQ_DATA;
+
+        rc = hl_rpc(HOSTFS_OP_WRITE, handle, offset + done, 0,
+                    buf + done, chunk);
+        if (rc < 0)
+            return done ? (LONG)done : rc;
+
+        /*
+         * The count is the helper's claim, and it is checked against
+         * what the helper was actually given.  A larger one is
+         * impossible for an honest helper and would make this loop skip
+         * bytes it never sent -- the file would be short by exactly the
+         * difference and nothing would say so.
+         */
+        put = hl_ld32(hl_rep + 4);
+        if (put > chunk)
+        {
+            hl_kill("WRITE reply claims more than it was given");
+            return done ? (LONG)done : EDRIVE;
+        }
+
+        done += put;
+
+        /*
+         * A short write is the host declining to take more -- a full
+         * filesystem, a quota.  Stopping here and reporting the count
+         * is what GEMDOS callers already handle; going round again
+         * would spin against a disk that is not going to empty.
+         */
+        if (put < chunk)
+            break;
+    }
+
+    return (LONG)done;
+}
+
+LONG hostfs_link_create(const char *path, UWORD attr)
+{
+    LONG rc = hl_rpc(HOSTFS_OP_CREATE, (ULONG)attr, 0, 0, path,
+                     hl_pathlen(path));
+
+    if (rc < 0)
+        return rc;
+
+    return (LONG)hl_ld32(hl_rep + 4);
+}
+
+LONG hostfs_link_delete(const char *path)
+{
+    return hl_rpc(HOSTFS_OP_DELETE, 0, 0, 0, path, hl_pathlen(path));
+}
+
+/*
+ * RENAME is the one request carrying two paths, separated by a NUL that
+ * is part of the payload rather than a terminator.  They are assembled
+ * here, in one buffer, so the wire format has exactly one writer.
+ *
+ * Static, not a local: this runs on the BDOS's small private stack (see
+ * the note on dirent_name in bdos/hostfs.c), which two kilobytes of
+ * path would not survive.
+ */
+static char hl_pair[2 * HOSTFS_MAX_PATH + 1];
+
+LONG hostfs_link_rename(const char *from, const char *to)
+{
+    ULONG nf = hl_pathlen(from);
+    ULONG nt = hl_pathlen(to);
+
+    if (nf + 1 + nt > (ULONG)sizeof(hl_pair))
+        return EPTHNF;          /* nothing this long is a real pair of paths */
+
+    memcpy(hl_pair, from, nf);
+    hl_pair[nf] = '\0';
+    memcpy(hl_pair + nf + 1, to, nt);
+
+    return hl_rpc(HOSTFS_OP_RENAME, 0, 0, 0, hl_pair, nf + 1 + nt);
+}
+
+LONG hostfs_link_mkdir(const char *path)
+{
+    return hl_rpc(HOSTFS_OP_MKDIR, 0, 0, 0, path, hl_pathlen(path));
+}
+
+LONG hostfs_link_rmdir(const char *path)
+{
+    return hl_rpc(HOSTFS_OP_RMDIR, 0, 0, 0, path, hl_pathlen(path));
+}
+
+LONG hostfs_link_setattr(const char *path, UWORD attr)
+{
+    return hl_rpc(HOSTFS_OP_SETATTR, (ULONG)attr, 0, 0, path,
+                  hl_pathlen(path));
+}
+
 LONG hostfs_link_opendir(const char *path)
 {
     LONG rc = hl_rpc(HOSTFS_OP_OPENDIR, 0, 0, 0, path, hl_pathlen(path));
