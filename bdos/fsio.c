@@ -17,6 +17,7 @@
 #include "string.h"
 #include "tosvars.h"
 #include "intmath.h"
+#include "hostfs.h"
 
 
 #define CNTMAX  0x7FFFul  /* 16-bit MAXINT */
@@ -322,6 +323,17 @@ long xlseek(long n, int h, int flg)
 {
     OFD *f;
 
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * A host-folder handle, from the xopen() branch in fsopnclo.c.
+     * hostfs_seek() applies 'flg' itself against its own notion of the
+     * file's position and length, so the adjustment below -- which
+     * needs an OFD there is none of -- is not reached for one.
+     */
+    if (hostfs_in_range(h))
+        return hostfs_seek(n, h, flg);
+#endif
+
     f = getofd(h);
     if (!f)
         return(EIHNDL);
@@ -442,6 +454,16 @@ long xread(int h, long len, void *ubufr)
     OFD *p;
     long ret;
 
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * A host-folder handle. This is the read the program loader does:
+     * kpgmhdrld() and pgmld01() (bdos/kpgmld.c) pull the header, the
+     * text and data, and the relocation table through here.
+     */
+    if (hostfs_in_range(h))
+        return hostfs_read(h, (ULONG)len, ubufr);
+#endif
+
     p = getofd(h);
     if (p)
         ret = ixread(p,len,ubufr);
@@ -529,6 +551,17 @@ long xwrite(int h, long len, void *ubufr)
 {
     OFD *p;
     long ret;
+
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * A host-folder handle. Nothing inside BDOS writes through one
+     * today -- program loading only reads -- but xopen() can now hand
+     * one to any internal caller, and leaving this out would make the
+     * write the odd operation that silently went somewhere else.
+     */
+    if (hostfs_in_range(h))
+        return hostfs_write(h, (ULONG)len, ubufr);
+#endif
 
     p = getofd(h);
 

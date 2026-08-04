@@ -232,6 +232,7 @@ static void hostfs_subdirtest(void);
 static void hostfs_manytest(void);
 static void hostfs_longnametest(void);
 static void hostfs_dtatest(void);
+static void hostfs_exectest(void);
 static void hostfs_writetest(void);
 
 static void hostfs_selftest(void)
@@ -506,6 +507,7 @@ static void hostfs_pathtest(void)
     hostfs_manytest();
     hostfs_longnametest();
     hostfs_dtatest();
+    hostfs_exectest();
     hostfs_writetest();
 
     /*
@@ -773,10 +775,41 @@ static void hostfs_dtatest(void)
 }
 
 /*
+ * Running a program off the drive.
+ *
+ * GATED ON C:\EXEC.PRG BEING THERE, for the same reason the write test
+ * is gated: the folder the other goldens run against has no such
+ * program, and it must not grow one. tools/make-fixtures.py builds a
+ * separate folder that has it -- and an AUTO directory too, which is
+ * the second half of what this proves and which no shared folder could
+ * carry, since EmuTOS runs whatever it finds there at boot.
+ *
+ * Pexec is the call that could not work at all until the loader learnt
+ * about this drive: xexec() looks for the program with ixsfirst() and
+ * opens it with xopen(), neither of which passes through the GEMDOS
+ * trap where the host folder is hooked. What is checked here is not the
+ * return code -- a Pexec that loaded nothing could still return zero --
+ * but the line the PROGRAM ITSELF writes to the serial port before it
+ * exits. The golden holds that line, so it can only appear if the
+ * bytes on the host really were fetched, relocated and jumped to.
+ *
+ * The gate is Fattrib rather than Fsfirst because Fsfirst would consume
+ * the DTA the tests above set up, and this runs among them.
+ */
+static void hostfs_exectest(void)
+{
+    if (Fattrib("C:\\EXEC.PRG", 0, 0) < 0)
+        return;
+
+    KINFO(("hostfs: exec rc %ld\n",
+           Pexec(PE_LOADGO, "C:\\EXEC.PRG", "", NULL)));
+}
+
+/*
  * The WRITE half of the drive.
  *
  * GATED ON C:\WTEST BEING THERE, and that is the whole point of the
- * gate rather than a convenience. The thirteen goldens run against a
+ * gate rather than a convenience. The listing goldens run against a
  * fixture folder whose every file and every listing they assert; a
  * self-test that created, renamed and deleted things in it would break
  * half of them and would leave the folder different after each run.

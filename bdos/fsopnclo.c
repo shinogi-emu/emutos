@@ -56,6 +56,7 @@
 #include "console.h"
 #include "bdosstub.h"
 #include "tosvars.h"
+#include "hostfs.h"
 
 /* the following characters are disallowed in the name when creating
  * or renaming files or folders.  this is *mostly* the same list as
@@ -221,6 +222,18 @@ long ixcreat(char *name, UBYTE attr)
 long xopen(char *name, int mod)
 {
     long rc;
+
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * Fopen through the trap never reaches here -- osif()'s hostfs hook
+     * answers it first -- so this branch is only for the callers that
+     * do not use the trap. xexec() is the one that matters: it opens
+     * the program file by calling straight into here, and without this
+     * a .PRG in the host folder is a file GEMDOS can list but not run.
+     */
+    if (hostfs_owns_path(name))
+        return hostfs_open(name, mod&VALID_FOPEN_BITS);
+#endif
 
     rc = ixopen(name, mod&VALID_FOPEN_BITS);
 
@@ -431,6 +444,18 @@ long xclose(int h)
 
     if (h < 0)
         return E_OK;    /* always a good close on a character device */
+
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * A handle xopen() above handed out for the host folder. The test
+     * is the RANGE, never whether the slot is live, so a stale one is
+     * answered by hostfs_close() with EIHNDL rather than falling into
+     * the NUMHANDLES test below and looking like an ordinary bad
+     * handle to a caller that would then never free the real slot.
+     */
+    if (hostfs_in_range(h))
+        return hostfs_close(h);
+#endif
 
     if (h >= NUMHANDLES)            /* M01.01.1022.01 */
         return EIHNDL;

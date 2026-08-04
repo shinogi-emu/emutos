@@ -26,6 +26,7 @@
 #include "biosext.h"
 #include "asm.h"
 #include "has.h"
+#include "hostfs.h"
 
 
 /*
@@ -255,9 +256,27 @@ long xexec(WORD flag, char *path, char *tail, char *env)
 
     /* we now need to load a file */
     KDEBUG(("BDOS xexec: trying to find %s\n",path));
-    if (ixsfirst(path,0,0L)) {
-        KDEBUG(("BDOS xexec: command %s not found!!!\n",path));
-        return EFILNF;      /*  file not found      */
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * ixsfirst() walks the FAT directory tree, which has nothing to say
+     * about the host folder: for a path on that drive it always answers
+     * "not found", which is why a .PRG on C: could be listed by the
+     * desktop and still not be run.
+     *
+     * The probe is SKIPPED for such a path rather than given a second
+     * resolver of its own. xopen() below routes to the host folder and
+     * answers EFILNF for a name that is not there -- the same error,
+     * from the one resolver the drive already has -- so adding a
+     * separate existence check here would be a second way to decide
+     * what exists on C:, which is exactly what must not happen.
+     */
+    if (!hostfs_owns_path(path))
+#endif
+    {
+        if (ixsfirst(path,0,0L)) {
+            KDEBUG(("BDOS xexec: command %s not found!!!\n",path));
+            return EFILNF;      /*  file not found      */
+        }
     }
 
     /* attempt to open the file */

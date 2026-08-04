@@ -90,4 +90,31 @@ void hostfs_init(void);
 WORD hostfs_claims(WORD fn, short *pw);
 LONG hostfs_dispatch(WORD fn, short *pw);
 
+/*
+ * The internal face of the module.
+ *
+ * hostfs_claims()/hostfs_dispatch() see only what arrives through the
+ * GEMDOS trap, and program loading does not arrive that way: xexec()
+ * (bdos/proc.c) and kpgmld() (bdos/kpgmld.c) call xopen(), xread(),
+ * xlseek() and xclose() directly, so a .PRG on C: used to be looked for
+ * in the FAT directory tree and reported missing. Those internal entry
+ * points route here instead -- by PATH for the open, by HANDLE for the
+ * rest -- which is why the loader itself needs no change: it still
+ * decides how a program is loaded, and only where the bytes come from
+ * is answered here.
+ *
+ * Routing by handle RANGE rather than by "is this slot in use" is the
+ * same rule hostfs_claims() follows for the handle-bearing calls, and
+ * for the same reason: a handle of 0x0100 or above must never be the
+ * one stock code looks up. hostfs_in_range() is exported so that rule
+ * can be stated identically at both ends rather than copied.
+ */
+WORD hostfs_owns_path(const char *path);
+WORD hostfs_in_range(WORD h);
+LONG hostfs_open(const char *path, WORD mode);
+LONG hostfs_close(WORD h);
+LONG hostfs_read(WORD h, ULONG count, UBYTE *buf);
+LONG hostfs_write(WORD h, ULONG count, const UBYTE *buf);
+LONG hostfs_seek(LONG offset, WORD h, WORD mode);
+
 #endif /* HOSTFS_H */

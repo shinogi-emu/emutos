@@ -323,7 +323,7 @@ static struct
  */
 static WORD hostfs_next_slot;
 
-static WORD hostfs_in_range(WORD h)
+WORD hostfs_in_range(WORD h)
 {
     return h >= HOSTFS_HANDLE_BASE && h < HOSTFS_HANDLE_BASE + HOSTFS_MAX_FILES;
 }
@@ -677,7 +677,7 @@ static char open_wire[HOSTFS_LINK_MAX_PATH];
  */
 #define HOSTFS_FOPEN_BITS 0x07
 
-static LONG hostfs_open(const char *path, WORD mode)
+LONG hostfs_open(const char *path, WORD mode)
 {
     ULONG size, mtime;
     UWORD is_dir, writable;
@@ -903,7 +903,7 @@ static LONG hostfs_create(const char *path, WORD attr)
     return HOSTFS_HANDLE_BASE + slot;
 }
 
-static LONG hostfs_close(WORD h)
+LONG hostfs_close(WORD h)
 {
     WORD slot = h - HOSTFS_HANDLE_BASE;
 
@@ -934,7 +934,7 @@ static LONG hostfs_close(WORD h)
     return E_OK;
 }
 
-static LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
+LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
 {
     WORD slot = h - HOSTFS_HANDLE_BASE;
     ULONG avail;
@@ -974,7 +974,7 @@ static LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
  * "this many bytes were written", and a caller that ignores the count
  * ignores a full disk on every other drive too.
  */
-static LONG hostfs_write(WORD h, ULONG count, const UBYTE *buf)
+LONG hostfs_write(WORD h, ULONG count, const UBYTE *buf)
 {
     WORD slot = h - HOSTFS_HANDLE_BASE;
     LONG n;
@@ -1009,7 +1009,7 @@ static LONG hostfs_write(WORD h, ULONG count, const UBYTE *buf)
     return n;
 }
 
-static LONG hostfs_seek(LONG offset, WORD h, WORD mode)
+LONG hostfs_seek(LONG offset, WORD h, WORD mode)
 {
     WORD slot = h - HOSTFS_HANDLE_BASE;
     LONG newpos;
@@ -1409,21 +1409,39 @@ void hostfs_init(void)
     KINFO(("hostfs: drive C registered\n"));
 }
 
+/*
+ * Does this path name the host folder?
+ *
+ * This is the ONE predicate behind every path-taking decision the
+ * module makes: an explicit drive letter decides, and a path without
+ * one falls to the process's current drive. hostfs_claims() applies it
+ * to the paths arriving through the GEMDOS trap, and the internal BDOS
+ * entry points (xopen() in fsopnclo.c, and the existence probe in
+ * xexec()) apply the same one to the paths that never reach the trap
+ * at all -- so a program the desktop can list is a program Pexec can
+ * find, and neither answer can drift from the other.
+ */
+WORD hostfs_owns_path(const char *path)
+{
+    WORD drv;
+
+    if (!hostfs_on)
+        return 0;
+
+    drv = extract_drive_number(path);
+    if (drv < 0)
+        drv = run->p_curdrv;
+
+    return drv == HOSTFS_DRIVE;
+}
+
 WORD hostfs_claims(WORD fn, short *pw)
 {
     if (!hostfs_on)
         return 0;
 
     if (fn == 0x4E)                 /* Fsfirst: the path says the drive */
-    {
-        const char *name = *(const char * const *)&pw[1];
-        WORD drv = extract_drive_number(name);
-
-        if (drv < 0)
-            drv = run->p_curdrv;
-
-        return drv == HOSTFS_DRIVE;
-    }
+        return hostfs_owns_path(*(const char * const *)&pw[1]);
 
     /*
      * Fsnext continues the search belonging to THIS DTA, which is ours
@@ -1445,10 +1463,6 @@ WORD hostfs_claims(WORD fn, short *pw)
      || fn == 0x43)                 /* Fattrib  */
     {
         const char *name = *(const char * const *)&pw[1];
-        WORD drv = extract_drive_number(name);
-
-        if (drv >= 0)
-            return drv == HOSTFS_DRIVE;
 
         /*
          * No drive letter, so the call would fall to the current drive
@@ -1466,10 +1480,11 @@ WORD hostfs_claims(WORD fn, short *pw)
          * program that opens the console for output get EPTHNF from a
          * host folder it never named.
          */
-        if ((fn == 0x3D || fn == 0x3C) && specname_handle(name))
+        if ((fn == 0x3D || fn == 0x3C) && extract_drive_number(name) < 0
+                                       && specname_handle(name))
             return 0;
 
-        return run->p_curdrv == HOSTFS_DRIVE;
+        return hostfs_owns_path(name);
     }
 
     /*
