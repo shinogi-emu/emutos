@@ -27,15 +27,15 @@
 #define HOSTFS_MAX_NAME    64
 
 /*
- * Treaddir is paged: the device decides how many entries fit in one
- * reply, and the snapshot re-issues the request until a page comes back
- * empty. A device that returned entries whose offsets never advanced
- * would make that loop run forever, so the number of pages is bounded
- * as well. At a couple of dozen entries per page this is far more than
- * HOSTFS_MAX_ENTRIES needs, and is reached only by a device that is
- * broken or hostile.
+ * READDIR returns ONE entry and a cookie per call, so a directory scan
+ * is a loop of requests. A helper whose cookie advanced but whose
+ * enumeration never ended would make that loop run forever, so the
+ * number of steps is bounded as well as the number of entries stored.
+ * This is far more than HOSTFS_MAX_ENTRIES needs -- the scan keeps
+ * reading past the table so it can report the true shortfall -- and is
+ * reached only by a helper that is broken or hostile.
  */
-#define HOSTFS_MAX_DIRPAGES 256
+#define HOSTFS_MAX_DIRSTEPS 4096
 
 /*
  * Open files live in a private GEMDOS handle range that EmuTOS can
@@ -55,29 +55,16 @@
 #define HOSTFS_MAX_FILES   8
 
 /*
- * 9P fids are bound statically, fid = HOSTFS_FID_BASE + slot, rather
- * than allocated. Nothing but an explicit Tclunk frees a fid, so an
- * allocator would leak one on every missed error path and then fail all
- * at once, far from the bug. Binding the fid to the slot makes fids a
- * function of the slot table rather than of the operation count, so a
- * leak is not merely avoided but unrepresentable. Fid 0 is the root and
- * fid 1 the transient scratch used for walks and directory reads; the
- * gap up to 16 leaves room for further reserved fids.
+ * There is no fid table any more.
+ *
+ * The 9P transport bound a fid to every slot (fid = base + slot) so a
+ * missed error path could not leak one. The virtio-serial helper hands
+ * out its own handles instead, and it forgets all of them on HELLO --
+ * which the guest sends once at boot -- so a leak cannot outlive a
+ * reboot and cannot be made unrepresentable here either. What replaces
+ * the old invariant is stated on hostfs_files[] in hostfs.c: a slot is
+ * marked used only while it holds a live host handle.
  */
-#define HOSTFS_FID_BASE    16
-
-/*
- * Reserved scratch fids, below the per-slot range. Fid 1 is the cursor
- * for one-off walks and directory reads; fid 2 is cloned from whatever
- * fid 1 currently points at so a directory can be opened and read
- * without destroying the cursor (an Rlopen fixes the fid to a stream,
- * and the cursor still has to be walked deeper afterwards). Fid 3 is
- * the object named by the final path component, which has to be walked
- * to from the cursor while the cursor itself stays where it is.
- */
-#define HOSTFS_WALK_FID    1
-#define HOSTFS_SCAN_FID    2
-#define HOSTFS_ITEM_FID    3
 
 /*
  * The current directory, as an Atari path relative to the drive root:

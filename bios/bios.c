@@ -25,6 +25,7 @@
 #include "../bdos/bdosstub.h"
 #include "../bdos/hostfs.h"
 #include "virtio_9p.h"
+#include "hostfs_link.h"
 #include "../vdi/vdistub.h"
 #include "bdosbind.h"
 #include "gemerror.h"
@@ -240,12 +241,12 @@ static void hostfs_selftest(void)
 
     /*
      * Everything below names drive C, which is the host folder only
-     * while the 9P device is there. With no 9P device and a vvfat
-     * block drive attached, C: is that drive instead -- and parts of
-     * this self-test WRITE, so it would scribble on the block drive.
-     * Ask for the 9P device by name rather than for a drive C.
+     * while the host link is up. With no helper and a vvfat block
+     * drive attached, C: is that drive instead -- and parts of this
+     * self-test WRITE, so it would scribble on the block drive. Ask
+     * for the link by name rather than for a drive C.
      */
-    if (!virtio_9p_present())
+    if (!hostfs_link_present())
         return;
 
     /*

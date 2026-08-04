@@ -15,7 +15,7 @@
 #include "emutos.h"
 #include "hostfs.h"
 #include "hostfs_name.h"
-#include "../bios/virtio_9p.h"
+#include "../bios/hostfs_link.h"
 #include "../bios/epochtime.h"
 #include "tosvars.h"
 #include "kprint.h"
@@ -70,9 +70,23 @@ static WORD hostfs_on;
 static char hostfs_path[HOSTFS_MAX_PATH];
 
 /*
+ * A path as the host helper spells it: '/'-separated, no leading '/',
+ * built from the HOST's own names rather than their 8.3 clippings, and
+ * the empty string for the drive root. See the note at the top of
+ * bios/hostfs_link.h.
+ *
+ * These are longer than the Atari paths above and necessarily so: a
+ * host name can be far longer than the eight-and-three it is shown as,
+ * so a path that fits HOSTFS_MAX_PATH as an Atari string can need many
+ * times that on the wire. wire_push() refuses to overflow and the call
+ * fails with EPTHNF, which is the failure a caller already handles.
+ */
+static char path_wire[HOSTFS_LINK_MAX_PATH];
+
+/*
  * The open Fsfirst/Fsnext scan. dir_names/dir_count/dir_pos are the
- * snapshot and the cursor into it; dir_path is the canonical directory
- * they were taken from, so Fsnext can re-reach it to fill the DTA; and
+ * snapshot and the cursor into it; dir_wire is the directory they were
+ * taken from, so Fsnext can reach it again to fill the DTA; and
  * dir_subdir says whether that directory is below the drive root, which
  * is what decides the fate of the "." and ".." entries in hostfs_match().
  *
@@ -84,8 +98,46 @@ static char hostfs_path[HOSTFS_MAX_PATH];
 static char dir_names[HOSTFS_MAX_ENTRIES][HOSTFS_MAX_NAME];
 static WORD dir_count;
 static WORD dir_pos;
-static char dir_path[HOSTFS_MAX_PATH];
+static char dir_wire[HOSTFS_LINK_MAX_PATH];
 static WORD dir_subdir;
+
+/*
+ * Append one HOST name to a wire path. Zero when it would not fit.
+ *
+ * The root is the empty string, not "/", because the wire forbids a
+ * leading separator -- so the separator is inserted only when there is
+ * already something to separate from.
+ */
+static WORD wire_push(char *p, const char *comp)
+{
+    WORD len = (WORD)strlen(p);
+    WORD n = (WORD)strlen(comp);
+
+    if (len + (len ? 1 : 0) + n + 1 > HOSTFS_LINK_MAX_PATH)
+        return 0;
+
+    if (len)
+        p[len++] = '/';
+    strcpy(p + len, comp);
+
+    return 1;
+}
+
+/* Drop the last component. At the root this leaves the root. */
+static void wire_pop(char *p)
+{
+    char *last = NULL;
+    char *q;
+
+    for (q = p; *q; q++)
+        if (*q == '/')
+            last = q;
+
+    if (last)
+        *last = '\0';
+    else
+        *p = '\0';
+}
 
 /* Insertion sort on raw host names, byte order. */
 static void dir_sort(void)
@@ -103,136 +155,116 @@ static void dir_sort(void)
 }
 
 /*
- * Snapshot the directory DIRFID is bound to. Dot entries are filtered
- * by hostfs_match(), not here.
+ * Snapshot the directory named by the wire path DIRWIRE.
  *
- * The scan is done on a CLONE of dirfid rather than on dirfid itself:
- * Tlopen fixes a fid to an open stream, and the caller still owns
- * dirfid and has to clunk it afterwards.
+ * READDIR returns ONE entry and an opaque cookie per call. It is not
+ * batched, deliberately: the 9P transport fetched a page at a time and
+ * the guest kept only the low half of an eight-byte cookie, which is
+ * harmless on tmpfs (small integers) and fatal on ext4 (a hash whose
+ * identifying half lives in the HIGH word) -- every seek landed back at
+ * the start and the directory repeated its first page for ever. One
+ * entry per call is slower and cannot fail that way. The cookie is
+ * carried whole and no arithmetic is done on it beyond asking whether
+ * it moved.
  *
- * Treaddir is PAGED, and the paging is the whole point of the loop
- * below. One request returns only as many entries as fit in the reply
- * the buffer was sized for -- a couple of dozen here -- and the device,
- * not the caller, decides how many that is. Each entry carries its own
- * 9P offset, and handing the last one back on the next request is how
- * the following page is reached; a snapshot that issued one Treaddir
- * and stopped would list the first page of a directory and lose every
- * entry after it, with nothing to show that anything was missing. An
- * empty page ends the directory.
+ * "." AND ".." ARE SYNTHESISED HERE. The helper never lists them and
+ * refuses them on the wire, because a correct guest reduces them
+ * textually before a request is built (path_build() below), so their
+ * appearance on the wire could only be an escape attempt. GEM still
+ * expects to see them in a subdirectory listing, so they are added to
+ * the snapshot exactly as the reference implementation adds them. They
+ * are added at the root too and dropped there by hostfs_match(), which
+ * is the same filtering the 9P listing needed and keeps the rule in one
+ * place.
  *
  * Two things are refused rather than tolerated:
  *
  *   - a directory with more entries than the table holds is REPORTED.
- *     The scan keeps reading to the end so the count it prints is the
- *     true shortfall rather than a guess, but it stops storing. A
- *     listing that is short and says so can be acted on; one that is
- *     short and silent looks exactly like an empty folder.
+ *     The scan keeps reading so the count it prints is the true
+ *     shortfall rather than a guess, but it stops storing. A listing
+ *     that is short and says so can be acted on; one that is short and
+ *     silent looks exactly like an empty folder.
  *
- *   - a directory whose offset does not advance across a whole page is
- *     stopped THERE, not merely bounded by the page count. A bound
- *     alone is not enough: re-reading one page 256 times fills the
- *     table with 256 copies of the same entries, and a listing of
- *     plausible names in plausible order is far harder to recognise as
- *     broken than a short one. The page count stays as a second, outer
- *     bound in case the offset advances yet never reaches the end.
+ *   - a cookie that does not move stops the scan THERE. Re-reading one
+ *     entry until the table filled would produce a listing of
+ *     plausible names in plausible order, which is far harder to
+ *     recognise as broken than a short one. The step count is a
+ *     second, outer bound for a cookie that advances yet never ends.
  *
- * dirbuf and name are static, not locals: this runs on the BDOS's
- * dedicated internal stack (see rwa.S, "fstrt"), which is a couple of
- * KB shared with the rest of the GEMDOS call chain. A 1KB local here
- * blew that stack and corrupted the return chain, which showed up as
- * the whole Fsfirst/Fsnext self-test replaying itself several times
- * before boot could continue.
+ * dirent_name is static, not a local: this runs on the BDOS's dedicated
+ * internal stack (see rwa.S, "fstrt"), which is a couple of KB shared
+ * with the rest of the GEMDOS call chain. A 1KB local here blew that
+ * stack and corrupted the return chain, which showed up as the whole
+ * Fsfirst/Fsnext self-test replaying itself several times before boot
+ * could continue.
  */
-static UBYTE dirbuf[1024];
 static char dirent_name[HOSTFS_MAX_NAME];
 
-static LONG dir_snapshot(ULONG dirfid)
+static LONG dir_snapshot(const char *dirwire)
 {
-    P9DIROFF diroff, pagestart, next;
-    ULONG pages = 0;
+    ULONG cookie = 0;
     LONG dropped = 0;
     LONG toolong = 0;
-    LONG n;
+    LONG steps = 0;
+    LONG dh;
 
     dir_count = 0;
     dir_pos = 0;
-    diroff.lo = 0;
-    diroff.hi = 0;
 
-    if (p9_walk(dirfid, HOSTFS_SCAN_FID, 0) != 0)
-        return EDRIVE;
-    if (p9_lopen(HOSTFS_SCAN_FID, P9_O_RDONLY) != 0)
+    dh = hostfs_link_opendir(dirwire);
+    if (dh < 0)
+        return dh;
+
+    /* See the note above: the host never lists these and never will. */
+    strcpy(dir_names[dir_count++], ".");
+    strcpy(dir_names[dir_count++], "..");
+
+    for (;;)
     {
-        p9_clunk(HOSTFS_SCAN_FID);
-        return EDRIVE;
-    }
+        ULONG next = cookie;
 
-    while ((n = p9_readdir(HOSTFS_SCAN_FID, &diroff, dirbuf,
-                           sizeof(dirbuf))) > 0)
-    {
-        ULONG pos, off;
-        WORD progress = 0;
+        if (hostfs_link_readdir((ULONG)dh, cookie, dirent_name,
+                                sizeof(dirent_name), &next) < 0)
+            break;              /* ENMFIL is the end of the directory */
 
-        if (++pages > HOSTFS_MAX_DIRPAGES)
+        if (next == cookie)
         {
-            KINFO(("hostfs: directory read stopped after %d pages\n",
-                   (WORD)HOSTFS_MAX_DIRPAGES));
+            KINFO(("hostfs: directory cookie did not advance; listing stopped\n"));
             break;
         }
+        cookie = next;
 
-        pagestart = diroff;
-
-        for (pos = 0; pos < (ULONG)n; )
+        if (++steps > HOSTFS_MAX_DIRSTEPS)
         {
-            off = p9_dirent_next(dirbuf, (ULONG)n, pos, dirent_name,
-                                 sizeof(dirent_name), &next);
-            if (off == 0)
-                break;
-            pos = off;
-            diroff = next;
-            progress = 1;
-
-            /*
-             * An empty name is p9_dirent_next() saying the entry was
-             * stepped over but does not fit HOSTFS_MAX_NAME. It is
-             * counted and reported rather than passed on: a name this
-             * module cannot hold is a file the drive cannot show or
-             * open, and the one thing that must not happen is for it to
-             * disappear quietly.
-             */
-            if (!dirent_name[0])
-            {
-                toolong++;
-                continue;
-            }
-
-            if (dir_count >= HOSTFS_MAX_ENTRIES)
-            {
-                dropped++;
-                continue;
-            }
-
-            strcpy(dir_names[dir_count], dirent_name);
-            dir_count++;
+            KINFO(("hostfs: directory read stopped after %d entries\n",
+                   (WORD)HOSTFS_MAX_DIRSTEPS));
+            break;
         }
-
-        if (!progress)
-            break;              /* nothing consumed: stop rather than spin */
 
         /*
-         * The page was consumed but left the cookie exactly where it
-         * started, so the next request would return this same page
-         * again. Stop and say so: going round silently would duplicate
-         * every entry until the table filled.
+         * An empty name is hostfs_link_readdir() saying the entry was
+         * stepped over but does not fit HOSTFS_MAX_NAME. It is counted
+         * and reported rather than passed on: a name this module cannot
+         * hold is a file the drive cannot show or open, and the one
+         * thing that must not happen is for it to disappear quietly.
          */
-        if (diroff.lo == pagestart.lo && diroff.hi == pagestart.hi)
+        if (!dirent_name[0])
         {
-            KINFO(("hostfs: directory offset did not advance; listing stopped\n"));
-            break;
+            toolong++;
+            continue;
         }
+
+        if (dir_count >= HOSTFS_MAX_ENTRIES)
+        {
+            dropped++;
+            continue;
+        }
+
+        strcpy(dir_names[dir_count], dirent_name);
+        dir_count++;
     }
 
-    p9_clunk(HOSTFS_SCAN_FID);
+    hostfs_link_closedir((ULONG)dh);
 
     if (dropped > 0)
         KINFO(("hostfs: directory has %ld entries, %ld not listed (limit %d)\n",
@@ -249,9 +281,13 @@ static LONG dir_snapshot(ULONG dirfid)
 
 /*
  * Open files. Slot i is reachable as GEMDOS handle
- * HOSTFS_HANDLE_BASE + i and as 9P fid HOSTFS_FID_BASE + i; the two are
- * never allocated separately, so the invariant is simply
- * "slot free <=> fid unbound".
+ * HOSTFS_HANDLE_BASE + i, and carries the HOST's handle for the same
+ * file -- a small integer the helper allocated, opaque here.
+ *
+ * Unlike the 9P fids this replaces, the host handle is not a function
+ * of the slot: the helper hands one out at OPEN and it means nothing
+ * until it does. So the invariant is "used <=> handle is live", and
+ * every path that clears `used` closes the handle first.
  *
  * size is cached at open time so Fseek can validate against the file
  * length and Fread can clamp to it without an RPC per call, matching
@@ -260,6 +296,7 @@ static LONG dir_snapshot(ULONG dirfid)
 static struct
 {
     WORD  used;
+    ULONG handle;
     ULONG pos;
     ULONG size;
 } hostfs_files[HOSTFS_MAX_FILES];
@@ -298,8 +335,8 @@ static WORD name_equal(const char *a, const char *b)
  * of an in-progress Fsfirst/Fsnext scan, and the classic desktop idiom
  * is Fsfirst; { Fopen; Fread; Fclose } Fsnext -- so resolving a name
  * through the snapshot would silently truncate the very listing that
- * produced the name. It reads the directory again into its own buffer
- * instead.
+ * produced the name. It opens the directory again and reads it into its
+ * own buffer instead.
  *
  * The mapping has to run this way round: hostfs_host_to_atari() is
  * lossy (verylongname.txt becomes VERYLONG.TXT), so the 8.3 name the
@@ -320,83 +357,60 @@ static WORD name_equal(const char *a, const char *b)
  * is why this cannot just call hostfs_host_to_atari() twice.
  *
  * Static buffers, not locals: this runs on the BDOS's small private
- * stack (see the note on dirbuf above).
+ * stack (see the note on dirent_name above).
  */
-static UBYTE lookup_buf[1024];
 static char lookup_name[HOSTFS_MAX_NAME];
 static char lookup_clipped[13];
 static char lookup_want[13];
 
-static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
+static WORD hostfs_resolve_in(const char *dirwire, const char *atari,
+                              char *out)
 {
-    P9DIROFF diroff, pagestart, next;
-    LONG n;
-
-    diroff.lo = 0;
-    diroff.hi = 0;
+    ULONG cookie = 0;
+    LONG steps = 0;
+    WORD found = 0;
+    LONG dh;
 
     hostfs_atari_clip(atari, lookup_want);
 
-    /*
-     * Clone rather than open dirfid itself: Tlopen fixes a fid to an
-     * open stream, and the caller still needs dirfid walkable so it can
-     * descend into whatever this scan finds.
-     */
-    if (p9_walk(dirfid, HOSTFS_SCAN_FID, 0) != 0)
+    dh = hostfs_link_opendir(dirwire);
+    if (dh < 0)
         return 0;
-    if (p9_lopen(HOSTFS_SCAN_FID, P9_O_RDONLY) != 0)
+
+    for (;;)
     {
-        p9_clunk(HOSTFS_SCAN_FID);
-        return 0;
-    }
+        ULONG next = cookie;
 
-    while ((n = p9_readdir(HOSTFS_SCAN_FID, &diroff, lookup_buf,
-                           sizeof(lookup_buf))) > 0)
-    {
-        ULONG pos, off;
-        WORD progress = 0;
-
-        pagestart = diroff;
-
-        for (pos = 0; pos < (ULONG)n; )
-        {
-            off = p9_dirent_next(lookup_buf, (ULONG)n, pos, lookup_name,
-                                 sizeof(lookup_name), &next);
-            if (off == 0)
-                break;
-            pos = off;
-            diroff = next;
-            progress = 1;
-
-            if (!lookup_name[0])
-                continue;       /* entry this build cannot represent */
-
-            hostfs_host_to_atari(lookup_name, lookup_clipped);
-            if (name_equal(lookup_clipped, lookup_want))
-            {
-                strcpy(out, lookup_name);
-                p9_clunk(HOSTFS_SCAN_FID);
-                return 1;
-            }
-        }
-
-        if (!progress)
-            break;              /* nothing consumed: stop rather than spin */
+        if (hostfs_link_readdir((ULONG)dh, cookie, lookup_name,
+                                sizeof(lookup_name), &next) < 0)
+            break;              /* ENMFIL: the name is simply not there */
 
         /* Same rule as dir_snapshot(): a cookie that has not moved
-         * means the next request returns this page again, so a name
-         * that is genuinely absent would be searched for for ever. */
-        if (diroff.lo == pagestart.lo && diroff.hi == pagestart.hi)
+         * means the next call returns this entry again, so a name that
+         * is genuinely absent would be searched for for ever. */
+        if (next == cookie || ++steps > HOSTFS_MAX_DIRSTEPS)
             break;
+        cookie = next;
+
+        if (!lookup_name[0])
+            continue;           /* entry this build cannot represent */
+
+        hostfs_host_to_atari(lookup_name, lookup_clipped);
+        if (name_equal(lookup_clipped, lookup_want))
+        {
+            strcpy(out, lookup_name);
+            found = 1;
+            break;
+        }
     }
 
-    p9_clunk(HOSTFS_SCAN_FID);
+    hostfs_link_closedir((ULONG)dh);
 
-    return 0;
+    return found;
 }
 
 /*
- * Path resolution -- the ONE place where a path becomes a fid.
+ * Path resolution -- the ONE place where a guest path becomes a host one.
  *
  * Fopen, Fsfirst, Fattrib and Dsetpath all arrive here. A second
  * resolver is exactly how the listing view and the open view drift
@@ -417,7 +431,7 @@ static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
  *      path costs no RPC at all.
  *
  * Static buffers, not locals: the BDOS's private stack is small (see
- * the note on dirbuf above).
+ * the note on dirent_name above).
  */
 static char path_work[HOSTFS_MAX_PATH];
 static char path_canon[HOSTFS_MAX_PATH];
@@ -525,18 +539,22 @@ static LONG path_build(const char *path, char *out)
 }
 
 /*
- * Walk HOSTFS_WALK_FID to the directory named by the canonical path
- * WANT, and write the same path spelled in the host's own
- * capitalisation-then-clipped form into path_canon.
+ * Walk to the directory named by the canonical path WANT, leaving its
+ * wire spelling in path_wire and the same path in the host's own
+ * capitalisation-then-clipped form in path_canon.
  *
- * On success the fid is left BOUND and the caller must clunk it. On
- * failure it has already been clunked, so an error return never leaves
- * a fid behind.
+ * On failure path_wire holds a partial walk and must not be used; every
+ * caller checks the return before touching it. Nothing has to be
+ * released -- unlike a 9P fid, a wire path is a string, so an error
+ * return here cannot leak anything.
  *
- * The walk is a component at a time because p9_walk() carries a single
- * name element, and each component has to be resolved through a
- * directory scan first: host names are longer than 8.3, so "LONGDIR"
- * as typed by the caller is not the name the host knows.
+ * The walk is a component at a time because each component has to be
+ * resolved through a directory scan first: host names are longer than
+ * 8.3, so "LONGDIR" as typed by the caller is not the name the host
+ * knows. Each resolved component is then STATted, which is what proves
+ * it is a directory rather than a file -- the helper would happily
+ * OPENDIR nothing else, but "a file is not a path" is a GEMDOS rule and
+ * belongs here where EPTHNF is the answer.
  */
 static LONG path_walk(const char *want)
 {
@@ -544,9 +562,7 @@ static LONG path_walk(const char *want)
     LONG rc = E_OK;
 
     strcpy(path_canon, "\\");
-
-    if (p9_walk(P9_ROOT_FID, HOSTFS_WALK_FID, 0) != 0)
-        return EDRIVE;
+    path_wire[0] = '\0';
 
     while (*p && rc == E_OK)
     {
@@ -563,12 +579,12 @@ static LONG path_walk(const char *want)
         if (n == 0)
             break;
 
-        if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_comp, path_host))
+        if (!hostfs_resolve_in(path_wire, path_comp, path_host))
             rc = EPTHNF;
-        else if (p9_walk(HOSTFS_WALK_FID, HOSTFS_WALK_FID, path_host) != 0)
+        else if (!wire_push(path_wire, path_host))
             rc = EPTHNF;
-        else if (p9_getattr(HOSTFS_WALK_FID, &size, &is_dir, &mtime,
-                            &writable) != 0)
+        else if (hostfs_link_stat(path_wire, &size, &is_dir, &mtime,
+                                  &writable) < 0)
             rc = EPTHNF;
         else if (!is_dir)
             rc = EPTHNF;        /* a file is not a path */
@@ -580,17 +596,13 @@ static LONG path_walk(const char *want)
         }
     }
 
-    if (rc != E_OK)
-        p9_clunk(HOSTFS_WALK_FID);
-
     return rc;
 }
 
 /*
  * Resolve PATH into the directory holding its final component, plus
- * that component. HOSTFS_WALK_FID is left bound to the directory and
- * the CALLER must clunk it; path_leaf holds the component and
- * path_canon the directory's canonical spelling.
+ * that component. path_wire is left holding the directory, path_leaf
+ * the component and path_canon the directory's canonical spelling.
  *
  * WANT_FILE asks for the checks that make sense only when the final
  * component names one object rather than a search pattern: it must be
@@ -638,6 +650,7 @@ static LONG hostfs_locate(const char *path, WORD want_file)
 }
 
 static char open_host[HOSTFS_MAX_NAME];
+static char open_wire[HOSTFS_LINK_MAX_PATH];
 
 /*
  * The Fopen mode word, reduced to the access code stock EmuTOS acts on.
@@ -653,10 +666,10 @@ static char open_host[HOSTFS_MAX_NAME];
 
 static LONG hostfs_open(const char *path, WORD mode)
 {
-    ULONG fid, size, mtime;
+    ULONG size, mtime;
     UWORD is_dir, writable;
     WORD slot = 0, i;
-    LONG rc;
+    LONG rc, handle;
 
     mode &= HOSTFS_FOPEN_BITS;      /* 0 = read, 1 = write, 2 = read/write */
 
@@ -665,10 +678,11 @@ static LONG hostfs_open(const char *path, WORD mode)
         return rc;
 
     /*
-     * Claim the slot before walking, so the fid about to be walked is
-     * known unbound (slot free <=> fid unbound). From here every early
-     * return has to release the directory fid hostfs_locate() left
-     * bound.
+     * Pick the slot first, but do not mark it used until the file is
+     * actually open: a slot is never left marked used with no handle in
+     * it. Nothing needs releasing on the early returns below, because
+     * the host handle does not exist until OPEN succeeds and OPEN is
+     * the last thing that happens.
      */
     for (i = 0; i < HOSTFS_MAX_FILES; i++)
     {
@@ -677,71 +691,49 @@ static LONG hostfs_open(const char *path, WORD mode)
             break;
     }
     if (i == HOSTFS_MAX_FILES)
-    {
-        p9_clunk(HOSTFS_WALK_FID);
         return ENHNDL;
-    }
 
-    if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_leaf, open_host))
-    {
-        p9_clunk(HOSTFS_WALK_FID);
+    if (!hostfs_resolve_in(path_wire, path_leaf, open_host))
         return EFILNF;
-    }
 
-    fid = HOSTFS_FID_BASE + slot;
+    strcpy(open_wire, path_wire);
+    if (!wire_push(open_wire, open_host))
+        return EPTHNF;
+
+    if (hostfs_link_stat(open_wire, &size, &is_dir, &mtime, &writable) < 0)
+        return EFILNF;
 
     /*
-     * A failed Twalk of a single element is all-or-nothing, so newfid
-     * was never established and must not be clunked. Every later
-     * failure must, or the fid stays bound with no slot pointing at it
-     * and that slot is dead until reboot.
+     * The helper refuses to OPEN a directory too, but it answers
+     * EACCDN for its own reasons; deciding it here keeps the rule where
+     * the rest of the GEMDOS semantics live.
      */
-    if (p9_walk(HOSTFS_WALK_FID, fid, open_host) != 0)
-    {
-        p9_clunk(HOSTFS_WALK_FID);
-        return EFILNF;
-    }
-    p9_clunk(HOSTFS_WALK_FID);
-
-    if (p9_getattr(fid, &size, &is_dir, &mtime, &writable) != 0)
-    {
-        p9_clunk(fid);
-        return EFILNF;
-    }
-
     if (is_dir)
-    {
-        p9_clunk(fid);
         return EACCDN;
-    }
 
     /*
-     * A write-capable open is accepted, and the fid is still opened
-     * read-only on the wire, because this module has no Twrite path
-     * yet: opening for read/write and then only reading has to work,
-     * since plenty of software asks for mode 2 out of habit and would
+     * A write-capable open is accepted, and the file is still opened
+     * read-only on the wire, because this module has no write path yet:
+     * opening for read/write and then only reading has to work, since
+     * plenty of software asks for mode 2 out of habit and would
      * otherwise fail on C: where it succeeds everywhere else. Fwrite
-     * refuses cleanly with EACCDN until stage 2 adds the write path;
-     * that is the same error the caller would have got from the open,
-     * only later, and it costs nothing to the reader.
+     * refuses cleanly with EACCDN until the write path lands; that is
+     * the same error the caller would have got from the open, only
+     * later, and it costs nothing to the reader.
      *
      * The one rule kept exactly is stock's: a file the host will not
      * let us write cannot be opened for writing at all, which mirrors
      * ixopen()'s FA_RO test (fsopnclo.c:259-261).
      */
     if (mode != 0 && !writable)
-    {
-        p9_clunk(fid);
         return EACCDN;
-    }
 
-    if (p9_lopen(fid, P9_O_RDONLY) != 0)
-    {
-        p9_clunk(fid);
+    handle = hostfs_link_open(open_wire, HOSTFS_LINK_O_RDONLY);
+    if (handle < 0)
         return EACCDN;
-    }
 
     hostfs_files[slot].used = 1;
+    hostfs_files[slot].handle = (ULONG)handle;
     hostfs_files[slot].pos = 0;
     hostfs_files[slot].size = size;
     hostfs_next_slot = (WORD)((slot + 1) % HOSTFS_MAX_FILES);
@@ -752,25 +744,30 @@ static LONG hostfs_open(const char *path, WORD mode)
 static LONG hostfs_close(WORD h)
 {
     WORD slot = h - HOSTFS_HANDLE_BASE;
-    WORD was_used;
 
     if (!hostfs_in_range(h))
         return EIHNDL;
 
     /*
-     * Clunk unconditionally, even for a slot that already looks free.
-     * Clunking an unbound fid is answered with an Rlerror that p9_clunk
-     * discards, so the cost of being wrong here is one wasted message;
-     * the cost of skipping it when the slot state is inconsistent is a
-     * permanently bound fid.
+     * Only a slot that holds a handle is closed. This is the opposite
+     * of what the 9P transport did, and deliberately: a fid was a fixed
+     * function of the slot, so clunking one that might already be free
+     * cost a wasted message and nothing else. A host handle is
+     * allocated by the helper and reused after it is closed, so closing
+     * a slot that does not hold one risks closing a file some LATER
+     * open is using.
      */
-    was_used = hostfs_files[slot].used;
-    p9_clunk(HOSTFS_FID_BASE + slot);
+    if (!hostfs_files[slot].used)
+        return EIHNDL;
+
+    hostfs_link_close(hostfs_files[slot].handle);
+
     hostfs_files[slot].used = 0;
+    hostfs_files[slot].handle = 0;
     hostfs_files[slot].pos = 0;
     hostfs_files[slot].size = 0;
 
-    return was_used ? E_OK : EIHNDL;
+    return E_OK;
 }
 
 static LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
@@ -790,7 +787,8 @@ static LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
     if (count == 0)
         return 0;
 
-    n = p9_read(HOSTFS_FID_BASE + slot, hostfs_files[slot].pos, buf, count);
+    n = hostfs_link_read(hostfs_files[slot].handle, hostfs_files[slot].pos,
+                         buf, count);
     if (n < 0)
         return n;               /* still open: the caller may retry or close */
 
@@ -856,7 +854,6 @@ static LONG hostfs_setpath(const char *path)
     rc = path_walk(path_work);
     if (rc < 0)
         return rc;
-    p9_clunk(HOSTFS_WALK_FID);
 
     strcpy(hostfs_path, path_canon);
 
@@ -884,8 +881,8 @@ static LONG hostfs_getpath(char *buf)
 /*
  * Dfree.
  *
- * 9P2000.L has a statfs, but the host folder's real free space is the
- * wrong answer anyway: it is the free space of a filesystem that may be
+ * The protocol has a DFREE, but the host folder's real free space is
+ * the wrong answer anyway: it is the free space of a filesystem that may be
  * terabytes, and every field here is a 32-bit cluster count that GEM
  * multiplies out into a LONG. So this reports a fixed 64MB, which is
  * large enough that nothing refuses to write and small enough that
@@ -911,13 +908,15 @@ static LONG hostfs_dfree(LONG *buf)
 }
 
 static char attrib_host[HOSTFS_MAX_NAME];
+static char attrib_wire[HOSTFS_LINK_MAX_PATH];
 
 /*
  * Fattrib, query only.
  *
- * Setting is refused with EACCDN rather than silently accepted: there
- * is no Tsetattr path yet, and pretending the attribute changed would
- * leave the caller believing something about the file that is not true.
+ * Setting is refused with EACCDN rather than silently accepted: the
+ * SETATTR path is not wired up yet, and pretending the attribute
+ * changed would leave the caller believing something about the file
+ * that is not true.
  *
  * Folders return EFILNF, which is what TOS 1-3 and stock EmuTOS do --
  * see the commentary above xchmod() (fsdir.c:390-401).
@@ -932,25 +931,15 @@ static LONG hostfs_attrib(const char *path, WORD wrt)
     if (rc < 0)
         return rc;
 
-    if (!hostfs_resolve_in(HOSTFS_WALK_FID, path_leaf, attrib_host))
-    {
-        p9_clunk(HOSTFS_WALK_FID);
+    if (!hostfs_resolve_in(path_wire, path_leaf, attrib_host))
         return EFILNF;
-    }
 
-    if (p9_walk(HOSTFS_WALK_FID, HOSTFS_ITEM_FID, attrib_host) != 0)
-    {
-        p9_clunk(HOSTFS_WALK_FID);
-        return EFILNF;
-    }
-    p9_clunk(HOSTFS_WALK_FID);
+    strcpy(attrib_wire, path_wire);
+    if (!wire_push(attrib_wire, attrib_host))
+        return EPTHNF;
 
-    if (p9_getattr(HOSTFS_ITEM_FID, &size, &is_dir, &mtime, &writable) != 0)
-    {
-        p9_clunk(HOSTFS_ITEM_FID);
+    if (hostfs_link_stat(attrib_wire, &size, &is_dir, &mtime, &writable) < 0)
         return EFILNF;
-    }
-    p9_clunk(HOSTFS_ITEM_FID);
 
     if (is_dir)
         return EFILNF;
@@ -964,9 +953,9 @@ static LONG hostfs_attrib(const char *path, WORD wrt)
 void hostfs_init(void)
 {
     strcpy(hostfs_path, "\\");
-    strcpy(dir_path, "\\");
+    dir_wire[0] = '\0';
 
-    if (!virtio_9p_present())
+    if (!hostfs_link_present())
         return;
 
     drvbits |= (1L << HOSTFS_DRIVE);
@@ -1127,15 +1116,23 @@ static WORD hostfs_match(const char *pat, const char *name, WORD subdir)
     return p[0] == '\0';
 }
 
+static char fill_wire[HOSTFS_LINK_MAX_PATH];
+
 /*
  * Fill the caller's DTA from one snapshot entry.
  *
- * The directory is re-walked for every entry rather than held open
- * across the whole Fsfirst/Fsnext sequence. Holding a fid between BDOS
- * calls would mean it had to survive every Fopen and Fclose the caller
- * makes in between, and the desktop makes them constantly; re-walking
- * costs a few messages per entry and cannot be disturbed. The snapshot
- * itself -- dir_names, dir_pos, dir_pattern -- is not touched here.
+ * The entry is STATted against dir_wire, the directory the snapshot was
+ * taken from, rather than by re-resolving the path: nothing is held
+ * open between BDOS calls, so an Fopen in the middle of a scan -- the
+ * desktop's own idiom -- cannot disturb it. The snapshot itself
+ * (dir_names, dir_pos, dir_pattern) is not touched here.
+ *
+ * "." and ".." are the two entries dir_snapshot() invented, and they
+ * are the reason for the special cases: the wire refuses both outright,
+ * so the DIRECTORY ITSELF and its PARENT are what actually get STATted.
+ * The name written into the DTA is still the dot name the caller
+ * expects to see, which is what makes a GEM folder window offer a way
+ * back up.
  */
 static LONG hostfs_fill_dta(const char *host)
 {
@@ -1144,31 +1141,33 @@ static LONG hostfs_fill_dta(const char *host)
     UWORD is_dir, writable;
     char clipped[13];
 
-    if (path_walk(dir_path) < 0)
-        return EFILNF;
+    strcpy(fill_wire, dir_wire);
 
-    if (p9_walk(HOSTFS_WALK_FID, HOSTFS_ITEM_FID, host) != 0)
+    if (!strcmp(host, "."))
     {
-        p9_clunk(HOSTFS_WALK_FID);
+        /* fill_wire already names this directory */
+    }
+    else if (!strcmp(host, ".."))
+    {
+        wire_pop(fill_wire);
+    }
+    else if (!wire_push(fill_wire, host))
+    {
         return EFILNF;
     }
-    p9_clunk(HOSTFS_WALK_FID);
 
-    if (p9_getattr(HOSTFS_ITEM_FID, &size, &is_dir, &mtime, &writable) != 0)
-    {
-        p9_clunk(HOSTFS_ITEM_FID);
+    if (hostfs_link_stat(fill_wire, &size, &is_dir, &mtime, &writable) < 0)
         return EFILNF;
-    }
-    p9_clunk(HOSTFS_ITEM_FID);
 
     hostfs_host_to_atari(host, clipped);
     strcpy(dta->d_fname, clipped);
 
     /*
      * A subdirectory reports length 0, as a FAT directory entry does:
-     * the host's own st_size for a directory is a filesystem-internal
+     * the host's own size for a directory is a filesystem-internal
      * number that means nothing to GEM, and it changes when files are
-     * added to the folder.
+     * added to the folder. The helper already reports 0 for one; this
+     * repeats the rule rather than trusting the wire for it.
      */
     dta->d_length = is_dir ? 0L : (LONG)size;
     dta->d_attrib = hostfs_attr(is_dir, writable);
@@ -1180,7 +1179,7 @@ static LONG hostfs_fill_dta(const char *host)
      * wall-clock time (see doc/hatari-gemdos-reference.md).
      *
      * Matching it would need the host's UTC offset, and there is no
-     * clean way to learn it here: 9P carries no timezone, the machine's
+     * clean way to learn it here: the wire carries no timezone, the machine's
      * RTC is UTC, and nothing in the guest holds a timezone database.
      * The choices were therefore a rule that is simply wrong for part
      * of the year, or a plainly documented constant offset of zero.
@@ -1300,10 +1299,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
          * inside dir_pattern.
          */
         if (strlen(path_leaf) >= sizeof(dir_pattern))
-        {
-            p9_clunk(HOSTFS_WALK_FID);
             return ENMFIL;
-        }
         strcpy(dir_pattern, path_leaf);
 
         /*
@@ -1312,11 +1308,10 @@ LONG hostfs_dispatch(WORD fn, short *pw)
          * the "." and ".." entries: the drive root has no parent to
          * offer, but a subdirectory does and GEM expects to see it.
          */
-        strcpy(dir_path, path_canon);
-        dir_subdir = strcmp(dir_path, "\\") ? 1 : 0;
+        strcpy(dir_wire, path_wire);
+        dir_subdir = strcmp(path_canon, "\\") ? 1 : 0;
 
-        rc = dir_snapshot(HOSTFS_WALK_FID);
-        p9_clunk(HOSTFS_WALK_FID);
+        rc = dir_snapshot(dir_wire);
         if (rc < 0)
             return rc;
 

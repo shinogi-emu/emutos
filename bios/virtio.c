@@ -17,6 +17,7 @@
 #include "virtio_input.h"
 #include "virtio_9p.h"
 #include "virtio_blk.h"
+#include "hostfs_link.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -323,7 +324,7 @@ static const char *virtio_name(ULONG id)
  *
  * Returns 0 on success.
  */
-static WORD virtio_negotiate(WORD slot)
+static WORD virtio_negotiate(WORD slot, ULONG want_lo)
 {
     ULONG dev_lo, dev_hi, drv_lo, drv_hi;
     ULONG status;
@@ -340,12 +341,15 @@ static WORD virtio_negotiate(WORD slot)
     dev_hi = vio_read32(slot, VIRTIO_MMIO_DEVICE_FEATURES);
 
     /*
-     * Take nothing from the low word yet.  Every low-word bit is
-     * device-specific and each driver will opt in to what it needs;
-     * accepting a feature we do not implement changes the layout the
-     * device expects and breaks the queue silently.
+     * The low word is device-specific, so nothing is taken from it
+     * except what the caller asked for on a particular device's behalf
+     * -- accepting a feature we do not implement changes the layout the
+     * device expects and breaks the queue silently.  WANT_LO is a
+     * request, not a demand: a bit the device does not offer is simply
+     * not taken, and the driver checks for itself whether it got what
+     * it needed (see hostfs_link_attach() and MULTIPORT).
      */
-    drv_lo = 0;
+    drv_lo = dev_lo & want_lo;
     drv_hi = dev_hi & (1UL << VIRTIO_F_VERSION_1_BIT);
 
     /*
@@ -484,7 +488,7 @@ WORD virtio_probe(void)
 
     for (slot = 0; slot < VIRTIO_MMIO_NB; slot++)
     {
-        ULONG id, version, vendor;
+        ULONG id, version, vendor, want_lo;
 
         if (vio_read32(slot, VIRTIO_MMIO_MAGIC) != VIRTIO_MAGIC)
             continue;
@@ -506,7 +510,21 @@ WORD virtio_probe(void)
             continue;
         }
 
-        if (virtio_negotiate(slot) == 0)
+        /*
+         * Device-specific features, asked for before the driver that
+         * needs them runs: FEATURES_OK is written during negotiation
+         * and a feature not taken there cannot be taken afterwards.
+         * MULTIPORT is what gives a virtio-console its control queues
+         * and its ports past 0, and QEMU reserves port 0 for a
+         * `virtconsole`, so a `virtserialport` is unreachable without
+         * it -- see the handshake note in hostfs_link.c.
+         */
+        if (id == VIRTIO_ID_CONSOLE)
+            want_lo = 1UL << VIRTIO_CONSOLE_F_MULTIPORT_BIT;
+        else
+            want_lo = 0;
+
+        if (virtio_negotiate(slot, want_lo) == 0)
         {
             found++;
             if (id == VIRTIO_ID_RNG)
@@ -515,6 +533,8 @@ WORD virtio_probe(void)
                 virtio_input_attach(slot);
             if (id == VIRTIO_ID_9P)
                 virtio_9p_attach(slot);
+            if (id == VIRTIO_ID_CONSOLE)
+                hostfs_link_attach(slot);
 #if CONF_WITH_VIRTIO_BLK
             if (id == VIRTIO_ID_BLK)
                 virtio_blk_attach(slot);

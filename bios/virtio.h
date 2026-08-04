@@ -109,6 +109,15 @@
 #define VIRTIO_F_ACCESS_PLATFORM_BIT 1  /* bit 33 */
 
 /*
+ * Device-specific feature bits live in the LOW word and mean different
+ * things on different devices, so each is named for its device.
+ * MULTIPORT is what gives a virtio-console its control queue pair and
+ * its ports past port 0; it must be taken during negotiation, before
+ * the driver that needs it has run.
+ */
+#define VIRTIO_CONSOLE_F_MULTIPORT_BIT  1   /* bit 1 of the low word */
+
+/*
  * Split virtqueue.
  *
  * Layout QEMU expects (hw/virtio/virtio.c:65-95). Every field is
