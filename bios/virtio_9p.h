@@ -38,6 +38,30 @@
 
 #define P9_O_RDONLY  0UL
 
+/*
+ * A 9P directory cookie.
+ *
+ * Treaddir's offset and the per-entry offset in Rreaddir are both EIGHT
+ * bytes on the wire, and the value is OPAQUE: it is whatever the host's
+ * telldir() produced, handed straight back to its seekdir(). It is not
+ * an entry index and not a byte offset, so no arithmetic may be done on
+ * it and no part of it may be dropped.
+ *
+ * It is carried as two ULONGs because real hosts use the whole width.
+ * Linux tmpfs cookies are small integers and fit in 32 bits; ext4 with
+ * dir_index hands out a hash packed as (major_hash << 32) | minor_hash,
+ * so the half that identifies the entry lives ENTIRELY in the high word.
+ * Keeping only the low half makes every seek land back at the start of
+ * the directory, which reads as a directory that never ends: the same
+ * page comes back for ever, its entries repeat, and the entries past
+ * that first page are never seen at all.
+ */
+typedef struct
+{
+    ULONG lo;
+    ULONG hi;
+} P9DIROFF;
+
 void virtio_9p_attach(WORD slot);
 WORD virtio_9p_present(void);
 LONG p9_attach(void);
@@ -47,9 +71,9 @@ LONG p9_getattr(ULONG fid, ULONG *size, UWORD *is_dir, ULONG *mtime,
                 UWORD *writable);
 void p9_clunk(ULONG fid);
 LONG p9_lopen(ULONG fid, ULONG flags);
-LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen);
+LONG p9_readdir(ULONG fid, const P9DIROFF *offset, UBYTE *buf, ULONG buflen);
 LONG p9_read(ULONG fid, ULONG offset, UBYTE *buf, ULONG count);
 ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
-                     ULONG namemax, ULONG *next_off);
+                     ULONG namemax, P9DIROFF *next_off);
 
 #endif /* VIRTIO_9P_H */

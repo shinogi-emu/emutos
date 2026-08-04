@@ -128,9 +128,13 @@ static void dir_sort(void)
  *     listing that is short and says so can be acted on; one that is
  *     short and silent looks exactly like an empty folder.
  *
- *   - a device whose entries do not advance the offset would make this
- *     re-read the same page forever, so the page count is bounded.
- *     Reaching that bound is also reported.
+ *   - a directory whose offset does not advance across a whole page is
+ *     stopped THERE, not merely bounded by the page count. A bound
+ *     alone is not enough: re-reading one page 256 times fills the
+ *     table with 256 copies of the same entries, and a listing of
+ *     plausible names in plausible order is far harder to recognise as
+ *     broken than a short one. The page count stays as a second, outer
+ *     bound in case the offset advances yet never reaches the end.
  *
  * dirbuf and name are static, not locals: this runs on the BDOS's
  * dedicated internal stack (see rwa.S, "fstrt"), which is a couple of
@@ -144,7 +148,7 @@ static char dirent_name[HOSTFS_MAX_NAME];
 
 static LONG dir_snapshot(ULONG dirfid)
 {
-    ULONG diroff = 0;
+    P9DIROFF diroff, pagestart, next;
     ULONG pages = 0;
     LONG dropped = 0;
     LONG toolong = 0;
@@ -152,6 +156,8 @@ static LONG dir_snapshot(ULONG dirfid)
 
     dir_count = 0;
     dir_pos = 0;
+    diroff.lo = 0;
+    diroff.hi = 0;
 
     if (p9_walk(dirfid, HOSTFS_SCAN_FID, 0) != 0)
         return EDRIVE;
@@ -161,10 +167,10 @@ static LONG dir_snapshot(ULONG dirfid)
         return EDRIVE;
     }
 
-    while ((n = p9_readdir(HOSTFS_SCAN_FID, diroff, dirbuf,
+    while ((n = p9_readdir(HOSTFS_SCAN_FID, &diroff, dirbuf,
                            sizeof(dirbuf))) > 0)
     {
-        ULONG pos, off, next = 0;
+        ULONG pos, off;
         WORD progress = 0;
 
         if (++pages > HOSTFS_MAX_DIRPAGES)
@@ -173,6 +179,8 @@ static LONG dir_snapshot(ULONG dirfid)
                    (WORD)HOSTFS_MAX_DIRPAGES));
             break;
         }
+
+        pagestart = diroff;
 
         for (pos = 0; pos < (ULONG)n; )
         {
@@ -210,6 +218,18 @@ static LONG dir_snapshot(ULONG dirfid)
 
         if (!progress)
             break;              /* nothing consumed: stop rather than spin */
+
+        /*
+         * The page was consumed but left the cookie exactly where it
+         * started, so the next request would return this same page
+         * again. Stop and say so: going round silently would duplicate
+         * every entry until the table filled.
+         */
+        if (diroff.lo == pagestart.lo && diroff.hi == pagestart.hi)
+        {
+            KINFO(("hostfs: directory offset did not advance; listing stopped\n"));
+            break;
+        }
     }
 
     p9_clunk(HOSTFS_SCAN_FID);
@@ -309,8 +329,11 @@ static char lookup_want[13];
 
 static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
 {
-    ULONG diroff = 0;
+    P9DIROFF diroff, pagestart, next;
     LONG n;
+
+    diroff.lo = 0;
+    diroff.hi = 0;
 
     hostfs_atari_clip(atari, lookup_want);
 
@@ -327,11 +350,13 @@ static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
         return 0;
     }
 
-    while ((n = p9_readdir(HOSTFS_SCAN_FID, diroff, lookup_buf,
+    while ((n = p9_readdir(HOSTFS_SCAN_FID, &diroff, lookup_buf,
                            sizeof(lookup_buf))) > 0)
     {
-        ULONG pos, off, next = 0;
+        ULONG pos, off;
         WORD progress = 0;
+
+        pagestart = diroff;
 
         for (pos = 0; pos < (ULONG)n; )
         {
@@ -357,6 +382,12 @@ static WORD hostfs_resolve_in(ULONG dirfid, const char *atari, char *out)
 
         if (!progress)
             break;              /* nothing consumed: stop rather than spin */
+
+        /* Same rule as dir_snapshot(): a cookie that has not moved
+         * means the next request returns this page again, so a name
+         * that is genuinely absent would be searched for for ever. */
+        if (diroff.lo == pagestart.lo && diroff.hi == pagestart.hi)
+            break;
     }
 
     p9_clunk(HOSTFS_SCAN_FID);

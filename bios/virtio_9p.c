@@ -253,12 +253,16 @@ LONG p9_attach(void)
     {
         UBYTE dirbuf[512];
         char name[64];
-        ULONG off = 0, next = 0, pos;
+        P9DIROFF start, next;
+        ULONG off = 0, pos;
         LONG n;
+
+        start.lo = 0;
+        start.hi = 0;
 
         if (p9_walk(P9_ROOT_FID, 1, 0) == 0 && p9_lopen(1, P9_O_RDONLY) == 0)
         {
-            n = p9_readdir(1, 0, dirbuf, sizeof(dirbuf));
+            n = p9_readdir(1, &start, dirbuf, sizeof(dirbuf));
             for (pos = 0; n > 0 && pos < (ULONG)n; )
             {
                 off = p9_dirent_next(dirbuf, (ULONG)n, pos, name,
@@ -387,7 +391,7 @@ LONG p9_lopen(ULONG fid, ULONG flags)
  * header. Asking for more than that would just get the server's own
  * reply truncated or refused.
  */
-LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen)
+LONG p9_readdir(ULONG fid, const P9DIROFF *offset, UBYTE *buf, ULONG buflen)
 {
     ULONG off = 7;
     ULONG count, avail, request;
@@ -400,9 +404,16 @@ LONG p9_readdir(ULONG fid, ULONG offset, UBYTE *buf, ULONG buflen)
     p9_tx[4] = P9_TREADDIR;
     p9_st32(p9_tx + off, fid);
     off += 4;
-    p9_st32(p9_tx + off, offset);   /* offset is 8 bytes, low half */
+
+    /*
+     * offset is 8 bytes, little-endian, so the low word goes first.
+     * BOTH halves are sent: the high word is where ext4 keeps the part
+     * of its hash cookie that identifies the entry (see P9DIROFF), and
+     * sending a zero there seeks back to the start of the directory.
+     */
+    p9_st32(p9_tx + off, offset->lo);
     off += 4;
-    p9_st32(p9_tx + off, 0);
+    p9_st32(p9_tx + off, offset->hi);
     off += 4;
     p9_st32(p9_tx + off, request);
     off += 4;
@@ -504,7 +515,9 @@ LONG p9_read(ULONG fid, ULONG offset, UBYTE *buf, ULONG count)
  * Each is qid[13] offset[8] type[1] name[s], so the name length sits
  * at +22 and the name itself at +24. next_off receives the 9P offset
  * to hand to the following Treaddir, which is the entry's own offset
- * field rather than a byte count.
+ * field rather than a byte count -- all EIGHT bytes of it, since the
+ * value is the host's opaque telldir() cookie and hosts do use the full
+ * width (see P9DIROFF in virtio_9p.h).
  *
  * buflen is the number of valid bytes in buf (what p9_readdir actually
  * returned), not the size of whatever array the caller declared it
@@ -530,7 +543,7 @@ LONG p9_read(ULONG fid, ULONG offset, UBYTE *buf, ULONG count)
  * one thing the listing and the open path have to agree on.
  */
 ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
-                     ULONG namemax, ULONG *next_off)
+                     ULONG namemax, P9DIROFF *next_off)
 {
     ULONG n;
 
@@ -544,17 +557,18 @@ ULONG p9_dirent_next(const UBYTE *buf, ULONG buflen, ULONG off, char *name,
     if (off + 24 + n > buflen)
         return 0;
 
+    /* offset[8] at +13, little-endian: low word first, then high. */
+    next_off->lo = p9_ld32(buf + off + 13);
+    next_off->hi = p9_ld32(buf + off + 17);
+
     if (n >= namemax)
     {
         name[0] = '\0';             /* too long for the caller: skip it */
-        *next_off = p9_ld32(buf + off + 13);
         return off + 24 + n;
     }
 
     memcpy(name, buf + off + 24, n);
     name[n] = '\0';
-
-    *next_off = p9_ld32(buf + off + 13);
 
     return off + 24 + n;
 }
