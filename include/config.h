@@ -1119,6 +1119,36 @@
 #endif
 
 /*
+ * Set CONF_WITH_VIRTIO_BLK_WRITE to 1 to let the virtio-blk driver
+ * issue writes.  At 0 the driver is read-only and refuses a write with
+ * EWRPRO rather than attempting it.
+ *
+ * This is off by default because of what this project puts on the other
+ * end of the device, not because of the driver.  The driver's write
+ * path is complete: a 12KB file written from the guest arrives in the
+ * host folder byte for byte, across several clusters, and the medium
+ * takes every sector it is given.
+ *
+ * What is not safe is that host side -- QEMU's vvfat driver in its
+ * read-write mode, which QEMU itself documents as experimental.  It
+ * loses host data, silently, in a sequence any file manager performs:
+ *
+ *   1. delete a file on the drive
+ *   2. write to a DIFFERENT file, in a subdirectory
+ *
+ * The second file's data reaches the host correctly and its LENGTH does
+ * not: the host file is truncated to the length of the file deleted in
+ * step 1, and the guest is told the write succeeded.  Reproducible on
+ * every run.  The write path is finished and kept here so that a host
+ * mechanism without this defect -- a real disk image, or a repaired
+ * vvfat -- needs no driver work; it is not on by default because with
+ * vvfat underneath it would quietly shorten the user's files.
+ */
+#ifndef CONF_WITH_VIRTIO_BLK_WRITE
+# define CONF_WITH_VIRTIO_BLK_WRITE 0
+#endif
+
+/*
  * Set CONF_WITH_VAMPIRE_SPI to 1 to activate SPI on the Vampire,
  * required for SD/MMC support on these boards
  */

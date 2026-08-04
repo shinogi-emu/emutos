@@ -24,6 +24,7 @@
 #include "bios.h"
 #include "../bdos/bdosstub.h"
 #include "../bdos/hostfs.h"
+#include "virtio_9p.h"
 #include "../vdi/vdistub.h"
 #include "bdosbind.h"
 #include "gemerror.h"
@@ -236,6 +237,16 @@ static void hostfs_selftest(void)
     LONG fh, n, total;
     ULONG hash;
     WORD i;
+
+    /*
+     * Everything below names drive C, which is the host folder only
+     * while the 9P device is there. With no 9P device and a vvfat
+     * block drive attached, C: is that drive instead -- and parts of
+     * this self-test WRITE, so it would scribble on the block drive.
+     * Ask for the 9P device by name rather than for a drive C.
+     */
+    if (!virtio_9p_present())
+        return;
 
     /*
      * List the drive while opening a file inside the loop.
@@ -754,6 +765,11 @@ static void hostfs_dtatest(void)
  * folder takes C while both exist), and hard-coding it would make this
  * report nothing the day that changes.
  */
+#if CONF_WITH_VIRTIO_BLK_WRITE
+static void vblk_writetest(WORD drive);
+static void vblk_dirtest(WORD drive);
+#endif
+
 static WORD vblk_drive(void)
 {
     WORD i;
@@ -832,15 +848,229 @@ static void vblk_selftest(void)
     else
         KINFO(("vblk: open %s rc %ld\n", path, fh));
 
+#if CONF_WITH_VIRTIO_BLK_WRITE
+    vblk_writetest(drive);
+#else
     /*
-     * Writes are refused, deliberately: the host side is QEMU's vvfat
-     * in read-only mode. This asserts that they fail as write-protect
-     * rather than being attempted and half-succeeding.
+     * Writes are refused unless the build asks for them, so this
+     * asserts that they fail as write-protect rather than being
+     * attempted and half-succeeding. See include/config.h for why the
+     * default is off -- it is about QEMU's vvfat, not about the driver.
      */
     strcpy(path, "@:\\NEW.TXT");
     path[0] = 'A' + drive;
     KINFO(("vblk: create rc %ld\n", Fcreate(path, 0)));
+#endif
 }
+
+#if CONF_WITH_VIRTIO_BLK_WRITE
+
+/* Contents of NEW.TXT. No newline: it is printed on a golden line. */
+#define VBLK_WRITE_TEXT "vvfat write test"
+
+/*
+ * BIGWRITE.DAT is deliberately larger than one cluster. vvfat lays the
+ * drive out with 16 sectors to a cluster, so 8192 bytes is exactly one,
+ * and a file that fits in one proves nothing about allocating a chain:
+ * 12288 forces a second cluster, a FAT entry linking the two, and a
+ * directory entry whose size is not a single cluster's worth.
+ */
+#define VBLK_WRITE_BIG  12288
+
+static UBYTE vblk_bigbyte(WORD i)
+{
+    /*
+     * i is a 16-bit int here, so the arithmetic is done in ULONG. The
+     * pattern differs from BIG.DAT's on purpose -- a read-back that
+     * silently returned the other file would otherwise hash correctly.
+     */
+    return (UBYTE)(((ULONG)(UWORD)i * 11UL + 7UL) & 0xffUL);
+}
+
+/*
+ * Write to the drive, and read back what was written.
+ *
+ * This can only ever report what the GUEST saw. That the file appears
+ * on the host with the right contents, and that nothing already in the
+ * host folder was damaged, is checked from the host side by
+ * tools/check-vvfat-write.py in the shinogi repository: vvfat's
+ * documented failure mode is mangling the directory it maps, which no
+ * amount of guest-side bookkeeping would notice.
+ */
+static void vblk_writetest(WORD drive)
+{
+    char path[16];
+    LONG fh, n, total;
+    ULONG hash;
+    WORD i;
+
+    strcpy(path, "@:\\NEW.TXT");
+    path[0] = 'A' + drive;
+
+    fh = Fcreate(path, 0);
+    if (fh < 0)
+    {
+        KINFO(("vblk: create rc %ld\n", fh));
+        return;
+    }
+
+    n = Fwrite((WORD)fh, (LONG)strlen(VBLK_WRITE_TEXT), VBLK_WRITE_TEXT);
+    KINFO(("vblk: write %ld bytes\n", n));
+    KINFO(("vblk: wclose rc %ld\n", Fclose((WORD)fh)));
+
+    /* Round trip: what the guest wrote, read back by the guest. */
+    fh = Fopen(path, 0);
+    if (fh > 0)
+    {
+        n = Fread((WORD)fh, 63L, selftest_buf);
+        if (n >= 0)
+        {
+            selftest_buf[n] = '\0';
+            KINFO(("vblk: reread %ld bytes: %s\n", n, selftest_buf));
+        }
+        Fclose((WORD)fh);
+    }
+    else
+        KINFO(("vblk: reopen rc %ld\n", fh));
+
+    /*
+     * The directory operations run HERE, between the small write and
+     * the large one, rather than after both. They delete a file, and
+     * the large write that follows then reallocates the clusters that
+     * delete freed -- which is the case a mapping driver gets wrong:
+     * writing the new file's data through to the host file the freed
+     * clusters used to belong to. Doing the delete last would never
+     * reach for those clusters again and the whole question would go
+     * untested.
+     */
+    vblk_dirtest(drive);
+
+    strcpy(path, "@:\\BIGWRITE.DAT");
+    path[0] = 'A' + drive;
+
+    for (i = 0; i < VBLK_WRITE_BIG; i++)
+        selftest_big[i] = vblk_bigbyte(i);
+
+    fh = Fcreate(path, 0);
+    if (fh < 0)
+    {
+        KINFO(("vblk: bigcreate rc %ld\n", fh));
+        return;
+    }
+
+    KINFO(("vblk: bigwrite %ld bytes\n",
+           Fwrite((WORD)fh, (LONG)VBLK_WRITE_BIG, selftest_big)));
+    KINFO(("vblk: bigwclose rc %ld\n", Fclose((WORD)fh)));
+
+    /*
+     * Read it back into the same buffer, which still holds the pattern
+     * that was just written -- so it is cleared first. Otherwise a read
+     * that returned nothing at all would still hash as if it had
+     * worked.
+     */
+    bzero(selftest_big, VBLK_WRITE_BIG);
+
+    fh = Fopen(path, 0);
+    if (fh > 0)
+    {
+        total = 0;
+        hash = 2166136261UL;
+
+        while ((n = Fread((WORD)fh, (LONG)SELFTEST_BIG, selftest_big)) > 0)
+        {
+            LONG j;
+
+            for (j = 0; j < n; j++)
+            {
+                hash ^= selftest_big[j];
+                hash *= 16777619UL;
+            }
+            total += n;
+        }
+
+        if (n == 0)
+            KINFO(("vblk: bigreread %ld bytes fnv1a 0x%08lx\n", total, hash));
+
+        Fclose((WORD)fh);
+    }
+    else
+        KINFO(("vblk: bigreopen rc %ld\n", fh));
+}
+
+/*
+ * Delete, rename and subdirectory creation.
+ *
+ * Creating a file is the easy half. What actually reaches into the
+ * directory the host driver is mapping is removing an entry, renaming
+ * one, and adding a directory -- and the desktop does all three the
+ * moment anyone drags an icon. Testing only Fcreate would leave the
+ * riskiest operations unexercised while reporting that "writing works".
+ */
+static void vblk_dirtest(WORD drive)
+{
+    char path[24];
+    char other[24];
+    LONG fh;
+    WORD i;
+
+    /* Create a file, then delete it, then confirm it is really gone. */
+    strcpy(path, "@:\\DEL.TXT");
+    path[0] = 'A' + drive;
+
+    fh = Fcreate(path, 0);
+    if (fh < 0)
+    {
+        KINFO(("vblk: delcreate rc %ld\n", fh));
+        return;
+    }
+    Fwrite((WORD)fh, 8L, "deleteme");
+    Fclose((WORD)fh);
+
+    KINFO(("vblk: delete rc %ld\n", Fdelete(path)));
+
+    /*
+     * Asked for by name through a fresh search, not by reopening the
+     * handle: a directory entry that was unlinked from the FAT but left
+     * in place still answers an Fopen.
+     */
+    Fsetdta(selftest_dta);
+    KINFO(("vblk: gone rc %ld\n", Fsfirst(path, 0)));
+
+    /* Rename the file the caller above wrote. */
+    strcpy(path, "@:\\NEW.TXT");
+    path[0] = 'A' + drive;
+    strcpy(other, "@:\\RENAMED.TXT");
+    other[0] = 'A' + drive;
+
+    KINFO(("vblk: rename rc %ld\n", Frename(path, other)));
+
+    Fsetdta(selftest_dta);
+    KINFO(("vblk: renamed rc %ld\n", Fsfirst(other, 0)));
+
+    /* A new subdirectory, with a file in it. */
+    strcpy(path, "@:\\NEWDIR");
+    path[0] = 'A' + drive;
+    KINFO(("vblk: mkdir rc %ld\n", Dcreate(path)));
+
+    strcpy(path, "@:\\NEWDIR\\INSIDE.TXT");
+    path[0] = 'A' + drive;
+
+    fh = Fcreate(path, 0);
+    if (fh < 0)
+    {
+        KINFO(("vblk: innercreate rc %ld\n", fh));
+        return;
+    }
+
+    for (i = 0; i < 64; i++)
+        selftest_buf[i] = (UBYTE)('a' + (i % 26));
+
+    KINFO(("vblk: inner %ld bytes\n",
+           Fwrite((WORD)fh, 64L, selftest_buf)));
+    KINFO(("vblk: innerclose rc %ld\n", Fclose((WORD)fh)));
+}
+
+#endif /* CONF_WITH_VIRTIO_BLK_WRITE */
 #endif /* CONF_WITH_VIRTIO_BLK */
 
 #endif /* MACHINE_QEMU_VIRT */

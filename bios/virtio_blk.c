@@ -11,8 +11,17 @@
  * driver.  Everything above this file -- the MBR and Atari partition
  * scans, the BPB, FAT12/16 -- is stock EmuTOS.
  *
- * READ ONLY.  VIRTIO_BLK_T_OUT is not issued: writes are refused here
- * with EWRPRO rather than attempted.
+ * VIRTIO_BLK_T_IN and VIRTIO_BLK_T_OUT share one three-descriptor
+ * chain and differ only in which way the payload descriptor points:
+ * device-writable for a read, device-readable for a write.  Getting
+ * that flag wrong does not fail loudly -- the device simply transfers
+ * in the direction the descriptor claims -- so it is derived from the
+ * request type in one place rather than passed in.
+ *
+ * T_OUT is issued only when CONF_WITH_VIRTIO_BLK_WRITE is set, which it
+ * is not by default; a write is refused with EWRPRO instead.  That is
+ * about QEMU's vvfat host driver losing data, not about anything here
+ * -- see the long note in include/config.h.
  *
  * Every multi-byte field of a request header is little-endian on the
  * wire and this is a big-endian target, so the header is assembled byte
@@ -39,7 +48,7 @@
  * descriptors do not all precede its device-writable ones.
  */
 #define VBLK_D_HDR      0       /* 16-byte header, device-readable */
-#define VBLK_D_DATA     1       /* payload,        device-writable */
+#define VBLK_D_DATA     1       /* payload,        direction by type */
 #define VBLK_D_STATUS   2       /* 1 status byte,  device-writable */
 
 #define VBLK_HDR_SIZE   16
@@ -100,7 +109,28 @@ static LONG vblk_request(VBLK *v, ULONG type, ULONG sector, UBYTE *buf,
                          ULONG bytes)
 {
     ULONG len = 0;
+    ULONG expect;
+    UWORD dflags;
+    LONG fault;
     WORD head;
+
+    /*
+     * A read has the device fill the payload, so that descriptor is
+     * device-writable and the device reports the payload plus the
+     * status byte as written.  A write hands the payload to the device,
+     * so the descriptor is device-readable and the only byte written
+     * back is the status.
+     */
+    if (type == VIRTIO_BLK_T_IN)
+    {
+        dflags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
+        expect = bytes + 1;
+    }
+    else
+    {
+        dflags = VRING_DESC_F_NEXT;
+        expect = 1;
+    }
 
     /* type, then a reserved word, then the 64-bit sector number. */
     vblk_st32(v->hdr, type);
@@ -118,8 +148,7 @@ static LONG vblk_request(VBLK *v, ULONG type, ULONG sector, UBYTE *buf,
               VRING_DESC_F_NEXT);
     virtq_chain(&v->vq, VBLK_D_HDR, VBLK_D_DATA);
 
-    virtq_add(&v->vq, VBLK_D_DATA, (ULONG)buf, bytes,
-              VRING_DESC_F_WRITE | VRING_DESC_F_NEXT);
+    virtq_add(&v->vq, VBLK_D_DATA, (ULONG)buf, bytes, dflags);
     virtq_chain(&v->vq, VBLK_D_DATA, VBLK_D_STATUS);
 
     virtq_add(&v->vq, VBLK_D_STATUS, (ULONG)&v->status, 1UL,
@@ -127,30 +156,35 @@ static LONG vblk_request(VBLK *v, ULONG type, ULONG sector, UBYTE *buf,
 
     virtq_kick(&v->vq, VBLK_D_HDR);
 
+    /* Failures are reported as the fault of the direction we asked for. */
+    fault = (type == VIRTIO_BLK_T_IN) ? EREADF : EWRITF;
+
     head = virtq_wait(&v->vq, &len);
     if (head < 0)
     {
         KINFO(("virtio-blk: slot %d request timed out\n", v->slot));
-        return EREADF;
+        return fault;
     }
 
     if (v->status != VIRTIO_BLK_S_OK)
     {
         KINFO(("virtio-blk: slot %d sector %lu status %d\n",
                v->slot, sector, v->status));
-        return EREADF;
+        return fault;
     }
 
     /*
-     * The device reports the bytes it wrote, which includes the status
-     * byte.  Anything short of the payload means a partial transfer,
-     * and the tail of the buffer still holds whatever was there before.
+     * The device reports the bytes it wrote into our buffers: for a read
+     * that is the payload plus the status byte, for a write the status
+     * byte alone.  Anything short means a partial transfer -- on a read
+     * the tail of the buffer still holds whatever was there before, and
+     * on a write the medium does.
      */
-    if (len < bytes + 1)
+    if (len < expect)
     {
         KINFO(("virtio-blk: slot %d short transfer %lu of %lu\n",
-               v->slot, len, bytes + 1));
-        return EREADF;
+               v->slot, len, expect));
+        return fault;
     }
 
     return 0;
@@ -168,21 +202,16 @@ LONG virtio_blk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD dev)
 {
     VBLK *v = vblk_dev((UWORD)dev);
     ULONG first = (ULONG)sector;
+    ULONG type = (rw & RW_RW) ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
     ULONG bytes;
 
     if (!v)
         return EUNDEV;
 
-    if (rw & RW_RW)
-    {
-        /*
-         * Deliberately not implemented.  The host side of this is
-         * QEMU's vvfat driver, whose read-write mode is documented as
-         * experimental with a history of corrupting the host
-         * directory, so a write is refused rather than issued.
-         */
+#if !CONF_WITH_VIRTIO_BLK_WRITE
+    if (type == VIRTIO_BLK_T_OUT)
         return EWRPRO;
-    }
+#endif
 
     if (count <= 0)
         return 0;
@@ -201,7 +230,7 @@ LONG virtio_blk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD dev)
         return ESECNF;
     }
 
-    return vblk_request(v, VIRTIO_BLK_T_IN, first, buf, bytes);
+    return vblk_request(v, type, first, buf, bytes);
 }
 
 LONG virtio_blk_ioctl(UWORD dev, UWORD ctrl, void *arg)
