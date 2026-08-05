@@ -848,8 +848,8 @@ void screen_get_current_mode_info(UWORD *planes, UWORD *hz_rez, UWORD *vt_rez)
      * of 8.
      */
     *planes = 16;
-    *hz_rez = QEMUVIRT_SCREEN_W;
-    *vt_rez = QEMUVIRT_SCREEN_H;
+    *hz_rez = qemuvirt_screen_w;
+    *vt_rez = qemuvirt_screen_h;
 #else
     atari_get_current_mode_info(planes, hz_rez, vt_rez);
 #endif

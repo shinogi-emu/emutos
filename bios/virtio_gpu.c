@@ -71,17 +71,17 @@ static void gpu_begin(ULONG type, WORD size)
  *
  * Success is any response type in 0x1100..0x11ff. Returns 0 on success.
  */
-static WORD gpu_send(WORD size)
+static WORD gpu_send_resp(WORD size, WORD resplen)
 {
     ULONG resp;
     LONG got;
     WORD i;
 
-    for (i = 0; i < GPU_HDR_SIZE; i++)
+    for (i = 0; i < resplen; i++)
         gpu_resp[i] = 0;
 
     got = virtq_request(&gpu_vq, gpu_req, (ULONG)size,
-                        gpu_resp, GPU_HDR_SIZE);
+                        gpu_resp, (ULONG)resplen);
     if (got < 0)
     {
         KINFO(("gpu: command 0x%04lx timed out\n", gpu_get32(gpu_req, 0)));
@@ -99,6 +99,56 @@ static WORD gpu_send(WORD size)
     return 0;
 }
 
+static WORD gpu_send(WORD size)
+{
+    return gpu_send_resp(size, GPU_HDR_SIZE);
+}
+
+/*
+ * Ask the host what size it wants.
+ *
+ * GET_DISPLAY_INFO returns a rect per scanout; QEMU fills the first from
+ * the virtio-gpu-device xres/yres properties, which is how the launcher
+ * chooses the mode. Anything unusable -- no reply, a disabled scanout,
+ * a size below the 16x16 minimum or past what the ARGB surface is
+ * budgeted for -- leaves the caller's defaults alone rather than
+ * producing a screen that cannot be displayed.
+ *
+ * The width is rounded DOWN to a multiple of 8: update_rez_dependent()
+ * computes the stride as V_REZ_HZ / 8 * v_planes, so an odd width would
+ * shear every line.
+ */
+WORD virtio_gpu_preferred(WORD slot, WORD *width, WORD *height)
+{
+    ULONG w, h;
+
+    gpu_begin(VIRTIO_GPU_CMD_GET_DISPLAY_INFO, GPU_HDR_SIZE);
+    if (gpu_send_resp(GPU_HDR_SIZE, GPU_DISPINFO_SIZE) != 0)
+        return -1;
+
+    /* pmodes[0] follows the header: rect is x, y, width, height. */
+    if (gpu_get32(gpu_resp, GPU_DISPINFO_PM0 + GPU_DISPINFO_ENABLED) == 0)
+        return -1;
+
+    w = gpu_get32(gpu_resp, GPU_DISPINFO_PM0 + GPU_DISPINFO_W);
+    h = gpu_get32(gpu_resp, GPU_DISPINFO_PM0 + GPU_DISPINFO_H);
+
+    w &= ~7UL;
+
+    if (w < GPU_MIN_DIM || h < GPU_MIN_DIM)
+        return -1;
+    if (w > QEMUVIRT_SCREEN_MAX_W || h > QEMUVIRT_SCREEN_MAX_H)
+    {
+        KINFO(("gpu: host asked for %ldx%ld, past the %dx%d we can hold\n",
+               w, h, QEMUVIRT_SCREEN_MAX_W, QEMUVIRT_SCREEN_MAX_H));
+        return -1;
+    }
+
+    *width = (WORD)w;
+    *height = (WORD)h;
+    return 0;
+}
+
 /*
  * Bring the display up.
  *
@@ -109,8 +159,11 @@ static WORD gpu_send(WORD size)
  * until TRANSFER_TO_HOST_2D copies it -- the scanout surface points at
  * QEMU's own image, not at our buffer.
  */
-WORD virtio_gpu_init(WORD slot, ULONG fb, WORD width, WORD height)
+WORD virtio_gpu_init(WORD slot, ULONG fb, WORD *pwidth, WORD *pheight)
 {
+    WORD width = *pwidth;
+    WORD height = *pheight;
+
     if (width < GPU_MIN_DIM || height < GPU_MIN_DIM)
     {
         KINFO(("gpu: %dx%d is below the 16x16 minimum\n", width, height));
@@ -124,6 +177,17 @@ WORD virtio_gpu_init(WORD slot, ULONG fb, WORD width, WORD height)
     vio_write32(slot, VIRTIO_MMIO_STATUS,
                 VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER
                 | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
+
+    /*
+     * Now that the queue is live, ask the host what size it wants. This
+     * cannot happen before virtq_setup(): the query is an ordinary
+     * command and there is nowhere to put it until then.
+     */
+    if (virtio_gpu_preferred(slot, &width, &height) == 0)
+    {
+        *pwidth = width;
+        *pheight = height;
+    }
 
     gpu_begin(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D, GPU_CREATE_SIZE);
     gpu_set32(GPU_CREATE_ID, GPU_RESOURCE_ID);
@@ -240,7 +304,7 @@ void virtio_gpu_present(void)
     const ULONG *tab = (const ULONG *)QEMUVIRT_CTAB;
     const UWORD *src = (const UWORD *)v_bas_ad;
     ULONG *dst = (ULONG *)QEMUVIRT_ARGB_FB;
-    ULONG n = (ULONG)QEMUVIRT_SCREEN_W * QEMUVIRT_SCREEN_H;
+    ULONG n = (ULONG)gpu_w * gpu_h;
     ULONG i;
 
     if (!gpu_ready)
@@ -249,7 +313,7 @@ void virtio_gpu_present(void)
     for (i = 0; i < n; i++)
         dst[i] = tab[src[i]];
 
-    virtio_gpu_flush(0, 0, QEMUVIRT_SCREEN_W, QEMUVIRT_SCREEN_H);
+    virtio_gpu_flush(0, 0, gpu_w, gpu_h);
 }
 
 #endif /* MACHINE_QEMU_VIRT */

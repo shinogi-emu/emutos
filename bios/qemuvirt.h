@@ -135,8 +135,28 @@
  * Width must be a multiple of 8: update_rez_dependent() computes the
  * stride as V_REZ_HZ / 8 * v_planes.
  */
-#define QEMUVIRT_SCREEN_W   1280
-#define QEMUVIRT_SCREEN_H   720
+/*
+ * The size is settled at boot, not here. virtio_gpu_preferred() asks the
+ * host what it wants (QEMU's virtio-gpu-device carries it as xres/yres)
+ * and these hold the answer; the defaults are used when the host does
+ * not say.
+ *
+ * GEM is drawn with fixed-size bitmap fonts and icons, so a large screen
+ * makes everything small rather than roomy. 1024x768 is the compromise:
+ * enough space to work in, still legible.
+ */
+#define QEMUVIRT_SCREEN_DEF_W   1024
+#define QEMUVIRT_SCREEN_DEF_H   768
+
+/*
+ * The largest mode the memory map below is sized for. Raising this means
+ * moving QEMUVIRT_ARGB_FB's budget with it.
+ */
+#define QEMUVIRT_SCREEN_MAX_W   1920
+#define QEMUVIRT_SCREEN_MAX_H   1080
+
+extern WORD qemuvirt_screen_w;
+extern WORD qemuvirt_screen_h;
 
 /*
  * The ARGB surface virtio-gpu scans out, and the colour table used to
@@ -150,9 +170,14 @@
  * target byte order and the unused bit of RRRRRGGGGG0BBBBB all resolve
  * at table-build time and disappear from the conversion loop.
  */
-#define QEMUVIRT_ARGB_FB    0x01000000UL  /* 16MB: W*H*4 = 3.5MB      */
-#define QEMUVIRT_CTAB       0x01400000UL  /* 20MB: 65536 * 4 = 256KB  */
+/*
+ * The table comes FIRST because it is a fixed 256KB while the surface
+ * grows with the mode. With the surface first, anything past 1280x720
+ * ran into the table: 1280x1024 needs 5MB and only 4MB separated them.
+ */
+#define QEMUVIRT_CTAB       0x01000000UL  /* 16MB: 65536 * 4 = 256KB  */
 #define QEMUVIRT_CTAB_SIZE  65536UL
+#define QEMUVIRT_ARGB_FB    0x01100000UL  /* 17MB: 1920x1080x4 = 8MB  */
 
 /* Present every Nth VBL until damage tracking makes that unnecessary. */
 #define QEMUVIRT_PRESENT_DIV    5

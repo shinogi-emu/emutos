@@ -542,8 +542,8 @@ WORD virtio_probe(void)
             if (id == VIRTIO_ID_GPU)
             {
                 if (virtio_gpu_init(slot, QEMUVIRT_ARGB_FB,
-                                    QEMUVIRT_SCREEN_W,
-                                    QEMUVIRT_SCREEN_H) == 0)
+                                    &qemuvirt_screen_w,
+                                    &qemuvirt_screen_h) == 0)
                     virtio_gpu_build_ctab();
             }
         }

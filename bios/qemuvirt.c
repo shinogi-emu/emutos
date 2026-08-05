@@ -435,6 +435,14 @@ void qemuvirt_init_system_timer(void)
  * than raising an exception, for every CPU model.  Returns the EmuTOS
  * convention (20, 30, 40, 60), defaulting to 40 -- the machine default.
  */
+/*
+ * Screen size, settled at boot by virtio_gpu_preferred(). The defaults
+ * stand when the host does not say -- see bios/qemuvirt.h for why they
+ * are what they are.
+ */
+WORD qemuvirt_screen_w = QEMUVIRT_SCREEN_DEF_W;
+WORD qemuvirt_screen_h = QEMUVIRT_SCREEN_DEF_H;
+
 #define VIRT_CTRL_REG(offset) (*(volatile ULONG *)(VIRT_CTRL_BASE + (offset)))
 
 /*

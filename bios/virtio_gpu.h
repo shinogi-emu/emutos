@@ -108,7 +108,15 @@
 #define GPU_RESOURCE_ID     1
 #define GPU_SCANOUT_INDEX   0
 
-WORD virtio_gpu_init(WORD slot, ULONG fb, WORD width, WORD height);
+/* Offsets into the GET_DISPLAY_INFO reply. */
+#define GPU_DISPINFO_PM0        24      /* pmodes[0] follows the header */
+#define GPU_DISPINFO_W          8       /* rect.width within a pmode    */
+#define GPU_DISPINFO_H          12      /* rect.height                  */
+#define GPU_DISPINFO_ENABLED    16
+#define GPU_DISPINFO_SIZE       48      /* header + one pmode           */
+
+WORD virtio_gpu_preferred(WORD slot, WORD *width, WORD *height);
+WORD virtio_gpu_init(WORD slot, ULONG fb, WORD *pwidth, WORD *pheight);
 void virtio_gpu_flush(WORD x, WORD y, WORD w, WORD h);
 void virtio_gpu_testpattern(ULONG fb, WORD w, WORD h);
 
