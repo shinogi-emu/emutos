@@ -404,7 +404,20 @@ WORD ob_edit(OBJECT *tree, WORD obj, WORD in_char, WORD *idx, WORD kind)
             break;
         default:
             tmp_back = FALSE;
-            if (*idx > (edblk.te_txtlen - 2))
+            /*
+             * Back up over the last character when the cursor has run
+             * past the end of the buffer, so the new one overwrites it.
+             *
+             * The guard on *idx is not decoration. te_txtlen comes from
+             * the resource and belongs to the application, so it can be
+             * anything at all -- a field whose text buffer is declared
+             * as 1 byte makes the test below true at *idx == 0, and
+             * decrementing there gives -1, which is then used to index
+             * the validation string. D.g_valstr[-1] is a read outside
+             * the array, and whatever it happens to find decides whether
+             * the user's keystroke is accepted.
+             */
+            if ((*idx > 0) && (*idx > (edblk.te_txtlen - 2)))
             {
                 cur_pos--;
                 start = cur_pos;
