@@ -644,6 +644,38 @@
  * _realmain loads it.
  */
 #ifdef MACHINE_QEMU_VIRT
+/*
+ * Unmapped addresses fault here. target/m68k registers
+ * m68k_cpu_transaction_failed, so an access to nothing raises a bus
+ * error exactly as it would on Atari hardware.
+ *
+ * The !CONF_ATARI_HARDWARE block further down turns this off for
+ * everything that is not an Atari, which is a fair default and wrong for
+ * this machine. It matters because probing for optional hardware is
+ * built on catching that fault -- check_read_byte() does not even exist
+ * without it, and dmasound.c uses it to decide whether there is sound.
+ */
+# ifndef CONF_WITH_BUS_ERROR
+#  define CONF_WITH_BUS_ERROR 1
+# endif
+
+/*
+ * DMA sound. The machine carries the STe/Falcon sound block at the
+ * address the hardware uses, so the driver in bios/dmasound.c applies
+ * here even though CONF_ATARI_HARDWARE is 0 and would otherwise switch
+ * it off with the rest of the ST chipset.
+ *
+ * It still detects before using anything: the block is only mapped when
+ * the emulator was given somewhere to send samples, so a run without
+ * audio reads a bus error and reports no sound, which is the truth.
+ */
+# ifndef CONF_WITH_DMASOUND
+#  define CONF_WITH_DMASOUND 1
+# endif
+# ifndef CONF_WITH_XBIOS_SOUND
+#  define CONF_WITH_XBIOS_SOUND 1
+# endif
+
 # ifndef CONF_ATARI_HARDWARE
 #  define CONF_ATARI_HARDWARE 0
 # endif
