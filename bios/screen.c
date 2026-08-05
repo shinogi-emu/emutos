@@ -630,6 +630,26 @@ void screen_init_mode(void)
     lisa_screen_init();
 #endif
 
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * Report a resolution to programs that ask.
+     *
+     * There is no Atari video hardware here, so getrez() answers with
+     * sshiftmod, and nothing was setting it -- it stayed at its initial
+     * zero, which is ST_LOW: 320x200 and forty columns. Software that
+     * checks the resolution before doing anything then draws the obvious
+     * conclusion; SpeedoGDOS refuses to install on it, asking for an
+     * eighty column display, on a screen that is actually 1280 wide.
+     *
+     * ST_HIGH is the conventional answer for a framebuffer that is not
+     * an Atari mode -- the Amiga target and the Nova graphics card both
+     * report it. It says monochrome, eighty columns, which is the least
+     * misleading thing available in a byte that has no encoding for what
+     * this screen really is.
+     */
+    sshiftmod = ST_HIGH;
+#endif
+
     rez_was_hacked = FALSE; /* initial assumption */
 }
 
