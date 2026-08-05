@@ -34,6 +34,9 @@
 #include "processor.h"
 #include "initinfo.h"
 #include "machine.h"
+#ifdef MACHINE_QEMU_VIRT
+#include "qemuvirt.h"
+#endif
 #include "has.h"
 #include "cookie.h"
 #include "country.h"
@@ -1387,6 +1390,25 @@ static void bios_init(void)
     /* Initialize the processor */
     KDEBUG(("processor_init()\n"));
     processor_init();   /* Set CPU type, longframe and FPU type */
+
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * Take the CPU type from the bootinfo block rather than the probe.
+     *
+     * processor_init() cannot tell a 68040 from a 68060 here: the PCR
+     * probe that would do it is compiled out (see processor.S), because
+     * reading an unimplemented control register aborts the machine on
+     * unpatched QEMU instead of faulting, and the probe would kill the
+     * emulator before EmuTOS finished booting.  QEMU already knows what
+     * it is running -- it derives BI_CPUTYPE from -cpu -- so ask it
+     * instead of guessing.
+     *
+     * For the default -cpu m68040 this agrees with the probe and changes
+     * nothing.  It is -cpu m68060 that was reported as a 68040 to every
+     * program reading the _CPU cookie.
+     */
+    mcpu = qemuvirt_cputype();
+#endif
 
 #if CONF_WITH_ADVANCED_CPU
     is_bus32 = (UBYTE)detect_32bit_address_bus();
