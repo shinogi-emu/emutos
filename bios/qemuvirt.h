@@ -50,6 +50,24 @@
  * device's own line, so a handler must silence the device itself or the
  * level stays asserted and the CPU re-enters immediately.
  */
+/*
+ * Virtual machine control -- power off and reset.
+ *
+ * QEMU's own device for the virt machine (hw/misc/virt_ctrl.c), not a
+ * Goldfish one. FEATURES advertises what it can do; writing a command
+ * ends the machine, so nothing after the write runs.
+ */
+#define VIRT_CTRL_BASE      0xff009000UL
+#define VIRT_CTRL_FEATURES  0x00    /* R: bit 0 = power control       */
+#define VIRT_CTRL_CMD       0x04    /* W: see VIRT_CTRL_CMD_* below   */
+
+#define VIRT_CTRL_FEAT_POWER    0x00000001UL
+
+#define VIRT_CTRL_CMD_NOOP      0
+#define VIRT_CTRL_CMD_RESET     1
+#define VIRT_CTRL_CMD_HALT      2
+#define VIRT_CTRL_CMD_PANIC     3
+
 #define GF_PIC_BASE         0xff000000UL
 #define GF_PIC_STRIDE       0x1000UL
 #define GF_PIC_NB           6
@@ -208,6 +226,9 @@ ULONG qemuvirt_memconf(void);
 ULONG qemuvirt_altram_base(void);
 ULONG qemuvirt_altram_size(void);
 WORD qemuvirt_cputype(void);
+BOOL qemuvirt_can_shutdown(void);
+void qemuvirt_shutdown(void);
+void qemuvirt_reset(void);
 
 /* Host wall-clock time (UTC), from the goldfish RTC used for RTC #0. */
 ULONG qemuvirt_epoch_secs(void);

@@ -1962,6 +1962,8 @@ static void shutdown(void)
     amiga_shutdown();
 #elif defined(MACHINE_LISA)
     lisa_shutdown();
+#elif defined(MACHINE_QEMU_VIRT)
+    qemuvirt_shutdown();
 #endif
 }
 
@@ -1979,6 +1981,8 @@ BOOL can_shutdown(void)
     return amiga_can_shutdown();
 #elif defined(MACHINE_LISA)
     return TRUE;
+#elif defined(MACHINE_QEMU_VIRT)
+    return qemuvirt_can_shutdown();
 #else
     return FALSE;
 #endif

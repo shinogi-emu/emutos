@@ -2131,7 +2131,7 @@
  * It tries to power off the machine, if possible.
  */
 #ifndef CONF_WITH_SHUTDOWN
-# if DETECT_NATIVE_FEATURES || defined(MACHINE_FIREBEE) || defined(MACHINE_AMIGA) || defined(MACHINE_LISA)
+# if DETECT_NATIVE_FEATURES || defined(MACHINE_FIREBEE) || defined(MACHINE_AMIGA) || defined(MACHINE_LISA) || defined(MACHINE_QEMU_VIRT)
 #  define CONF_WITH_SHUTDOWN 1
 # else
 #  define CONF_WITH_SHUTDOWN 0

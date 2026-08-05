@@ -435,6 +435,41 @@ void qemuvirt_init_system_timer(void)
  * than raising an exception, for every CPU model.  Returns the EmuTOS
  * convention (20, 30, 40, 60), defaulting to 40 -- the machine default.
  */
+#define VIRT_CTRL_REG(offset) (*(volatile ULONG *)(VIRT_CTRL_BASE + (offset)))
+
+/*
+ * Power control.
+ *
+ * QEMU's virt machine carries a control device that can halt or reset
+ * the emulator, which is how a guest gets to end the session by itself:
+ * FreeMiNT's shutdown, and the Shut Down and Reboot items in every GEM
+ * desktop, all end up here. Without it the window simply has to be
+ * closed, and the guest never gets to finish what it was doing.
+ *
+ * FEATURES is read rather than assumed. The device is part of the virt
+ * machine, but a guest that writes a command to something that is not
+ * there would fault, and answering "cannot shut down" is the honest
+ * result on a machine that cannot.
+ */
+BOOL qemuvirt_can_shutdown(void)
+{
+    return (VIRT_CTRL_REG(VIRT_CTRL_FEATURES) & VIRT_CTRL_FEAT_POWER) != 0;
+}
+
+/* Power off. Does not return when the device is present. */
+void qemuvirt_shutdown(void)
+{
+    if (qemuvirt_can_shutdown())
+        VIRT_CTRL_REG(VIRT_CTRL_CMD) = VIRT_CTRL_CMD_HALT;
+}
+
+/* Reboot the machine. Does not return when the device is present. */
+void qemuvirt_reset(void)
+{
+    if (qemuvirt_can_shutdown())
+        VIRT_CTRL_REG(VIRT_CTRL_CMD) = VIRT_CTRL_CMD_RESET;
+}
+
 WORD qemuvirt_cputype(void)
 {
     const UBYTE *p = bi_find(BI_CPUTYPE);
