@@ -471,9 +471,39 @@ static void vi_drain(VIDEV *d)
                 btn_state = value ? (btn_state | 2) : (btn_state & ~2);
                 pending_btn = 1;
             }
+            else if (code == BTN_MIDDLE)
+            {
+                /*
+                 * Eiffel scancode for mouse button 3. The extra buttons
+                 * and the wheel reach GEM as IKBD scancodes rather than
+                 * through the mouse packet, so they go out the same way
+                 * a key does. Only the press is sent -- 0x37 is a
+                 * make code with no matching break in the protocol.
+                 */
+                if (value)
+                    call_ikbdraw(0x37);
+            }
             else
             {
                 vi_key(code, value);
+            }
+            break;
+
+        case EV_REL:
+            /*
+             * Wheel. QEMU reports one notch per event, positive away
+             * from the user. EmuTOS turns 0x59/0x5a back into a wheel
+             * event for the AES (bios/ikbd.c), which is why this is a
+             * scancode and not a mouse packet.
+             */
+            if (code == REL_WHEEL)
+            {
+                /* value is signed on the wire; the field is unsigned. */
+                LONG v = (LONG)value;
+                LONG n = (v < 0) ? -v : v;
+
+                while (n-- > 0)
+                    call_ikbdraw((v > 0) ? 0x59 : 0x5a);
             }
             break;
 
