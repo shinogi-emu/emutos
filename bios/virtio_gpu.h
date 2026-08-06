@@ -113,7 +113,13 @@
 #define GPU_DISPINFO_W          8       /* rect.width within a pmode    */
 #define GPU_DISPINFO_H          12      /* rect.height                  */
 #define GPU_DISPINFO_ENABLED    16
-#define GPU_DISPINFO_SIZE       48      /* header + one pmode           */
+/*
+ * The whole reply, not just the part we read. The device writes every
+ * scanout it has -- header plus sixteen entries -- and rejects the
+ * command outright if the buffer cannot take all of it, which is what
+ * "response size incorrect 48 vs 408" was.
+ */
+#define GPU_DISPINFO_SIZE       408     /* 24 + 16 * 24                 */
 
 WORD virtio_gpu_preferred(WORD slot, WORD *width, WORD *height);
 WORD virtio_gpu_init(WORD slot, ULONG fb, WORD *pwidth, WORD *pheight);

@@ -33,7 +33,8 @@
  * doing nothing at all.
  */
 static UBYTE gpu_req[64] __attribute__((aligned(4)));
-static UBYTE gpu_resp[64] __attribute__((aligned(4)));
+/* Sized for the largest reply, which is GET_DISPLAY_INFO's 408 bytes. */
+static UBYTE gpu_resp[GPU_DISPINFO_SIZE] __attribute__((aligned(4)));
 static UBYTE gpu_ring[1024] __attribute__((aligned(16)));
 
 static VIRTQ gpu_vq;
