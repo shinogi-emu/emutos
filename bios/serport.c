@@ -28,6 +28,9 @@
 #include "coldfire.h"
 #include "amiga.h"
 #include "ikbd.h"
+#ifdef MACHINE_QEMU_VIRT
+#include "qemuvirt.h"
+#endif
 
 /*
  * defines
@@ -322,6 +325,21 @@ LONG bconout1(WORD dev, WORD b)
 
     return 1L;
 # endif
+#elif defined(MACHINE_QEMU_VIRT)
+    /*
+     * The goldfish-tty is this machine's serial port: it is what QEMU's
+     * -serial connects to.  Without this, device 1 falls through to the
+     * "loop never returns" case below, which is untrue here -- bcostat1()
+     * reports ready, so the loop exits and the byte is discarded.  Every
+     * Bconout(1) was silently lost, and with it the only channel a
+     * program running from AUTO has to say anything to the host before
+     * the screen exists.
+     *
+     * Written raw.  Bconout is a byte channel and its callers emit their
+     * own carriage returns; translating here would double them.
+     */
+    qemuvirt_serial_putc((UBYTE)b);
+    return 1L;
 #else
     /* The above loop will never return */
     return 0L;

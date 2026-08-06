@@ -251,6 +251,7 @@ extern ULONG rtc_resync[];      /* times the deadline was jumped     */
 #define QEMUVIRT_MAX_RAM    (2032UL * 1024 * 1024)
 
 void kprintf_outc_qemuvirt(int c);
+void qemuvirt_serial_putc(UBYTE c);
 void qemuvirt_machine_init(void);
 void qemuvirt_init_system_timer(void);
 void qemuvirt_timer_int(void);   /* asm, bios/qemuvirt2.S */

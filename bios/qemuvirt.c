@@ -19,19 +19,31 @@
 #define GF_TTY_REG(offset) (*(volatile ULONG *)(GF_TTY_BASE + (offset)))
 
 /*
- * Write a single character to the goldfish-tty.
+ * Write one byte to the goldfish-tty, exactly as given.
  *
  * No initialisation is needed: QEMU forwards the byte to the chardev
  * synchronously, so there is no ready flag to poll and nothing can be
  * lost.  That makes this usable from the very first instructions of
  * the boot, which is the whole point of having it.
  */
+void qemuvirt_serial_putc(UBYTE c)
+{
+    GF_TTY_REG(GF_TTY_PUT_CHAR) = (ULONG)c;
+}
+
+/*
+ * Write a single character of debug output to the goldfish-tty.
+ *
+ * Debug prints carry bare newlines, so the carriage return is added
+ * here.  Bconout() is a raw byte channel whose callers emit their own,
+ * and so must not come through this.
+ */
 void kprintf_outc_qemuvirt(int c)
 {
     if (c == '\n')
-        GF_TTY_REG(GF_TTY_PUT_CHAR) = '\r';
+        qemuvirt_serial_putc('\r');
 
-    GF_TTY_REG(GF_TTY_PUT_CHAR) = (ULONG)(UBYTE)c;
+    qemuvirt_serial_putc((UBYTE)c);
 }
 
 /*
