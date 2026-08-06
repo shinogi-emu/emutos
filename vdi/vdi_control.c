@@ -356,8 +356,14 @@ static void init_wk(Vwk * vwk)
     if (TRUECOLOR_MODE) {
         memcpy(vwk->ext->req_col, REQ_COL, sizeof(REQ_COL));
         memcpy(vwk->ext->req_col+16, req_col2, sizeof(req_col2));
-        /* convert requested colour values to pseudo-palette */
-        for (l = 0; l < 255; l++)
+        /*
+         * Convert requested colour values to pseudo-palette.
+         *
+         * All of them. Stopping at 254 left pen 255 unset, and with an
+         * extended palette MAP_COL[255] is 15, so colour register 15
+         * kept whatever the allocation happened to contain.
+         */
+        for (l = 0; l < numcolors; l++)
             set_color16(vwk, l, vwk->ext->req_col[l]);
     }
 #endif
@@ -452,20 +458,6 @@ void vdi_v_opnvwk(Vwk * vwk)
     {
         vwk->ext = (VwkExt *)(vwk + 1); /* immediately follows Vwk */
 
-        /*
-         * Start from the screen's current colours.
-         *
-         * Mxalloc() does not clear, and nothing else fills this in, so
-         * without the copy a new workstation begins with whatever the
-         * heap last held and every colour it draws is that rubbish.
-         *
-         * Inheriting is also what the caller is entitled to expect. In
-         * an indexed mode vs_color() writes the hardware registers and
-         * is therefore global, so a workstation opened at any moment
-         * sees the colours already in force; in truecolor the palette
-         * lives here instead, and it has to start the same way.
-         */
-        *vwk->ext = phys_work_ext;
     }
 #endif
 
