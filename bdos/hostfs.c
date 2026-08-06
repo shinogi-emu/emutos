@@ -102,6 +102,89 @@ static char dir_wire[HOSTFS_LINK_MAX_PATH];
 static WORD dir_subdir;
 
 /*
+ * Which DTA each open scan belongs to.
+ *
+ * The snapshot above is a single 32KB array, so there is one of it and
+ * it holds whichever directory was read last.  On its own that is not
+ * enough, because GEMDOS searches belong to a DTA and may be nested.
+ * EmuTOS's own AUTO loop is the case that matters: Fsfirst, then Pexec,
+ * then Fsnext (bios/bios.c:1912).  A program run from inside that loop
+ * which does its own Fsfirst -- fVDI looking for its config and driver
+ * is how this was found -- lands on the same globals, and the outer
+ * Fsnext then resumes through the wrong directory, matches nothing and
+ * reports ENMFIL.  The AUTO loop ends there, so every program after the
+ * first one to search a directory is silently skipped.
+ *
+ * Stock GEMDOS does not have the problem: its cursor lives in the DTA,
+ * which is what dt_clnum and dt_cloffset are (bdos/fs.h:319).  Ours
+ * cannot -- the private area has no room for a host path -- so the
+ * cursor is kept per DTA here instead, and the snapshot is read again
+ * whenever an Fsnext arrives for a directory it no longer holds.
+ *
+ * Four slots is deeper nesting than anything seen here.  When they run
+ * out the oldest is taken, and the scan that loses its slot answers
+ * ENMFIL -- precisely what every displaced scan did before this table
+ * existed, so running out cannot be a regression.
+ */
+#define HOSTFS_MAX_SCANS 4
+
+typedef struct
+{
+    void *dta;                          /* owner, NULL when free        */
+    char  wire[HOSTFS_LINK_MAX_PATH];   /* directory being scanned      */
+    char  pattern[16];                  /* pattern given to Fsfirst     */
+    WORD  subdir;                       /* is it below the drive root   */
+    WORD  pos;                          /* cursor into the snapshot     */
+    LONG  age;                          /* larger is more recent        */
+} SCAN;
+
+static SCAN scans[HOSTFS_MAX_SCANS];
+static LONG scan_clock;
+
+/* The slot this DTA owns, or NULL if it has no scan open. */
+static SCAN *scan_find(void *dta)
+{
+    WORD i;
+
+    /* A free slot holds NULL, so that must never be something to find. */
+    if (!dta)
+        return NULL;
+
+    for (i = 0; i < HOSTFS_MAX_SCANS; i++)
+        if (scans[i].dta == dta)
+            return &scans[i];
+
+    return NULL;
+}
+
+/* Give this DTA a slot: the one it has, else a free one, else the oldest. */
+static SCAN *scan_claim(void *dta)
+{
+    SCAN *slot = scan_find(dta);
+    WORD i;
+
+    if (!slot)
+    {
+        slot = &scans[0];
+        for (i = 0; i < HOSTFS_MAX_SCANS; i++)
+        {
+            if (!scans[i].dta)
+            {
+                slot = &scans[i];
+                break;
+            }
+            if (scans[i].age < slot->age)
+                slot = &scans[i];
+        }
+    }
+
+    slot->dta = dta;
+    slot->age = ++scan_clock;
+
+    return slot;
+}
+
+/*
  * Append one HOST name to a wire path. Zero when it would not fit.
  *
  * The root is the empty string, not "/", because the wire forbids a
@@ -1802,6 +1885,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
     if (fn == 0x4E)                     /* Fsfirst */
     {
         const char *spec = *(const char **)&pw[1];
+        SCAN *scan;
         LONG rc;
 
         /*
@@ -1821,6 +1905,16 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         ((DTAINFO *)run->p_xdta)->dt_offset_drive = HOSTFS_DTA_MAGIC;
         dir_count = 0;
         dir_pos = 0;
+
+        /*
+         * Whatever this DTA was scanning, it is not scanning it now.
+         * Released rather than reused so that a failure below leaves
+         * nothing for a following Fsnext to resume; the slot is taken
+         * again at the end, once there is a scan worth resuming.
+         */
+        scan = scan_find(run->p_xdta);
+        if (scan)
+            scan->dta = NULL;
 
         /*
          * The same resolver every other path-taking call uses: the
@@ -1855,29 +1949,68 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         if (rc < 0)
             return rc;
 
+        /* There is a scan to resume now, so record where it stands. */
+        scan = scan_claim(run->p_xdta);
+        strcpy(scan->wire, dir_wire);
+        strcpy(scan->pattern, dir_pattern);
+        scan->subdir = dir_subdir;
+        scan->pos = 0;
+
         dir_pos = 0;
         fn = 0x4F;                      /* fall into the Fsnext scan */
     }
 
     /* Fsnext, and the tail of Fsfirst */
-    while (dir_pos < dir_count)
     {
-        const char *host = dir_names[dir_pos];
-        LONG rc;
+        SCAN *scan = scan_find(run->p_xdta);
 
-        dir_pos++;
-        if (!hostfs_match(dir_pattern, host, dir_subdir))
-            continue;
+        if (!scan)
+            return ENMFIL;
 
-        rc = hostfs_fill_dta(host);
-        if (rc == 0)
+        /*
+         * The snapshot holds one directory.  When it is not this scan's
+         * -- because some other Fsfirst displaced it, quite possibly
+         * from a program this very scan is in the middle of running --
+         * read it again and carry on from where this DTA had reached.
+         */
+        if (strcmp(dir_wire, scan->wire) != 0)
         {
-            char clipped[13];
+            LONG rc = dir_snapshot(scan->wire);
 
-            hostfs_host_to_atari(host, clipped);
-            KINFO(("hostfs: %s %s\n", first_call ? "fsfirst" : "fsnext", clipped));
+            if (rc < 0)
+                return rc;
+            strcpy(dir_wire, scan->wire);
         }
-        return rc;
+
+        strcpy(dir_pattern, scan->pattern);
+        dir_subdir = scan->subdir;
+        dir_pos = scan->pos;
+
+        /*
+         * A directory that shrank since the snapshot leaves the cursor
+         * past the end, which the loop condition already reads as a
+         * finished scan.
+         */
+        while (dir_pos < dir_count)
+        {
+            const char *host = dir_names[dir_pos];
+            LONG rc;
+
+            dir_pos++;
+            scan->pos = dir_pos;
+            if (!hostfs_match(dir_pattern, host, dir_subdir))
+                continue;
+
+            rc = hostfs_fill_dta(host);
+            if (rc == 0)
+            {
+                char clipped[13];
+
+                hostfs_host_to_atari(host, clipped);
+                KINFO(("hostfs: %s %s\n", first_call ? "fsfirst" : "fsnext", clipped));
+            }
+            return rc;
+        }
     }
 
     return ENMFIL;
