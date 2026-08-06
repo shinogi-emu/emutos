@@ -171,13 +171,26 @@ extern WORD qemuvirt_screen_h;
  * at table-build time and disappear from the conversion loop.
  */
 /*
- * The table comes FIRST because it is a fixed 256KB while the surface
- * grows with the mode. With the surface first, anything past 1280x720
- * ran into the table: 1280x1024 needs 5MB and only 4MB separated them.
+ * ABOVE THE MEMORY EMUTOS GIVES AWAY.
+ *
+ * These sat at 16MB and 17MB, which is inside the TT-RAM the machine
+ * reports as available -- CONF_TTRAM_SIZE starts at TTRAM_START, which
+ * is 0x01000000. Every program allocating alt-RAM was being handed the
+ * scanout surface and the colour table. A large enough allocation, and
+ * MyAES loading its skins is one, lands on the table: the drawing stays
+ * exactly right and every colour it produces turns to rubbish, because
+ * the table is what turns a pixel into a colour.
+ *
+ * They now live immediately above the reported TT-RAM, derived from its
+ * size so the two cannot drift apart. The machine has more memory than
+ * EmuTOS reports -- 128MB against 14 + 48 -- so this is real RAM that
+ * nothing else is using.
  */
-#define QEMUVIRT_CTAB       0x01000000UL  /* 16MB: 65536 * 4 = 256KB  */
+#define QEMUVIRT_VRAM_BASE  (0x01000000UL + CONF_TTRAM_SIZE)
+
+#define QEMUVIRT_CTAB       QEMUVIRT_VRAM_BASE
 #define QEMUVIRT_CTAB_SIZE  65536UL
-#define QEMUVIRT_ARGB_FB    0x01100000UL  /* 17MB: 1920x1080x4 = 8MB  */
+#define QEMUVIRT_ARGB_FB    (QEMUVIRT_VRAM_BASE + 0x00100000UL)
 
 /* Present every Nth VBL until damage tracking makes that unnecessary. */
 #define QEMUVIRT_PRESENT_DIV    5

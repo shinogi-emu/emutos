@@ -645,6 +645,29 @@
  */
 #ifdef MACHINE_QEMU_VIRT
 /*
+ * TT-RAM: a fixed size, not autodetected.
+ *
+ * Two things went wrong with detection here. It probes a byte in every
+ * megabyte until one faults, so on this machine it claimed everything up
+ * to the end of RAM -- and the fault that stops it is a real bus error
+ * at the top of memory, which FreeMiNT took as a panic rather than a
+ * probe. It also swallowed the video memory below, since the scanout
+ * surface and the colour table live in this range: every program
+ * allocating alt-RAM was handed the screen, and a large enough
+ * allocation landed on the colour table, leaving drawing perfect and
+ * every colour it produced rubbish.
+ *
+ * Fixing the size settles both. The video memory sits immediately above
+ * it and is no longer anybody's to allocate.
+ *
+ * 48MB against the 128MB the launchers ask for leaves room for the
+ * largest screen this build supports and a wide margin besides.
+ */
+# ifndef CONF_TTRAM_SIZE
+#  define CONF_TTRAM_SIZE (48UL*1024*1024)
+# endif
+
+/*
  * Unmapped addresses fault here. target/m68k registers
  * m68k_cpu_transaction_failed, so an access to nothing raises a bus
  * error exactly as it would on Atari hardware.
