@@ -623,12 +623,88 @@ void vdi_v_clrwk(Vwk * vwk)
 /*
  * vdi_vq_extnd - Extended workstation inquire
  */
+
+#if CONF_WITH_VDI_16BIT
+/*
+ * vq_scrninfo() -- describe the screen's pixel format.
+ *
+ * vq_extnd() says how many planes there are and whether there is a
+ * colour lookup table, and on a planar Atari that is enough: the layout
+ * follows from the plane count. It is not enough here. This screen is
+ * chunky true colour, and "sixteen planes with no lookup table" leaves
+ * an application to guess which bits are red.
+ *
+ * Guessing is what it has been doing. Of the two sixteen-bit layouts in
+ * the specification -- x-rrrrr-ggggg-bbbbb with the spare bit first, and
+ * the Falcon's rrrrr-ggggg-x-bbbbb with it in the middle -- this VDI
+ * writes the second, in set_color16(). An application that assumes the
+ * first gets every component one bit out of place: recognisable, and
+ * wrong.
+ *
+ * The reply is the EdDI 1.1 form. After the summary comes a table saying
+ * which pixel bit each intensity bit occupies, which is the part that
+ * removes the guesswork entirely.
+ */
+static void vq_scrninfo(Vwk *vwk)
+{
+    WORD *out = INTOUT;
+    WORD i;
+
+    for (i = 0; i < 128; i++)
+        out[i] = -1;
+
+    out[0] = 2;             /* packed pixels, not planes            */
+    out[1] = 2;             /* software CLUT: hi/true colour        */
+    out[2] = v_planes;      /* bits per pixel                       */
+    out[3] = 0;             /* colours, high word of the longword   */
+    out[4] = 0x8000;        /* 32768: five bits each of r, g and b  */
+    out[5] = BYTES_LIN;
+    *(UBYTE **)&out[6] = v_bas_ad;
+    out[8] = 5;             /* red                                  */
+    out[9] = 5;             /* green                                */
+    out[10] = 5;            /* blue                                 */
+    out[11] = 0;            /* no alpha                             */
+    out[12] = 0;            /* no genlock                           */
+    out[13] = 1;            /* one unused bit                       */
+    out[14] = 1;            /* Falcon bit order                     */
+    out[15] = 0;
+
+    /*
+     * Where each intensity bit lives, least significant first. This
+     * says rrrrr-ggggg-x-bbbbb without needing to be believed about it.
+     */
+    for (i = 0; i < 5; i++)
+    {
+        out[16 + i] = 11 + i;   /* red   -> bits 11..15 */
+        out[32 + i] = 6 + i;    /* green -> bits 6..10  */
+        out[48 + i] = i;        /* blue  -> bits 0..4   */
+    }
+    out[96] = 5;                /* the spare bit        */
+
+    CONTRL[4] = 128;
+    CONTRL[2] = 0;
+}
+#endif
+
 void vdi_vq_extnd(Vwk * vwk)
 {
     WORD i;
     WORD *dst, *src;
 
     flip_y = 1;
+
+#if CONF_WITH_VDI_16BIT
+    /*
+     * vq_scrninfo() arrives here: it is opcode 102 with a sub-opcode of
+     * 1 and a 2 in intin, where vq_extnd() itself only ever passes 0 or
+     * 1. Both are checked so an old binding cannot fall in by accident.
+     */
+    if (TRUECOLOR_MODE && CONTRL[5] == 1 && INTIN[0] == 2) {
+        vq_scrninfo(vwk);
+        return;
+    }
+#endif
+
     dst = PTSOUT;
     if (*(INTIN) == 0) {
         src = SIZ_TAB;
