@@ -134,6 +134,17 @@ static const WORD videl_palette1[16][3] =
     { 733, 733, 733 }, { 533, 533, 533 }, { 667, 0, 0 }, { 0, 667, 0 },
     { 0, 0, 667 }, { 0, 667, 667 }, { 667, 667, 0 }, { 667, 0, 667 }
 };
+#endif
+
+/*
+ * The upper 240 entries of the default palette.
+ *
+ * Needed by any machine with an extended palette, not just a Falcon: it
+ * is what fills req_col2, and without it those entries stay at their BSS
+ * zero and every colour from 16 upwards is black. This machine has no
+ * Videl and no TT shifter but does report 256 colours, so it needs them.
+ */
+#if EXTENDED_PALETTE
 static const WORD videl_palette2[240][3] =
 {
     { 1000, 1000, 1000 }, { 933, 933, 933 }, { 867, 867, 867 }, { 800, 800, 800 },
@@ -729,7 +740,16 @@ void init_colors(void)
     else
 #endif
     {
-        /* Nothing */
+        /*
+         * No Videl and no TT shifter, but still an extended palette --
+         * this is the QEMU virt machine, which reports 256 colours out
+         * of a truecolor screen. Without this, req_col2 keeps its BSS
+         * zero and every colour from 16 upwards is black, so anything
+         * that uses more than the sixteen ST pens draws in the dark.
+         */
+#if EXTENDED_PALETTE
+        memcpy(req_col2, videl_palette2, sizeof(videl_palette2));
+#endif
     }
 
     /* set up vdi pen -> hardware colour register mapping */
