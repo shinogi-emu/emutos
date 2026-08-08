@@ -126,7 +126,7 @@ static WORD dir_subdir;
  * ENMFIL -- precisely what every displaced scan did before this table
  * existed, so running out cannot be a regression.
  */
-#define HOSTFS_MAX_SCANS 4
+#define HOSTFS_MAX_SCANS 16
 
 typedef struct
 {
@@ -165,17 +165,31 @@ static SCAN *scan_claim(void *dta)
 
     if (!slot)
     {
+        WORD evicting = 1;
+
         slot = &scans[0];
         for (i = 0; i < HOSTFS_MAX_SCANS; i++)
         {
             if (!scans[i].dta)
             {
                 slot = &scans[i];
+                evicting = 0;
                 break;
             }
             if (scans[i].age < slot->age)
                 slot = &scans[i];
         }
+
+        /*
+         * Eviction is not free, so never let it happen quietly.  The
+         * displaced scan answers ENMFIL, and ENMFIL is indistinguishable
+         * from a directory that simply ended -- which is how the AUTO
+         * loop came to skip every program after the first one to search.
+         * That silence was the real defect, so it is reported even though
+         * the table is now large enough that nothing here should hit it.
+         */
+        if (evicting)
+            KINFO(("hostfs: scan table full, evicting %s\n", slot->wire));
     }
 
     slot->dta = dta;
