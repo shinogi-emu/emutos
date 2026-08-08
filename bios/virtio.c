@@ -137,7 +137,24 @@ WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem)
         return -1;
     }
 
-    /* desc is 16-byte aligned by the caller; keep avail and used aligned too */
+    /*
+     * Align the descriptor table here rather than trusting the caller.
+     *
+     * Every ring is declared __attribute__((aligned(16))) and the object
+     * files ask for it (2**4 on .bss), but the alignment is a property of
+     * the symbol WITHIN its section, and the link places that section
+     * wherever it lands -- so the rings come out at whatever alignment the
+     * rest of the image leaves over.  Measured: kbd_ring at 0x0005e4a6,
+     * which is 2 mod 4, putting the used ring on an odd word.  virtio 1.0
+     * requires 16 for the descriptor table, 2 for available and 4 for
+     * used; the offsets below preserve that once the base is right.
+     *
+     * The cost is at most 15 bytes off the end of the caller's buffer, and
+     * every ring has room to spare (the tightest is hostfs-link at 228
+     * bytes used of 256).
+     */
+    mem = (UBYTE *)(((ULONG)mem + 15) & ~15UL);
+
     avail_off = (ULONG)VIRTQ_DESC_SIZE * num;
     used_off = (avail_off + 4 + 2 * (ULONG)num + 15) & ~15UL;
 
