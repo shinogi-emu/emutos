@@ -148,6 +148,14 @@ static WORD btn_state;          /* bit0 left, bit1 right */
 static WORD pending_move;
 static WORD pending_btn;
 
+/*
+ * Ticks that reached vi_drain() before the queue existed. Counted rather
+ * than printed: this is incremented from the timer interrupt. Reported
+ * once from virtio_input_init(), where a nonzero value says the race was
+ * live on this host and the guard is what stopped it.
+ */
+static WORD early_drains;
+
 static UWORD ld16(const UBYTE *p)
 {
     return (UWORD)(p[0] | ((UWORD)p[1] << 8));
@@ -317,6 +325,9 @@ void virtio_input_init(void)
 {
     vi_start(&kbd_dev);
     vi_start(&tab_dev);
+
+    if (early_drains)
+        KINFO(("input: %d tick(s) drained before setup\n", early_drains));
 }
 
 /*
@@ -435,6 +446,21 @@ static void vi_drain(VIDEV *d)
 
     if (!d->active)
         return;
+
+    /*
+     * active is set by the probe at machine_init, but the queue is not
+     * built until virtio_input_init() runs from kbd_init(). We are called
+     * from the 200 Hz tick, so a tick landing in that gap finds num == 0
+     * and used == NULL: the read below lands on the vector table, comes
+     * back nonzero, and the loop's (last_used % num) divides by zero.
+     * num is only nonzero once virtq_setup() has succeeded, which makes
+     * it exactly the "queue is real" test.
+     */
+    if (d->vq.num == 0)
+    {
+        early_drains++;
+        return;
+    }
 
     used_idx = ld16(d->vq.used + 2);
 
