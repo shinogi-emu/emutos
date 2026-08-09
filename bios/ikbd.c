@@ -1084,9 +1084,16 @@ void kbd_init(void)
 #ifdef MACHINE_LISA
     lisa_kbd_init();
 #endif
-#ifdef MACHINE_QEMU_VIRT
-    virtio_input_init();
-#endif
+/*
+ * virtio_input_init() used to be called here, and must not be: enabling
+ * the devices sets DRIVER_OK, after which the host may deliver an event
+ * at once, and the 200 Hz tick drains it into call_ikbdraw().  That needs
+ * kbdvec and the IOREC, which init_acia_vecs() installs later
+ * (bios.c, after kbd_init returns), and a key table, which bioskeys()
+ * selects further down this very function.  An event arriving in that gap
+ * jumped through an uninitialised kbdvec.  It is called from bios.c now,
+ * once both are true.
+ */
 
     /* initialize the IKBD */
     ikbd_reset();

@@ -43,6 +43,7 @@
 #include "nls.h"
 #include "biosmem.h"
 #include "ikbd.h"
+#include "virtio_input.h"
 #include "mouse.h"
 #include "midi.h"
 #include "mfp.h"
@@ -1634,6 +1635,26 @@ static void bios_init(void)
     KDEBUG(("init_acia_vecs()\n"));
     init_acia_vecs();   /* Init the ACIA interrupt vector and related stuff */
     KDEBUG(("after init_acia_vecs()\n"));
+
+#ifdef MACHINE_QEMU_VIRT
+    /*
+     * Only now may the virtio input devices be enabled.
+     *
+     * Enabling them writes DRIVER_OK, and the host may deliver an event
+     * immediately afterwards; the 200 Hz tick drains it and hands it to
+     * call_ikbdraw(), which needs the kbdvec and IOREC that the call
+     * above has just installed, and the key table bioskeys() selected
+     * inside kbd_init().  Doing this from kbd_init() -- where it used to
+     * live -- put it before both, so an event arriving in that window
+     * jumped through an uninitialised vector and the boot died there,
+     * between the keyboard's queue coming up and the tablet's.
+     *
+     * Intermittent by nature: it needs an event to be waiting, which
+     * depends on whether the host had one queued.
+     */
+    KDEBUG(("virtio_input_init()\n"));
+    virtio_input_init();
+#endif
     boot_status |= MIDI_AVAILABLE;  /* track progress */
 
     /* Enable 50 Hz processing */
