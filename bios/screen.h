@@ -91,6 +91,12 @@ WORD esetsmear(WORD mode);
 
 /* set screen address, mode, ... */
 void screen_init_address(void);
+
+#if CONF_WITH_SHINOGI_SPLASH
+/* Draw the logo centred in the framebuffer. Call AFTER vt52_init(), which
+ * clears the screen. See bios/shinogi_splash.c. */
+void shinogi_splash(void);
+#endif
 void screen_init_mode(void);
 void set_rez_hacked(void);
 void screen_get_current_mode_info(UWORD *planes, UWORD *hz_rez, UWORD *vt_rez);

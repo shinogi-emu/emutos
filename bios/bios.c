@@ -1939,6 +1939,22 @@ static void autoexec(void)
     if (bootflags & BOOTFLAG_SKIP_AUTO_ACC)
         return;
 
+#if CONF_WITH_SHINOGI_SPLASH
+    /*
+     * Here, and not earlier.  Anywhere before this the startup screen
+     * paints the whole display and wipes it off again -- which is what
+     * happened on the first attempt, drawn after vt52_init() and gone
+     * before it could be seen.
+     *
+     * This is the right moment on its own merits: the AUTO scan that
+     * follows is where the boot spends its time, reading the kernel and
+     * fVDI over hostfs a few kbyte at a time, and until now that was a
+     * screen of startup text sitting still.  The logo replaces it, and
+     * the AUTO programs' own output scrolls over the top from the left.
+     */
+    shinogi_splash();
+#endif
+
 #if DETECT_NATIVE_FEATURES
     bootstrap();                        /* try to boot the new OS kernel directly */
 #endif

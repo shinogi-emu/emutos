@@ -2149,6 +2149,26 @@
 #endif
 
 /*
+ * Draw the shinogi logo into the framebuffer once the console is up.
+ *
+ * This machine only. The image is 16-bit RGB565 and the code writes
+ * v_bas_ad directly, which is right here because virtio_gpu_present()
+ * pushes that buffer off the VBL regardless of who wrote it; on hardware
+ * with a real video chip it would be neither correct nor wanted.
+ *
+ * Costs about 4K of RLE data. The same image as RGB565 would be 200K
+ * against an image of roughly 425K, which is not a price worth paying
+ * for a decoration -- see bios/shinogi_splash.c.
+ */
+#ifndef CONF_WITH_SHINOGI_SPLASH
+# ifdef MACHINE_QEMU_VIRT
+#  define CONF_WITH_SHINOGI_SPLASH 1
+# else
+#  define CONF_WITH_SHINOGI_SPLASH 0
+# endif
+#endif
+
+/*
  * Set MIDI_DEBUG_PRINT to 1 to redirect debug prints to MIDI out.  This
  * is useful for an emulator without any native debug print capabilities,
  * or for real hardware. This overrides previous debug print settings.

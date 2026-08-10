@@ -318,6 +318,7 @@ bios_src +=  memory.S processor.S vectors.S aciavecs.S bios.c xbios.c acsi.c \
              lisa.c lisa2.S \
              qemuvirt.c qemuvirt2.S virtio.c virtio_gpu.c virtio_input.c \
              virtio_9p.c virtio_blk.c hostfs_link.c epochtime.c \
+             shinogi_splash.c \
              delay.c delayasm.S sd.c memory2.c bootparams.c scsi.c nova.c \
              dsp.c dsp2.S \
              scsidriv.c
