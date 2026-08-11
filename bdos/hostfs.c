@@ -1947,7 +1947,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
          * inside dir_pattern.
          */
         if (strlen(path_leaf) >= sizeof(dir_pattern))
-            return ENMFIL;
+            return EFILNF;
         strcpy(dir_pattern, path_leaf);
 
         /*
@@ -1974,12 +1974,24 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         fn = 0x4F;                      /* fall into the Fsnext scan */
     }
 
-    /* Fsnext, and the tail of Fsfirst */
+    /*
+     * Fsnext, and the tail of Fsfirst.
+     *
+     * "Nothing matched" is a DIFFERENT error for the two calls, and the
+     * difference is load-bearing: stock xsfirst() answers EFILNF and
+     * stock xsnext() answers ENMFIL (fsdir.c:523,650).  Answering ENMFIL
+     * for both is what stopped anything from being created on this drive.
+     * FreeMiNT's tos_lookup() returns whatever Fsfirst said, and
+     * do_open() creates a missing file only when that is exactly ENOENT
+     * (== EFILNF; k_fds.c:298).  Given ENMFIL it created nothing and
+     * passed -49 back to the caller instead, so under MiNT every Fcreate
+     * on C: failed: no saved settings, no logs, no new files at all.
+     */
     {
         SCAN *scan = scan_find(run->p_xdta);
 
         if (!scan)
-            return ENMFIL;
+            return first_call ? EFILNF : ENMFIL;
 
         /*
          * The snapshot holds one directory.  When it is not this scan's
@@ -2027,7 +2039,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         }
     }
 
-    return ENMFIL;
+    return first_call ? EFILNF : ENMFIL;
 }
 
 #endif /* MACHINE_QEMU_VIRT */
