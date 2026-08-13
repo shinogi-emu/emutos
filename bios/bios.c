@@ -1409,10 +1409,15 @@ static void bios_init(void)
      * program reading the _CPU cookie.
      */
     mcpu = qemuvirt_cputype();
+    fputype = (mcpu == 60) ? 0x00100000L : 0x00080000L;
 #endif
 
 #if CONF_WITH_ADVANCED_CPU
+#ifdef MACHINE_QEMU_VIRT
+    is_bus32 = TRUE;
+#else
     is_bus32 = (UBYTE)detect_32bit_address_bus();
+#endif
 #endif
     KDEBUG(("Address Bus width is %d-bit\n", IS_BUS32 ? 32 : 24));
 

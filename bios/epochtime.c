@@ -26,6 +26,26 @@
 #ifdef MACHINE_QEMU_VIRT
 
 /*
+ * On 68060, the two-result DIVUL form (a 64-bit dividend) is not
+ * implemented.  GCC normally combines a quotient and remainder into that
+ * form, so keep the division in a non-inlined helper and derive the
+ * remainder from the quotient instead.
+ */
+static ULONG udiv32(ULONG dividend, ULONG divisor) __attribute__((noinline));
+
+static ULONG udiv32(ULONG dividend, ULONG divisor)
+{
+    return dividend / divisor;
+}
+
+static ULONG umod32(ULONG dividend, ULONG divisor)
+{
+    ULONG quotient = udiv32(dividend, divisor);
+
+    return dividend - quotient * divisor;
+}
+
+/*
  * Days since the Unix epoch (1970-01-01) -> proleptic Gregorian
  * calendar date. This is Howard Hinnant's civil_from_days algorithm
  * (public domain, http://howardhinnant.github.io/date_algorithms.html),
@@ -43,14 +63,17 @@ static void days_to_civil(ULONG z, ULONG *y_out, ULONG *m_out, ULONG *d_out)
     ULONG era, doe, yoe, y, doy, mp, m, d;
 
     z += 719468UL;                     /* shift to era starting 0000-03-01 */
-    era = z / 146097UL;                /* 146097 days per 400-year era */
+    era = udiv32(z, 146097UL);         /* 146097 days per 400-year era */
     doe = z - era * 146097UL;          /* day of era,  [0, 146096] */
-    yoe = (doe - doe / 1460UL + doe / 36524UL - doe / 146096UL) / 365UL;
+    yoe = udiv32(doe - udiv32(doe, 1460UL) + udiv32(doe, 36524UL)
+                  - udiv32(doe, 146096UL), 365UL);
                                         /* year of era, [0, 399] */
     y = yoe + era * 400UL;
-    doy = doe - (365UL * yoe + yoe / 4UL - yoe / 100UL); /* day of year, [0, 365] */
-    mp = (5UL * doy + 2UL) / 153UL;    /* month, shifted so March = 0, [0, 11] */
-    d = doy - (153UL * mp + 2UL) / 5UL + 1UL; /* day of month, [1, 31] */
+    doy = doe - (365UL * yoe + udiv32(yoe, 4UL) - udiv32(yoe, 100UL));
+                                        /* day of year, [0, 365] */
+    mp = udiv32(5UL * doy + 2UL, 153UL); /* month, shifted: March = 0 */
+    d = doy - udiv32(153UL * mp + 2UL, 5UL) + 1UL;
+                                        /* day of month, [1, 31] */
 
     if (mp < 10UL)
         m = mp + 3UL;                  /* Mar..Dec -> 3..12 */
@@ -72,12 +95,12 @@ void epoch_to_dos(ULONG secs, UWORD *dos_date, UWORD *dos_time)
     ULONG hour, minute, second;
     LONG year_field;
 
-    days = secs / 86400UL;
-    rem = secs % 86400UL;
+    days = udiv32(secs, 86400UL);
+    rem = umod32(secs, 86400UL);
 
-    hour = rem / 3600UL;
-    minute = (rem % 3600UL) / 60UL;
-    second = rem % 60UL;
+    hour = udiv32(rem, 3600UL);
+    minute = udiv32(umod32(rem, 3600UL), 60UL);
+    second = umod32(rem, 60UL);
 
     days_to_civil(days, &y, &m, &d);
 
@@ -93,7 +116,7 @@ void epoch_to_dos(ULONG secs, UWORD *dos_date, UWORD *dos_time)
         year_field = 0L;
 
     *dos_date = (UWORD)(((ULONG)year_field << 9) | (m << 5) | d);
-    *dos_time = (UWORD)((hour << 11) | (minute << 5) | (second / 2UL));
+    *dos_time = (UWORD)((hour << 11) | (minute << 5) | udiv32(second, 2UL));
 }
 
 #endif /* MACHINE_QEMU_VIRT */

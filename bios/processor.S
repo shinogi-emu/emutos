@@ -62,6 +62,12 @@
  */
 
 _detect_cpu:
+#ifdef MACHINE_QEMU_VIRT
+        // The virt machine supplies the authoritative CPU type in bootinfo.
+        // Avoid speculative control-register probes before bios_init() reads it.
+        moveq   #40,d0
+        rts
+#else
 #if CONF_WITH_ADVANCED_CPU
         movem.l  d2/a2-a3,-(sp)
 
@@ -131,6 +137,7 @@ exit:
         moveq   #0,d0           // say it's a 68000
 #endif /* CONF_WITH_ADVANCED_CPU */
         rts
+#endif /* MACHINE_QEMU_VIRT */
 
 /*
  * _detect_fpu - FPU type detection, experimental (draco@atari.org).
@@ -267,8 +274,17 @@ _processor_init:
 
         move.w  #1,_longframe.w // this is a 68010 or later
 m68000:
+#ifdef MACHINE_QEMU_VIRT
+        // QEMU supplies the CPU type in bootinfo.  Do not probe its FPU here:
+        // the 040 and 060 state-frame formats differ, and the generic probe
+        // runs before bios_init() has read that type.
+        clr.l   d0
+        move.l  d0,_fputype
+        jra     pi_done
+#else
         jbsr    _detect_fpu
         move.l  d0,_fputype
+#endif
 
         cmpi.b  #20,_mcpu+3
         jne     pi_chk030
