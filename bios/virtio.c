@@ -119,9 +119,28 @@ WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem)
 
     vq->slot = slot;
     vq->index = index;
-    vq->num = num;
     vq->avail_idx = 0;
     vq->last_used = 0;
+
+    /*
+     * num is published at the END of this function, not here.
+     *
+     * It is the only thing that says a queue is real. vi_drain() runs off
+     * the 200 Hz tick and tests it before touching the used ring, and that
+     * interrupt is live while this runs: virtio_input_init() sets DRIVER_OK
+     * on the keyboard before it starts the tablet. Setting num on entry
+     * declared the queue usable some forty lines before desc/avail/used were
+     * assigned, so a tick landing in the gap read a used pointer that was
+     * still NULL, took ld16(NULL+2) out of the vector table, and walked a
+     * ring that did not exist -- dispatching whatever it found there as key
+     * and mouse events, from inside the interrupt. The gap spans two MMIO
+     * reads and a memset of over a kilobyte, which is why it hung the boot
+     * often enough to be noticed and not often enough to be reliable.
+     *
+     * Clearing it here also covers the two failure returns below, which
+     * otherwise left a nonzero num beside a stale used pointer.
+     */
+    vq->num = 0;
 
     vio_write32(slot, VIRTIO_MMIO_QUEUE_SEL, (ULONG)index);
 
@@ -176,6 +195,9 @@ WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem)
     vio_write32(slot, VIRTIO_MMIO_QUEUE_USED_HIGH, 0);
 
     vio_write32(slot, VIRTIO_MMIO_QUEUE_READY, 1);
+
+    /* The ring is complete; only now may anything else use it. */
+    vq->num = num;
 
     KDEBUG(("virtio: slot %d queue %d num %d desc %p avail %p used %p\n",
             slot, index, num, vq->desc, vq->avail, vq->used));
