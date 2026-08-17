@@ -144,6 +144,29 @@ WORD virtq_setup(VIRTQ *vq, WORD slot, WORD index, WORD num, UBYTE *mem)
 
     vio_write32(slot, VIRTIO_MMIO_QUEUE_SEL, (ULONG)index);
 
+    /*
+     * Reset the queue before reprogramming it.
+     *
+     * virtio 1.0 section 4.2.3.2 requires a driver reconfiguring a live queue
+     * to write QUEUE_READY = 0 and wait for it to read back 0.  That is what
+     * makes the device drop last_avail_idx.  Without it the device keeps the
+     * index while we zero the ring below, so the next time it looks it finds
+     * the guest's available index has gone BACKWARDS - QEMU reports "guest
+     * moved used index from 1 to 0", marks the device BROKEN, and stops
+     * answering it.  The visible symptom is not an error but a freeze: any
+     * guest waiting on that device waits for ever, using no CPU.
+     *
+     * A cold boot programs each queue once and does not need this.  A warm
+     * restart does, because the device keeps its state across one while the
+     * guest starts over.
+     */
+    vio_write32(slot, VIRTIO_MMIO_QUEUE_READY, 0);
+    for (i = 0; i < 1000; i++) {
+        if (vio_read32(slot, VIRTIO_MMIO_QUEUE_READY) == 0) {
+            break;
+        }
+    }
+
     max = vio_read32(slot, VIRTIO_MMIO_QUEUE_NUM_MAX);
     if (max == 0)
     {
