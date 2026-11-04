@@ -63,19 +63,20 @@ void vio_write32(WORD slot, WORD reg, ULONG value)
  * registers are swapped by the memory core. Each needs exactly one
  * swap from us; neither cancels the other.
  *
- * Byte-wise so that ring placement can never produce a misaligned
- * access, and so the byte order is visible in the code rather than
- * implied by a cast.
+ * Ring words are aligned by virtq_init(). Indices must use a single
+ * word access: two byte stores can expose a backwards index at a carry.
+ * Wider descriptor fields remain byte-wise and become visible only
+ * after the available index has been published.
  */
 static void st16le(UBYTE *p, UWORD v)
 {
-    p[0] = (UBYTE)(v & 0xff);
-    p[1] = (UBYTE)(v >> 8);
+    *(volatile UWORD *)p = (UWORD)((v >> 8) | (v << 8));
 }
 
 static UWORD ld16le(const UBYTE *p)
 {
-    return (UWORD)(p[0] | ((UWORD)p[1] << 8));
+    UWORD v = *(const volatile UWORD *)p;
+    return (UWORD)((v >> 8) | (v << 8));
 }
 
 static void st32le(UBYTE *p, ULONG v)
@@ -287,7 +288,10 @@ void virtq_kick(VIRTQ *vq, WORD head)
     st16le(vq->avail + 4 + 2 * (vq->avail_idx % vq->num), (UWORD)head);
 
     vq->avail_idx++;
+    /* Complete descriptor and ring-entry stores before publishing. */
+    __asm__ volatile ("" : : : "memory");
     st16le(vq->avail + 2, vq->avail_idx);
+    __asm__ volatile ("" : : : "memory");
 
     vio_write32(vq->slot, VIRTIO_MMIO_QUEUE_NOTIFY, (ULONG)vq->index);
 }
