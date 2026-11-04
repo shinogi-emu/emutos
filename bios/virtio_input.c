@@ -12,6 +12,7 @@
 #include "emutos.h"
 #include "virtio.h"
 #include "virtio_input.h"
+#include "virtio_gpu.h"
 #include "qemuvirt.h"
 #include "ikbd.h"
 #include "lineavars.h"
@@ -158,13 +159,17 @@ static WORD early_drains;
 
 static UWORD ld16(const UBYTE *p)
 {
-    return (UWORD)(p[0] | ((UWORD)p[1] << 8));
+    UWORD value = *(const volatile UWORD *)p;
+    __asm__ volatile ("" : : : "memory");
+    return (UWORD)((value << 8) | (value >> 8));
 }
 
 static void st16(UBYTE *p, UWORD v)
 {
-    p[0] = (UBYTE)(v & 0xff);
-    p[1] = (UBYTE)(v >> 8);
+    /* Index publication must not expose a half-written 0x00ff->0x0100. */
+    __asm__ volatile ("" : : : "memory");
+    *(volatile UWORD *)p = (UWORD)((v << 8) | (v >> 8));
+    __asm__ volatile ("" : : : "memory");
 }
 
 static ULONG ld32(const UBYTE *p)
@@ -463,6 +468,8 @@ static void vi_drain(VIDEV *d)
     }
 
     used_idx = ld16(d->vq.used + 2);
+    if (d->vq.last_used != used_idx)
+        virtio_gpu_activity();
 
     while (d->vq.last_used != used_idx)
     {

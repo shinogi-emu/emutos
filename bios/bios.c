@@ -1783,10 +1783,13 @@ static void bios_init(void)
     boot_status |= DOS_AVAILABLE;   /* track progress */
 
 #ifdef MACHINE_QEMU_VIRT
-    hostfs_selftest();
+    if (qemuvirt_selftests_enabled())
+    {
+        hostfs_selftest();
 #if CONF_WITH_VIRTIO_BLK
-    vblk_selftest();
+        vblk_selftest();
 #endif
+    }
 #endif
 
     /* Enable VBL processing */

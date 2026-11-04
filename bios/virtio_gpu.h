@@ -128,6 +128,7 @@ void virtio_gpu_testpattern(ULONG fb, WORD w, WORD h);
 
 void virtio_gpu_build_ctab(void);
 void virtio_gpu_present(void);
+void virtio_gpu_activity(void);
 
 #endif /* MACHINE_QEMU_VIRT */
 

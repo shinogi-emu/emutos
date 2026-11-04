@@ -191,9 +191,8 @@ extern WORD qemuvirt_screen_h;
 #define QEMUVIRT_CTAB       QEMUVIRT_VRAM_BASE
 #define QEMUVIRT_CTAB_SIZE  65536UL
 #define QEMUVIRT_ARGB_FB    (QEMUVIRT_VRAM_BASE + 0x00100000UL)
-
-/* Present every Nth VBL until damage tracking makes that unnecessary. */
-#define QEMUVIRT_PRESENT_DIV    5
+/* Previous 16-bit pixels, beyond the largest possible ARGB surface. */
+#define QEMUVIRT_SHADOW_FB  (QEMUVIRT_VRAM_BASE + 0x00900000UL)
 
 /* 200 Hz in nanoseconds */
 #define QEMUVIRT_TICK_NS    5000000UL
@@ -225,6 +224,9 @@ extern ULONG rtc_resync[];      /* times the deadline was jumped     */
 #define BI_MACHTYPE     0x0001  /* ULONG machine type                    */
 #define BI_CPUTYPE      0x0002  /* ULONG cpu type                        */
 #define BI_MEMCHUNK     0x0005  /* ULONG base, ULONG size                */
+#define BI_COMMAND_LINE 0x0007  /* NUL-terminated command line           */
+
+WORD qemuvirt_selftests_enabled(void);
 
 #define MACH_VIRT       14      /* BI_MACHTYPE value for this machine    */
 

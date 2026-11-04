@@ -18,6 +18,8 @@
 
 #ifdef MACHINE_QEMU_VIRT
 
+#include "gpu_damage.h"
+
 /*
  * Command buffers.
  *
@@ -40,6 +42,10 @@ static UBYTE gpu_ring[1024] __attribute__((aligned(16)));
 static VIRTQ gpu_vq;
 static WORD gpu_ready;
 static WORD gpu_w, gpu_h;
+static WORD gpu_full_update;
+static WORD gpu_present_busy;
+static WORD gpu_active_frames;
+static WORD gpu_idle_frames;
 
 /* Command fields are little-endian, like the ring. */
 static void gpu_set32(WORD off, ULONG v)
@@ -217,6 +223,8 @@ WORD virtio_gpu_init(WORD slot, ULONG fb, WORD *pwidth, WORD *pheight)
 
     gpu_w = width;
     gpu_h = height;
+    gpu_full_update = 1;
+    gpu_active_frames = 10;
     gpu_ready = 1;
 
     KINFO(("gpu: %dx%d scanout up, backing 0x%08lx\n", width, height, fb));
@@ -297,24 +305,47 @@ void virtio_gpu_build_ctab(void)
 /*
  * Convert the VDI framebuffer into the ARGB surface and show it.
  *
- * Whole screen for now. The damage-tracking work replaces the bounds
- * here with the dirty tiles; the conversion itself is unchanged by it.
+ * Compare the 16-bit pixels with the last displayed frame. Unchanged
+ * screens need no colour conversion, transfer or flush command.
  */
+/* Input keeps the cursor on the 50 Hz path before pixels have changed. */
+void virtio_gpu_activity(void)
+{
+    gpu_active_frames = 10;
+}
+
 void virtio_gpu_present(void)
 {
     const ULONG *tab = (const ULONG *)QEMUVIRT_CTAB;
     const UWORD *src = (const UWORD *)v_bas_ad;
     ULONG *dst = (ULONG *)QEMUVIRT_ARGB_FB;
-    ULONG n = (ULONG)gpu_w * gpu_h;
-    ULONG i;
+    GPU_DAMAGE damage;
 
-    if (!gpu_ready)
+    if (!gpu_ready || gpu_present_busy)
         return;
 
-    for (i = 0; i < n; i++)
-        dst[i] = tab[src[i]];
+    /* Scan still screens at 10 Hz; resume 50 Hz immediately on input or
+     * observed drawing. This avoids burning CPU on unchanged pixels. */
+    if (!gpu_active_frames)
+    {
+        if (++gpu_idle_frames < 5)
+            return;
+    }
+    else
+        gpu_active_frames--;
+    gpu_idle_frames = 0;
 
-    virtio_gpu_flush(0, 0, gpu_w, gpu_h);
+    gpu_present_busy = 1;
+
+    if (gpu_damage_update(src, (UWORD *)QEMUVIRT_SHADOW_FB, dst, tab,
+                          gpu_w, gpu_h, gpu_full_update, &damage))
+    {
+        virtio_gpu_flush(damage.x, damage.y, damage.w, damage.h);
+        if (gpu_active_frames < 5)
+            gpu_active_frames = 5;
+    }
+    gpu_full_update = 0;
+    gpu_present_busy = 0;
 }
 
 #endif /* MACHINE_QEMU_VIRT */

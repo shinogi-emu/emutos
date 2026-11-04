@@ -17,6 +17,7 @@
 #include "hostfs_name.h"
 #include "../bios/hostfs_link.h"
 #include "../bios/epochtime.h"
+#include "../bios/qemuvirt.h"
 #include "tosvars.h"
 #include "kprint.h"
 #include "gemerror.h"
@@ -1788,10 +1789,13 @@ static LONG hostfs_fill_dta(const char *host)
      */
     epoch_to_dos(mtime, &dta->d_date, &dta->d_time);
 
-    KINFO(("hostfs: dta %s len %ld attr 0x%02x\n",
-           clipped, dta->d_length, dta->d_attrib));
-    KINFO(("hostfs: date %s date 0x%04x time 0x%04x\n",
-           clipped, dta->d_date, dta->d_time));
+    if (qemuvirt_selftests_enabled())
+    {
+        KINFO(("hostfs: dta %s len %ld attr 0x%02x\n",
+               clipped, dta->d_length, dta->d_attrib));
+        KINFO(("hostfs: date %s date 0x%04x time 0x%04x\n",
+               clipped, dta->d_date, dta->d_time));
+    }
 
     return 0;
 }
@@ -2028,7 +2032,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
                 continue;
 
             rc = hostfs_fill_dta(host);
-            if (rc == 0)
+            if (rc == 0 && qemuvirt_selftests_enabled())
             {
                 char clipped[13];
 

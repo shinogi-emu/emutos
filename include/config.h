@@ -667,6 +667,11 @@
 #  define CONF_TTRAM_SIZE (48UL*1024*1024)
 # endif
 
+/* Virtual displays are already awake; keep a short Shift-to-pause window. */
+# ifndef INITINFO_DURATION
+#  define INITINFO_DURATION 1
+# endif
+
 /*
  * Unmapped addresses fault here. target/m68k registers
  * m68k_cpu_transaction_failed, so an access to nothing raises a bus

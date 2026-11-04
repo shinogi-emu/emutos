@@ -15,6 +15,7 @@
 
         .extern _qemuvirt_timer_ack
         .extern _int_vbl
+        .extern _virtio_gpu_present
         .extern _vector_5ms
 
         .text
@@ -45,6 +46,7 @@ _qemuvirt_timer_int:
         btst    #1,d2                   // QEMUVIRT_FIRED_VBL
         jeq     no_vbl
         jbsr    _int_vbl
+        jbsr    _virtio_gpu_present
 no_vbl:
         btst    #0,d2                   // QEMUVIRT_FIRED_TICK
         jeq     no_tick

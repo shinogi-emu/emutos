@@ -13,6 +13,7 @@
 #include "vectors.h"
 #include "virtio_gpu.h"
 #include "virtio_input.h"
+#include "string.h"
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -163,10 +164,22 @@ static ULONG qemuvirt_ramsize(void)
  * path, which runs earlier and re-reads the list directly.
  */
 static ULONG cached_ramsize;
+static WORD cached_selftests;
 
 void qemuvirt_machine_init(void)
 {
+    const UBYTE *command = bi_find(BI_COMMAND_LINE);
+    static const char enable[] = "shinogi.selftest=1";
+
     cached_ramsize = qemuvirt_ramsize();
+    /* Bootinfo is overwritten by the first OS allocations: capture now. */
+    if (command && bi_getword(command - 2) >= 4 + sizeof(enable))
+        cached_selftests = !memcmp(command, enable, sizeof(enable));
+}
+
+WORD qemuvirt_selftests_enabled(void)
+{
+    return cached_selftests;
 }
 
 /*
@@ -236,7 +249,6 @@ ULONG qemuvirt_altram_size(void)
 static ULONG rtc_next_hi[GF_RTC_NB];
 static ULONG rtc_next_lo[GF_RTC_NB];
 static ULONG rtc_period[GF_RTC_NB];
-static WORD present_div;
 
 /*
  * Diagnostics.  rtc_skipped counts individual ticks walked past during
@@ -370,18 +382,7 @@ WORD qemuvirt_timer_ack(void)
         rtc_reload(QEMUVIRT_RTC_VBL);
         fired |= QEMUVIRT_FIRED_VBL;
 
-        /*
-         * Present at a divided rate. A whole-screen conversion is
-         * roughly a million table lookups and runs here at IPL 6, so
-         * at the full VBL rate it would dominate the machine. Dirty
-         * tiles replace this with a proportional cost and the divider
-         * can then go away.
-         */
-        if (++present_div >= QEMUVIRT_PRESENT_DIV)
-        {
-            present_div = 0;
-            virtio_gpu_present();
-        }
+        /* Presentation follows VBL processing, after the cursor draws. */
     }
 
     return fired;
