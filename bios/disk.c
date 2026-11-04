@@ -29,6 +29,7 @@
 #include "virtio_blk.h"
 #ifdef MACHINE_QEMU_VIRT
 #include "virtio_9p.h"
+#include "hostfs_link.h"
 #endif
 #include "../bdos/hostfs.h"
 #include "../bdos/bdosstub.h"
@@ -337,7 +338,7 @@ void disk_init_all(void)
      * every GEMDOS call, which looks exactly like a partition that
      * failed to mount.
      */
-    if (virtio_9p_present())
+    if (virtio_9p_present() || hostfs_link_present())
         devices_available &= ~(1L << HOSTFS_DRIVE);
 #endif
 
