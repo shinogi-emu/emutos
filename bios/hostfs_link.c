@@ -201,6 +201,10 @@ static UBYTE hl_rx[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
 
 /* Bytes of hl_rep that the last successful hl_rpc() actually received. */
 static ULONG hl_rep_len;
+static WORD hl_batch_enabled;
+static UBYTE hl_batch[HOSTFS_MAX_REP_DATA];
+static ULONG hl_batch_handle, hl_batch_cookie;
+static ULONG hl_batch_pos, hl_batch_len;
 
 /* Little-endian stores and loads, byte by byte.  See the file header. */
 static void hl_st16(UBYTE *p, UWORD v)
@@ -850,6 +854,75 @@ LONG hostfs_link_opendir(const char *path)
  * One entry per call cannot fail that way, and nothing here does
  * arithmetic on the value.
  */
+static LONG hl_readdir_batch(ULONG handle, ULONG cookie, char *name,
+                             ULONG namemax, ULONG *next)
+{
+    ULONG length;
+
+    if (hl_batch_handle != handle || hl_batch_cookie != cookie ||
+        hl_batch_pos >= hl_batch_len)
+    {
+        ULONG offset = 0, count, entry, previous = cookie;
+        LONG rc;
+
+        hl_batch_len = hl_batch_pos = 0;
+        rc = hl_rpc(HOSTFS_OP_READDIR_BATCH, handle, cookie, 0, NULL, 0);
+        if (rc < 0) return rc;
+        length = hl_rep_len - (ULONG)HOSTFS_REP_HDR;
+        count = hl_ld32(hl_rep + 8);
+        if (!count || count > length / 7)
+        {
+            hl_kill("invalid directory batch count");
+            return EDRIVE;
+        }
+        for (entry = 0; entry < count; entry++)
+        {
+            ULONG cookie_value, n, i;
+            if (offset + 6 > length)
+            {
+                hl_kill("short directory batch entry");
+                return EDRIVE;
+            }
+            cookie_value = hl_ld32(hl_rep + HOSTFS_REP_HDR + offset);
+            n = hl_ld16(hl_rep + HOSTFS_REP_HDR + offset + 4);
+            if (!n || n > (ULONG)HOSTFS_MAX_NAME || offset + 6 + n > length ||
+                cookie_value == previous)
+            {
+                hl_kill("invalid directory batch entry");
+                return EDRIVE;
+            }
+            for (i = 0; i < n; i++)
+                if (!hl_rep[HOSTFS_REP_HDR + offset + 6 + i])
+                {
+                    hl_kill("NUL in directory batch name");
+                    return EDRIVE;
+                }
+            previous = cookie_value;
+            offset += 6 + n;
+        }
+        if (offset != length || previous != hl_ld32(hl_rep + 4))
+        {
+            hl_kill("inconsistent directory batch tail");
+            return EDRIVE;
+        }
+        memcpy(hl_batch, hl_rep + HOSTFS_REP_HDR, length);
+        hl_batch_handle = handle;
+        hl_batch_cookie = cookie;
+        hl_batch_len = length;
+    }
+
+    *next = hl_ld32(hl_batch + hl_batch_pos);
+    length = hl_ld16(hl_batch + hl_batch_pos + 4);
+    if (length < namemax)
+    {
+        memcpy(name, hl_batch + hl_batch_pos + 6, length);
+        name[length] = '\0';
+    }
+    hl_batch_pos += 6 + length;
+    hl_batch_cookie = *next;
+    return E_OK;
+}
+
 LONG hostfs_link_readdir(ULONG handle, ULONG cookie, char *name,
                          ULONG namemax, ULONG *next)
 {
@@ -858,6 +931,9 @@ LONG hostfs_link_readdir(ULONG handle, ULONG cookie, char *name,
 
     name[0] = '\0';
     *next = cookie;
+
+    if (hl_batch_enabled)
+        return hl_readdir_batch(handle, cookie, name, namemax, next);
 
     rc = hl_rpc(HOSTFS_OP_READDIR, handle, cookie, 0, NULL, 0);
     if (rc < 0)
@@ -889,6 +965,7 @@ LONG hostfs_link_readdir(ULONG handle, ULONG cookie, char *name,
 
 LONG hostfs_link_closedir(ULONG handle)
 {
+    if (hl_batch_handle == handle) hl_batch_len = hl_batch_pos = 0;
     return hl_rpc(HOSTFS_OP_CLOSEDIR, handle, 0, 0, NULL, 0);
 }
 
@@ -935,6 +1012,21 @@ static LONG hl_hello(void)
 
     KINFO(("hostfs-link: slot %d port %d helper v%lu max data %lu\n",
            hl_slot, hl_port, version, maxdata));
+
+    hl_batch_enabled = 0;
+    hl_batch_len = hl_batch_pos = 0;
+    rc = hl_rpc(HOSTFS_OP_CAPS, 0, 0, 0, NULL, 0);
+    if (hl_dead) return EDRIVE;
+    if (rc == E_OK)
+    {
+        if (hl_rep_len != (ULONG)HOSTFS_REP_HDR)
+        {
+            hl_kill("invalid capability reply");
+            return EDRIVE;
+        }
+        hl_batch_enabled = (hl_ld32(hl_rep + 4) & HOSTFS_CAP_READDIR_BATCH) != 0;
+    }
+    /* v1 helpers without optional operations reject CAPS; keep READDIR. */
 
     return E_OK;
 }
