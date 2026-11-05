@@ -120,27 +120,23 @@ typedef char hostfs_link_assert_limits[
 #define HL_VQ_PORT_TX(id)   ((WORD)((id) == 0 ? 1 : 3 + 2 * (id)))
 
 /*
- * Ports this driver is willing to look at.  QEMU's default max_nr_ports
- * is 31, but a launcher that needed more than a couple of serial ports
- * would be doing something this drive has no part in; four covers the
- * reserved console slot plus room for a launcher to add its own before
- * ours.  A port above this is reported rather than silently ignored.
+ * QEMU reserves console port 0. Twenty-six ports cover C through Z,
+ * with one spare. Drive identity comes from PORT_NAME, not the port index.
  */
-#define HL_MAX_PORTS    4
+#define HL_MAX_PORTS    26
 
 #define HL_QSIZE        8
 /* desc 16*8=128, avail 4+16, used 4+64, each 16-aligned: 256 is ample. */
 #define HL_RING_BYTES   256
 #define HL_NRINGS       (2 + 2 * HL_MAX_PORTS)
 
-#define HL_CTRL_BUFS    4
+#define HL_CTRL_BUFS    32
 #define HL_CTRL_BUFSZ   64
 
 /*
  * The name a launcher gives the port with `virtserialport,name=...`.
- * Matching it is what keeps this driver off a virtio-serial port that
- * belongs to something else; when no port carries it, the first usable
- * port is tried and HELLO decides.
+ * The legacy name selects C. Suffixes .d through .z select explicit
+ * additional letters; unnamed and unrelated ports are never claimed.
  */
 #define HL_PORT_NAME    "shinogi.hostfs"
 
@@ -180,31 +176,63 @@ typedef char hostfs_link_assert_limits[
  */
 #define HL_HELLO_SPIN   2000000L
 
-static WORD hl_slot = -1;
-static WORD hl_ready;           /* HELLO answered: the drive may be used */
-static WORD hl_dead;            /* channel desynchronised: EDRIVE for ever */
-static WORD hl_port = -1;
-static LONG hl_rx_spin = VIRTQ_SPIN_LIMIT;
+/* Data queues, receive storage and directory cache belong to a drive. A
+ * timed-out queue may still DMA, so even dead drives keep their own RX buffer.
+ * Requests/replies are shared scratch: GEMDOS calls are serialized. */
+typedef struct
+{
+    WORD slot, ready, dead, port, registered;
+    LONG rx_spin;
+    VIRTQ vq_rx, vq_tx;
+    UBYTE rx[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
+    WORD batch_enabled;
+    UBYTE batch[HOSTFS_MAX_REP_DATA];
+    ULONG batch_handle, batch_cookie, batch_pos, batch_len;
+} HL_DRIVE;
+static HL_DRIVE hl_drives[26];
+static HL_DRIVE *hl = &hl_drives[2];
+#define hl_slot (hl->slot)
+#define hl_ready (hl->ready)
+#define hl_dead (hl->dead)
+#define hl_port (hl->port)
+#define hl_rx_spin (hl->rx_spin)
+#define hl_vq_rx (hl->vq_rx)
+#define hl_vq_tx (hl->vq_tx)
+#define hl_rx (hl->rx)
+#define hl_batch_enabled (hl->batch_enabled)
+#define hl_batch (hl->batch)
+#define hl_batch_handle (hl->batch_handle)
+#define hl_batch_cookie (hl->batch_cookie)
+#define hl_batch_pos (hl->batch_pos)
+#define hl_batch_len (hl->batch_len)
 
-static VIRTQ hl_cvq_rx, hl_cvq_tx;      /* control */
-static VIRTQ hl_pvq[HL_MAX_PORTS][2];   /* every port's rx/tx, set up once */
-static VIRTQ hl_vq_rx, hl_vq_tx;        /* the port we settled on */
-
+static VIRTQ hl_cvq_rx, hl_cvq_tx;
+static VIRTQ hl_pvq[HL_MAX_PORTS][2];
 static UBYTE hl_rings[HL_NRINGS][HL_RING_BYTES] __attribute__((aligned(16)));
-
+static UBYTE hl_ctrl_rings[2][1024] __attribute__((aligned(16)));
 static UBYTE hl_ctrl_rx[HL_CTRL_BUFS][HL_CTRL_BUFSZ] __attribute__((aligned(4)));
 static UBYTE hl_ctrl_tx[HL_CTRL_HDR] __attribute__((aligned(4)));
-
 static UBYTE hl_req[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
 static UBYTE hl_rep[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
-static UBYTE hl_rx[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
-
-/* Bytes of hl_rep that the last successful hl_rpc() actually received. */
 static ULONG hl_rep_len;
-static WORD hl_batch_enabled;
-static UBYTE hl_batch[HOSTFS_MAX_REP_DATA];
-static ULONG hl_batch_handle, hl_batch_cookie;
-static ULONG hl_batch_pos, hl_batch_len;
+static WORD hl_transport = -1;
+
+WORD hostfs_link_select(WORD drive)
+{
+    if (drive < 2 || drive >= 26 || !hl_drives[drive].registered)
+        return 0;
+    hl = &hl_drives[drive];
+    return 1;
+}
+
+ULONG hostfs_link_drives(void)
+{
+    ULONG map = 0;
+    WORD i;
+    for (i = 2; i < 26; i++)
+        if (hl_drives[i].registered) map |= 1UL << i;
+    return map;
+}
 
 /* Little-endian stores and loads, byte by byte.  See the file header. */
 static void hl_st16(UBYTE *p, UWORD v)
@@ -304,22 +332,17 @@ static UBYTE hl_port_hostopen[HL_MAX_PORTS];
  * the spec does not require that, so the terminator is tolerated rather
  * than relied on.
  */
+/* Legacy name is C. Explicit suffixes bind D..Z without discovery order. */
 static WORD hl_name_matches(const UBYTE *p, ULONG len)
 {
     ULONG want = (ULONG)strlen(HL_PORT_NAME);
-    ULONG i;
-
-    while (len > 0 && p[len - 1] == '\0')
-        len--;
-
-    if (len != want)
-        return 0;
-
-    for (i = 0; i < want; i++)
-        if (p[i] != (UBYTE)HL_PORT_NAME[i])
-            return 0;
-
-    return 1;
+    while (len && p[len - 1] == 0) len--;
+    if (len < want || memcmp(p, HL_PORT_NAME, want)) return 0;
+    if (len == want) return 3;
+    if (len == want + 2 && p[want] == '.' &&
+        p[want + 1] >= 'd' && p[want + 1] <= 'z')
+        return (WORD)(p[want + 1] - 'a' + 1);
+    return 0;
 }
 
 /*
@@ -385,7 +408,8 @@ static WORD hl_ctrl_pump(void)
              * sent for every port, not only the one we want, or a
              * device with several ports stops enumerating.
              */
-            hl_ctrl_send(id, VIRTIO_CONSOLE_PORT_READY, 1);
+            /* Reply after draining DEVICE_ADDs; QEMU drops control events
+             * if no RX descriptors remain during a multi-drive burst. */
             break;
 
         case VIRTIO_CONSOLE_CONSOLE_PORT:
@@ -393,8 +417,7 @@ static WORD hl_ctrl_pump(void)
             break;
 
         case VIRTIO_CONSOLE_PORT_NAME:
-            if (hl_name_matches(m + HL_CTRL_HDR, len - HL_CTRL_HDR))
-                hl_port_named[id] = 1;
+            hl_port_named[id] = (UBYTE)hl_name_matches(m + HL_CTRL_HDR, len - HL_CTRL_HDR);
             break;
 
         case VIRTIO_CONSOLE_PORT_OPEN:
@@ -413,30 +436,6 @@ static WORD hl_ctrl_pump(void)
     }
 
     return handled;
-}
-
-/*
- * Which port to talk to.
- *
- * A name match wins outright.  Failing that the first non-console port
- * is taken, since a console port is somebody's terminal and writing a
- * request frame into it would be both useless and visible.  HELLO is
- * the final arbiter: if the choice was wrong there is no reply and the
- * drive is not registered, which is the same outcome as no helper.
- */
-static WORD hl_pick_port(void)
-{
-    WORD i;
-
-    for (i = 0; i < HL_MAX_PORTS; i++)
-        if (hl_port_present[i] && hl_port_named[i])
-            return i;
-
-    for (i = 0; i < HL_MAX_PORTS; i++)
-        if (hl_port_present[i] && !hl_port_console[i])
-            return i;
-
-    return -1;
 }
 
 /*
@@ -977,7 +976,7 @@ LONG hostfs_link_closedir(ULONG handle)
 
 WORD hostfs_link_present(void)
 {
-    return hl_ready && !hl_dead;
+    return hostfs_link_drives() != 0;
 }
 
 static LONG hl_hello(void)
@@ -1043,10 +1042,12 @@ void hostfs_link_attach(WORD slot)
 {
     ULONG max_ports;
     WORD queues_ok[HL_MAX_PORTS];
-    WORD i, port, round;
+    WORD i, port, round, pending;
+    UBYTE announced[HL_MAX_PORTS];
 
-    if (hl_ready)
-        return;                 /* the first working link wins */
+    if (hl_transport >= 0)
+        return;                 /* all folder channels share one console */
+    hl = &hl_drives[2];
 
     /* Nothing survives from a device that did not work out. */
     hl_dead = 0;
@@ -1059,6 +1060,7 @@ void hostfs_link_attach(WORD slot)
         hl_port_named[i] = 0;
         hl_port_hostopen[i] = 0;
         queues_ok[i] = 0;
+        announced[i] = 0;
     }
 
     max_ports = vio_read32(slot, VIRTIO_MMIO_CONFIG + VIRTIO_CONSOLE_CFG_MAX_PORTS);
@@ -1077,8 +1079,8 @@ void hostfs_link_attach(WORD slot)
         return;
     }
 
-    if (virtq_setup(&hl_cvq_rx, slot, HL_VQ_CTRL_RX, HL_QSIZE, hl_rings[0]) != 0
-     || virtq_setup(&hl_cvq_tx, slot, HL_VQ_CTRL_TX, HL_QSIZE, hl_rings[1]) != 0)
+    if (virtq_setup(&hl_cvq_rx, slot, HL_VQ_CTRL_RX, HL_CTRL_BUFS, hl_ctrl_rings[0]) != 0
+     || virtq_setup(&hl_cvq_tx, slot, HL_VQ_CTRL_TX, HL_CTRL_BUFS, hl_ctrl_rings[1]) != 0)
     {
         KINFO(("hostfs-link: slot %d has no control queues\n", slot));
         return;
@@ -1126,69 +1128,51 @@ void hostfs_link_attach(WORD slot)
      * device that never sends one looks like, and the reply -- or its
      * absence -- is the honest test.
      */
-    port = -1;
     for (round = 0; round < HL_OPEN_ROUNDS; round++)
     {
         hl_ctrl_pump();
-
-        if (port < 0)
-        {
-            port = hl_pick_port();
-            if (port >= 0)
-            {
-                /* Until this, nothing the host writes reaches us. */
-                hl_ctrl_send((ULONG)port, VIRTIO_CONSOLE_PORT_OPEN, 1);
-                KDEBUG(("hostfs-link: slot %d using port %d\n", slot, port));
+        for (port = 0; port < HL_MAX_PORTS; port++)
+            if (hl_port_present[port] && !announced[port]) {
+                announced[port] = 1;
+                hl_ctrl_send((ULONG)port, VIRTIO_CONSOLE_PORT_READY, 1);
+                hl_ctrl_pump();
             }
+        pending = 0;
+        for (port = 0; port < HL_MAX_PORTS; port++)
+        {
+            WORD drive = hl_port_named[port] - 1;
+            if (!hl_port_present[port] || drive < 2 || !queues_ok[port])
+                continue;
+            if (!hl_port_hostopen[port]) pending = 1;
         }
-
-        if (port >= 0 && hl_port_hostopen[port])
-            break;
+        if (!pending) break;
     }
 
-    if (port < 0)
+    for (port = 0; port < HL_MAX_PORTS; port++)
     {
-        KINFO(("hostfs-link: slot %d offered no usable port\n", slot));
-        return;
+        WORD drive = hl_port_named[port] - 1;
+        if (!hl_port_present[port] || drive < 2 || !queues_ok[port]) continue;
+        hl = &hl_drives[drive];
+        if (hl_ready) continue;         /* duplicate names never replace a drive */
+        memset(hl, 0, sizeof(*hl));
+        hl_slot = slot;
+        hl_port = port;
+        hl_vq_rx = hl_pvq[port][0];
+        hl_vq_tx = hl_pvq[port][1];
+        hl_ctrl_send((ULONG)port, VIRTIO_CONSOLE_PORT_OPEN, 1);
+        hl_rx_spin = HL_HELLO_SPIN;
+        i = (hl_hello() < 0) ? -1 : 0;
+        hl_rx_spin = VIRTQ_SPIN_LIMIT;
+        if (i < 0)
+        {
+            KINFO(("hostfs-link: drive %c has no helper\n", 'A' + drive));
+            continue;
+        }
+        hl_ready = 1;
+        hl->registered = 1;
     }
-
-    if (!queues_ok[port])
-    {
-        KINFO(("hostfs-link: slot %d port %d has no data queues\n",
-               slot, port));
-        return;
-    }
-
-    if (!hl_port_hostopen[port])
-        KINFO(("hostfs-link: slot %d port %d: host end not connected yet\n",
-               slot, port));
-
-    /*
-     * The port's queues were registered with the device before
-     * DRIVER_OK; this only copies the driver's view of them into the
-     * pair the data path uses, so nothing is reconfigured behind the
-     * device's back.
-     */
-    hl_vq_rx = hl_pvq[port][0];
-    hl_vq_tx = hl_pvq[port][1];
-
-    hl_slot = slot;
-    hl_port = port;
-
-    hl_rx_spin = HL_HELLO_SPIN;
-    i = (hl_hello() < 0) ? -1 : 0;
-    hl_rx_spin = VIRTQ_SPIN_LIMIT;
-
-    if (i < 0)
-    {
-        KINFO(("hostfs-link: slot %d port %d: no helper\n", slot, port));
-        hl_slot = -1;
-        hl_port = -1;
-        hl_dead = 0;            /* the NEXT device still deserves a try */
-        return;
-    }
-
-    hl_ready = 1;
+    if (hostfs_link_present()) hl_transport = slot;
+    hostfs_link_select(2);
 }
 
 #endif /* MACHINE_QEMU_VIRT */

@@ -64,11 +64,26 @@ static WORD hostfs_on;
 
 /*
  * The current directory on the drive, always in the canonical form
- * "\" or "\SUB\DEEP" -- see the note in hostfs.h. Only one string is
- * needed because this module owns exactly one drive; the drive EmuTOS
- * keeps in p_curdir[] is untouched, since stock code never reaches C:.
+ * "\" or "\SUB\DEEP" -- see the note in hostfs.h. A string is
+ * kept per mapped drive; stock EmuTOS p_curdir[] is untouched for these
+ * drives because their GEMDOS operations are handled here.
  */
-static char hostfs_path[HOSTFS_MAX_PATH];
+static char drive_paths[26][HOSTFS_MAX_PATH];
+static WORD active_drive = HOSTFS_DRIVE;
+#define hostfs_path drive_paths[active_drive]
+
+static WORD path_drive(const char *path)
+{
+    WORD d = extract_drive_number(path);
+    return d < 0 ? run->p_curdrv : d;
+}
+
+static WORD select_drive(WORD drive)
+{
+    if (!hostfs_link_select(drive)) return 0;
+    active_drive = drive;
+    return 1;
+}
 
 /*
  * A path as the host helper spells it: '/'-separated, no leading '/',
@@ -101,6 +116,7 @@ static WORD dir_count;
 static WORD dir_pos;
 static char dir_wire[HOSTFS_LINK_MAX_PATH];
 static WORD dir_subdir;
+static WORD dir_drive = -1;
 
 /*
  * Which DTA each open scan belongs to.
@@ -134,6 +150,7 @@ typedef struct
     void *dta;                          /* owner, NULL when free        */
     char  wire[HOSTFS_LINK_MAX_PATH];   /* directory being scanned      */
     char  pattern[16];                  /* pattern given to Fsfirst     */
+    WORD  drive;
     WORD  subdir;                       /* is it below the drive root   */
     WORD  pos;                          /* cursor into the snapshot     */
     LONG  age;                          /* larger is more recent        */
@@ -405,6 +422,7 @@ static LONG dir_snapshot(const char *dirwire)
 static struct
 {
     WORD  used;
+    WORD  drive;
     WORD  wr;
     ULONG handle;
     ULONG pos;
@@ -782,6 +800,8 @@ LONG hostfs_open(const char *path, WORD mode)
     WORD slot = 0, i;
     LONG rc, handle;
 
+    if (!select_drive(path_drive(path))) return EDRIVE;
+
     mode &= HOSTFS_FOPEN_BITS;      /* 0 = read, 1 = write, 2 = read/write */
 
     rc = hostfs_locate(path, 1);
@@ -848,6 +868,7 @@ LONG hostfs_open(const char *path, WORD mode)
         return EACCDN;
 
     hostfs_files[slot].used = 1;
+    hostfs_files[slot].drive = active_drive;
     hostfs_files[slot].wr = (mode != 0);
     hostfs_files[slot].handle = (ULONG)handle;
     hostfs_files[slot].pos = 0;
@@ -991,6 +1012,7 @@ static LONG hostfs_create(const char *path, WORD attr)
     hostfs_link_stat(create_wire, &size, &is_dir, &mtime, &writable);
 
     hostfs_files[slot].used = 1;
+    hostfs_files[slot].drive = active_drive;
     hostfs_files[slot].wr = 1;
     hostfs_files[slot].handle = (ULONG)handle;
     hostfs_files[slot].pos = 0;
@@ -1020,7 +1042,8 @@ LONG hostfs_close(WORD h)
     if (!hostfs_files[slot].used)
         return EIHNDL;
 
-    hostfs_link_close(hostfs_files[slot].handle);
+    if (select_drive(hostfs_files[slot].drive))
+        hostfs_link_close(hostfs_files[slot].handle);
 
     hostfs_files[slot].used = 0;
     hostfs_files[slot].wr = 0;
@@ -1049,6 +1072,7 @@ LONG hostfs_read(WORD h, ULONG count, UBYTE *buf)
     if (count == 0)
         return 0;
 
+    if (!select_drive(hostfs_files[slot].drive)) return EDRIVE;
     n = hostfs_link_read(hostfs_files[slot].handle, hostfs_files[slot].pos,
                          buf, count);
     if (n < 0)
@@ -1093,6 +1117,7 @@ LONG hostfs_write(WORD h, ULONG count, const UBYTE *buf)
     if (count == 0)
         return 0;
 
+    if (!select_drive(hostfs_files[slot].drive)) return EDRIVE;
     n = hostfs_link_write(hostfs_files[slot].handle, hostfs_files[slot].pos,
                           buf, count);
     if (n < 0)
@@ -1495,16 +1520,16 @@ static LONG hostfs_datime(DOSTIME *buf, WORD h, WORD wrt)
 
 void hostfs_init(void)
 {
-    strcpy(hostfs_path, "\\");
+    WORD d;
+    ULONG drives = hostfs_link_drives();
+    for (d = 2; d < 26; d++)
+        strcpy(drive_paths[d], "\\");
     dir_wire[0] = '\0';
-
-    if (!hostfs_link_present())
-        return;
-
-    drvbits |= (1L << HOSTFS_DRIVE);
-    hostfs_on = 1;
-
-    KINFO(("hostfs: drive C registered\n"));
+    drvbits |= drives;
+    hostfs_on = drives != 0;
+    for (d = 2; d < 26; d++)
+        if (drives & (1UL << d))
+            KINFO(("hostfs: drive %c registered\n", 'A' + d));
 }
 
 /*
@@ -1530,7 +1555,7 @@ WORD hostfs_owns_path(const char *path)
     if (drv < 0)
         drv = run->p_curdrv;
 
-    return drv == HOSTFS_DRIVE;
+    return drv >= 2 && drv < 26 && (hostfs_link_drives() & (1UL << drv)) != 0;
 }
 
 WORD hostfs_claims(WORD fn, short *pw)
@@ -1596,15 +1621,7 @@ WORD hostfs_claims(WORD fn, short *pw)
     {
         const char *from = *(const char * const *)&pw[2];
         const char *to = *(const char * const *)&pw[4];
-        WORD dfrom = extract_drive_number(from);
-        WORD dto = extract_drive_number(to);
-
-        if (dfrom < 0)
-            dfrom = run->p_curdrv;
-        if (dto < 0)
-            dto = run->p_curdrv;
-
-        return dfrom == HOSTFS_DRIVE || dto == HOSTFS_DRIVE;
+        return hostfs_owns_path(from) || hostfs_owns_path(to);
     }
 
     /*
@@ -1612,15 +1629,17 @@ WORD hostfs_claims(WORD fn, short *pw)
      * one. Claiming only when that resolves to C: is what leaves every
      * other drive to EmuTOS.
      */
-    if (fn == 0x36                  /* Dfree:    drive in pw[3] */
-     || fn == 0x47)                 /* Dgetpath: drive in pw[3] */
-        return (pw[3] ? pw[3] - 1 : run->p_curdrv) == HOSTFS_DRIVE;
+    if (fn == 0x36 || fn == 0x47)
+    {
+        WORD d = pw[3] ? pw[3] - 1 : run->p_curdrv;
+        return d >= 2 && d < 26 && (hostfs_link_drives() & (1UL << d)) != 0;
+    }
 
     if (fn == 0x0E)                 /* Dsetdrv: only the switch TO C: */
-        return pw[1] == HOSTFS_DRIVE;
+        return pw[1] >= 2 && pw[1] < 26 && (hostfs_link_drives() & (1UL << pw[1])) != 0;
 
     if (fn == 0x19)                 /* Dgetdrv: only while C: is current */
-        return run->p_curdrv == HOSTFS_DRIVE;
+        return (hostfs_link_drives() & (1UL << run->p_curdrv)) != 0;
 
     /*
      * Handle-bearing calls. Claiming these is a memory-safety
@@ -1805,6 +1824,15 @@ static char dir_pattern[16];
 LONG hostfs_dispatch(WORD fn, short *pw)
 {
     WORD first_call = (fn == 0x4E);
+    WORD drive = run->p_curdrv;
+    if (fn == 0x3C || fn == 0x3D || fn == 0x41 || fn == 0x39 ||
+        fn == 0x3A || fn == 0x3B || fn == 0x43 || fn == 0x4E)
+        drive = path_drive(*(const char * const *)&pw[1]);
+    else if (fn == 0x56)
+        drive = path_drive(*(const char * const *)&pw[2]);
+    else if (fn == 0x36 || fn == 0x47)
+        drive = pw[3] ? pw[3] - 1 : run->p_curdrv;
+    if (drive >= 2 && drive < 26) select_drive(drive);
 
     /*
      * Stack layout follows funcs[] in bdosmain.c: pw[0] is the function
@@ -1880,11 +1908,11 @@ LONG hostfs_dispatch(WORD fn, short *pw)
      * knows nothing about.
      */
     case 0x0E:                  /* Dsetdrv(drive) */
-        run->p_curdrv = HOSTFS_DRIVE;
+        run->p_curdrv = pw[1];
         return Drvmap();
 
     case 0x19:                  /* Dgetdrv() */
-        return HOSTFS_DRIVE;
+        return run->p_curdrv;
 
     case 0x3B:                  /* Dsetpath(path) */
         return hostfs_setpath(*(const char * const *)&pw[1]);
@@ -1923,6 +1951,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         ((DTAINFO *)run->p_xdta)->dt_offset_drive = HOSTFS_DTA_MAGIC;
         dir_count = 0;
         dir_pos = 0;
+        dir_drive = -1;
 
         /*
          * Whatever this DTA was scanning, it is not scanning it now.
@@ -1973,6 +2002,8 @@ LONG hostfs_dispatch(WORD fn, short *pw)
         strcpy(scan->pattern, dir_pattern);
         scan->subdir = dir_subdir;
         scan->pos = 0;
+        scan->drive = active_drive;
+        dir_drive = active_drive;
 
         dir_pos = 0;
         fn = 0x4F;                      /* fall into the Fsnext scan */
@@ -2003,13 +2034,15 @@ LONG hostfs_dispatch(WORD fn, short *pw)
          * from a program this very scan is in the middle of running --
          * read it again and carry on from where this DTA had reached.
          */
-        if (strcmp(dir_wire, scan->wire) != 0)
+        if (!select_drive(scan->drive)) return EDRIVE;
+        if (dir_drive != scan->drive || strcmp(dir_wire, scan->wire) != 0)
         {
             LONG rc = dir_snapshot(scan->wire);
 
             if (rc < 0)
                 return rc;
             strcpy(dir_wire, scan->wire);
+            dir_drive = scan->drive;
         }
 
         strcpy(dir_pattern, scan->pattern);

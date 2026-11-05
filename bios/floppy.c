@@ -33,6 +33,7 @@
 #include "intmath.h"
 #include "amiga.h"
 #include "lisa.h"
+#include "virtio_blk.h"
 
 
 /*==== Introduction =======================================================*/
@@ -395,6 +396,18 @@ static void flop_detect_drive(WORD dev)
     MAYBE_UNUSED(flop_add_drive);
 
     KDEBUG(("flop_detect_drive(%d)\n",dev));
+#if CONF_WITH_VIRTIO_BLK
+    if (virtio_blk_floppy_capacity(dev)) {
+        ULONG capacity = virtio_blk_floppy_capacity(dev);
+        flop_add_drive(dev);
+        units[dev].size = capacity;
+        blkdev[dev].size = capacity;
+        blkdev[dev].geometry.sides = 2;
+        blkdev[dev].geometry.spt = capacity == 1440UL ? 9 : 18;
+        KINFO(("virtio-blk: floppy %c, %lu sectors\n", 'A' + dev, capacity));
+    }
+    return;
+#endif
 
 #ifdef MACHINE_AMIGA
     if (amiga_flop_detect_drive(dev)) {
@@ -466,6 +479,9 @@ LONG flop_mediach(WORD dev)
     return lisa_flop_mediach(dev);
 #endif
 
+#if CONF_WITH_VIRTIO_BLK
+    if (virtio_blk_floppy_capacity(dev)) return MEDIANOCHANGE;
+#endif
     fi = &finfo[dev];
 
 #if CONF_WITH_FDC
@@ -565,6 +581,10 @@ LONG floppy_rw(WORD rw, UBYTE *buf, WORD cnt, LONG recnr, WORD spt,
     if (!IS_VALID_FLOPPY_DEVICE(dev))
         return EUNDEV;  /* unknown device */
 
+#if CONF_WITH_VIRTIO_BLK
+    if (virtio_blk_floppy_capacity(dev))
+        return virtio_blk_floppy_rw(rw, recnr, cnt, buf, dev);
+#endif
     /*
      * we divide the i/o into 3 sections, each of which may be empty:
      *  1. the sectors from the starting sector to the end of the starting track/side
@@ -799,6 +819,17 @@ LONG flopver(WORD *buf, LONG filler, WORD dev,
 {
     LONG rc = 0L;
     WORD *bad = buf;
+#if CONF_WITH_VIRTIO_BLK
+    if (virtio_blk_floppy_capacity(dev)) {
+        WORD n;
+        for (n = 0; n < count; n++) {
+            LONG error = floprd((UBYTE *)(buf + SECTOR_SIZE / 2), filler, dev, sect + n, track, side, 1);
+            if (error) *bad++ = sect + n;
+        }
+        *bad = 0;
+        return E_OK;
+    }
+#endif
 #if defined(MACHINE_AMIGA) || CONF_WITH_FDC
     WORD i, err;
     UBYTE *diskbuf = (UBYTE *)buf + SECTOR_SIZE;
@@ -910,6 +941,9 @@ LONG flopfmt(UBYTE *buf, WORD *skew, WORD dev, WORD spt,
     if (!IS_VALID_FLOPPY_DEVICE(dev))
         return EUNDEV;          /* unknown disk */
 
+#if CONF_WITH_VIRTIO_BLK
+    if (virtio_blk_floppy_capacity(dev)) return EBADRQ; /* sector images are preformatted */
+#endif
     if (magic != 0x87654321UL)
         return EBADSF;          /* just like TOS4 */
 
@@ -1080,6 +1114,14 @@ static WORD flopio(UBYTE *userbuf, WORD rw, WORD dev,
     if (!IS_VALID_FLOPPY_DEVICE(dev))
         return EUNDEV;  /* unknown disk */
 
+#if CONF_WITH_VIRTIO_BLK
+    if (virtio_blk_floppy_capacity(dev)) {
+        WORD spt = virtio_blk_floppy_capacity(dev) == 1440UL ? 9 : 18;
+        if (sect < 1 || sect > spt || side < 0 || side > 1 || track < 0 || track >= 80)
+            return ESECNF;
+        return (WORD)virtio_blk_floppy_rw(rw, ((LONG)track * 2 + side) * spt + sect - 1, count, userbuf, dev);
+    }
+#endif
     rw &= RW_RW;    /* remove any extraneous bits */
 
     if ((rw == RW_WRITE) && (track == 0) && (sect == 1) && (side == 0)) {

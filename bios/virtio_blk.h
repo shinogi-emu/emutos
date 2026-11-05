@@ -18,6 +18,7 @@
  * Request types -- include/standard-headers/linux/virtio_blk.h
  */
 #define VIRTIO_BLK_T_IN     0UL     /* read from the device  */
+#define VIRTIO_BLK_T_GET_ID 8UL
 #define VIRTIO_BLK_T_OUT    1UL     /* write to the device   */
 
 /* Status byte the device writes as the last descriptor of a chain */
@@ -37,12 +38,14 @@
  * room for DEVICES_PER_BUS of them; the limit here is only about the
  * per-device ring and header buffers, which are static.
  */
-#define VIRTIO_BLK_MAXDEV   4
+#define VIRTIO_BLK_MAXDEV   6
 
 /* Sector size.  We do not negotiate VIRTIO_BLK_F_BLK_SIZE, so it is 512. */
 #define VIRTIO_BLK_SECSIZE  512UL
 
 void virtio_blk_attach(WORD slot);
+ULONG virtio_blk_floppy_capacity(WORD drive);
+LONG virtio_blk_floppy_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD drive);
 LONG virtio_blk_ioctl(UWORD dev, UWORD ctrl, void *arg);
 LONG virtio_blk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD dev);
 

@@ -587,6 +587,8 @@ WORD virtio_probe(void)
          */
         if (id == VIRTIO_ID_CONSOLE)
             want_lo = 1UL << VIRTIO_CONSOLE_F_MULTIPORT_BIT;
+        else if (id == VIRTIO_ID_BLK)
+            want_lo = 1UL << 5;  /* VIRTIO_BLK_F_RO: respect each backend */
         else
             want_lo = 0;
 

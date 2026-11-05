@@ -46,6 +46,8 @@
 
 void hostfs_link_attach(WORD slot);
 WORD hostfs_link_present(void);
+ULONG hostfs_link_drives(void);
+WORD hostfs_link_select(WORD drive);
 
 /* Attributes are decomposed the way the GEMDOS layer wants them. */
 LONG hostfs_link_stat(const char *path, ULONG *size, UWORD *is_dir,

@@ -338,7 +338,9 @@ void disk_init_all(void)
      * every GEMDOS call, which looks exactly like a partition that
      * failed to mount.
      */
-    if (virtio_9p_present() || hostfs_link_present())
+    devices_available &= ~hostfs_link_drives();
+    devices_available &= ~(1UL << 20); /* U: is FreeMiNT's unified filesystem */
+    if (virtio_9p_present())
         devices_available &= ~(1L << HOSTFS_DRIVE);
 #endif
 

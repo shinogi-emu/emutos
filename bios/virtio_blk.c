@@ -18,10 +18,10 @@
  * in the direction the descriptor claims -- so it is derived from the
  * request type in one place rather than passed in.
  *
- * T_OUT is issued only when CONF_WITH_VIRTIO_BLK_WRITE is set, which it
- * is not by default; a write is refused with EWRPRO instead.  That is
- * about QEMU's vvfat host driver losing data, not about anything here
- * -- see the long note in include/config.h.
+ * Writes require a launcher-tagged raw image (shinogi.disk1..4 or
+ * shinogi.floppya/b) or the developer-only CONF_WITH_VIRTIO_BLK_WRITE
+ * override. The negotiated backend read-only feature always wins. Ordinary
+ * untagged/vvfat devices remain protected; see include/config.h.
  *
  * Every multi-byte field of a request header is little-endian on the
  * wire and this is a big-endian target, so the header is assembled byte
@@ -55,6 +55,8 @@
 
 typedef struct
 {
+    WORD readonly, image_write, floppy;
+    char id[21];
     WORD  slot;                 /* transport slot, -1 if unused */
     ULONG capacity;             /* size in 512-byte sectors     */
     VIRTQ vq;
@@ -63,7 +65,8 @@ typedef struct
     UBYTE status;
 } VBLK;
 
-static VBLK vblk[VIRTIO_BLK_MAXDEV];
+static VBLK vblk_storage[VIRTIO_BLK_MAXDEV];
+static VBLK *vblk[VIRTIO_BLK_MAXDEV];
 static WORD vblk_count;
 
 /* Little-endian store, byte by byte.  See the file header. */
@@ -84,13 +87,9 @@ static void vblk_st32(UBYTE *p, ULONG v)
  */
 static VBLK *vblk_dev(UWORD dev)
 {
-    if (dev >= vblk_count)
+    if (dev >= VIRTIO_BLK_MAXDEV)
         return NULL;
-
-    if (vblk[dev].slot < 0)
-        return NULL;
-
-    return &vblk[dev];
+    return vblk[dev];
 }
 
 /*
@@ -121,7 +120,7 @@ static LONG vblk_request(VBLK *v, ULONG type, ULONG sector, UBYTE *buf,
      * so the descriptor is device-readable and the only byte written
      * back is the status.
      */
-    if (type == VIRTIO_BLK_T_IN)
+    if (type == VIRTIO_BLK_T_IN || type == VIRTIO_BLK_T_GET_ID)
     {
         dflags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
         expect = bytes + 1;
@@ -209,9 +208,10 @@ LONG virtio_blk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD dev)
         return EUNDEV;
 
 #if !CONF_WITH_VIRTIO_BLK_WRITE
-    if (type == VIRTIO_BLK_T_OUT)
+    if (type == VIRTIO_BLK_T_OUT && !v->image_write)
         return EWRPRO;
 #endif
+    if (type == VIRTIO_BLK_T_OUT && v->readonly) return EWRPRO;
 
     if (count <= 0)
         return 0;
@@ -223,7 +223,7 @@ LONG virtio_blk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD dev)
      * I/O error indistinguishable from a real one; a request off the
      * end of the medium is worth naming.
      */
-    if (first + (ULONG)(UWORD)count > v->capacity)
+    if (first > v->capacity || (ULONG)(UWORD)count > v->capacity - first)
     {
         KDEBUG(("virtio_blk_rw(): sector %lu+%d beyond capacity %lu\n",
                 first, count, v->capacity));
@@ -238,7 +238,7 @@ LONG virtio_blk_ioctl(UWORD dev, UWORD ctrl, void *arg)
     VBLK *v = vblk_dev(dev);
     ULONG *info = arg;
 
-    if (!v)
+    if (!v || v->floppy >= 0)
         return EUNDEV;
 
     switch(ctrl)
@@ -278,6 +278,7 @@ void virtio_blk_attach(WORD slot)
 {
     VBLK *v;
     ULONG cap_lo, cap_hi;
+    WORD index, i;
 
     if (vblk_count >= VIRTIO_BLK_MAXDEV)
     {
@@ -286,7 +287,7 @@ void virtio_blk_attach(WORD slot)
         return;
     }
 
-    v = &vblk[vblk_count];
+    v = &vblk_storage[vblk_count];
     v->slot = -1;
 
     if (virtq_setup(&v->vq, slot, 0, VBLK_QSIZE, v->ring) != 0)
@@ -317,11 +318,60 @@ void virtio_blk_attach(WORD slot)
 
     v->capacity = cap_lo;
     v->slot = slot;
+    v->floppy = -1;
+    vio_write32(slot, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
+    v->readonly = (vio_read32(slot, VIRTIO_MMIO_DEVICE_FEATURES) & (1UL << 5)) != 0;
+    memset(v->id, 0, sizeof(v->id));
+    if (vblk_request(v, VIRTIO_BLK_T_GET_ID, 0, (UBYTE *)v->id, 20UL) < 0) {
+        KINFO(("virtio-blk: slot %d could not read image identity\n", slot));
+        vblk_count++;
+        return;
+    }
+    index = -1;
+    for (i = 0; i < 4; i++)
+    {
+        char name[] = "shinogi.disk1";
+        name[sizeof(name) - 2] = '1' + i;
+        if (!strcmp(v->id, name)) { index = i; v->image_write = 1; break; }
+    }
+    if (!strcmp(v->id, "shinogi.floppya") || !strcmp(v->id, "shinogi.floppyb"))
+    {
+        v->floppy = v->id[sizeof("shinogi.floppya") - 2] == 'a' ? 0 : 1;
+        index = 4 + v->floppy;
+        v->image_write = 1;
+        if (cap_lo != 1440UL && cap_lo != 2880UL) index = -2;
+    }
+    if (index == -1)
+        for (i = 0; i < 4; i++)
+            if (!vblk[i]) { index = i; break; }
+    if (index < 0 || vblk[index])
+    {
+        KINFO(("virtio-blk: invalid or duplicate image identity %s\n", v->id));
+        vblk_count++; /* rings remain owned by the ignored device */
+        return;
+    }
+    vblk[index] = v;
 
     KINFO(("virtio-blk: device %d at slot %d, %lu sectors\n",
            vblk_count, slot, v->capacity));
 
     vblk_count++;
+}
+
+/* Image attachment is fixed for one emulator run. A restart rebuilds all
+ * BIOS/BPB/cache state; live QMP media replacement is deliberately unsupported. */
+ULONG virtio_blk_floppy_capacity(WORD drive)
+{
+    VBLK *v;
+    if (drive < 0 || drive > 1) return 0;
+    v = vblk_dev(4 + drive);
+    return v ? v->capacity : 0;
+}
+
+LONG virtio_blk_floppy_rw(WORD rw, LONG sector, WORD count, UBYTE *buf, WORD drive)
+{
+    if (drive < 0 || drive > 1 || !virtio_blk_floppy_capacity(drive)) return EUNDEV;
+    return virtio_blk_rw(rw, sector, count, buf, 4 + drive);
 }
 
 #endif /* CONF_WITH_VIRTIO_BLK */

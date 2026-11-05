@@ -1180,8 +1180,10 @@
 
 /*
  * Set CONF_WITH_VIRTIO_BLK_WRITE to 1 to let the virtio-blk driver
- * issue writes.  At 0 the driver is read-only and refuses a write with
- * EWRPRO rather than attempting it.
+ * issue writes to ordinary untagged devices. At 0 those writes return
+ * EWRPRO. Launcher-tagged raw disk/floppy images have a separately tested
+ * write path and may write without this override; VIRTIO_BLK_F_RO always
+ * protects a read-only backend. Production host folders use hostfs, not vvfat.
  *
  * This is off by default because of what this project puts on the other
  * end of the device, not because of the driver.  The driver's write
