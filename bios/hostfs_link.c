@@ -215,7 +215,7 @@ static UBYTE hl_ctrl_tx[HL_CTRL_HDR] __attribute__((aligned(4)));
 static UBYTE hl_req[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
 static UBYTE hl_rep[HOSTFS_MAX_FRAME] __attribute__((aligned(4)));
 static ULONG hl_rep_len;
-static WORD hl_transport = -1;
+static WORD hl_transport; /* slot + 1; BSS resets the attachment on reboot */
 
 WORD hostfs_link_select(WORD drive)
 {
@@ -1045,7 +1045,7 @@ void hostfs_link_attach(WORD slot)
     WORD i, port, round, pending;
     UBYTE announced[HL_MAX_PORTS];
 
-    if (hl_transport >= 0)
+    if (hl_transport)
         return;                 /* all folder channels share one console */
     hl = &hl_drives[2];
 
@@ -1171,7 +1171,7 @@ void hostfs_link_attach(WORD slot)
         hl_ready = 1;
         hl->registered = 1;
     }
-    if (hostfs_link_present()) hl_transport = slot;
+    if (hostfs_link_present()) hl_transport = slot + 1;
     hostfs_link_select(2);
 }
 
