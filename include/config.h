@@ -1799,6 +1799,21 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_OUTLINE_FONTS to 1 to build FreeType and the VDI
+ * outline font engine, so that the VDI can draw scalable (TrueType and
+ * OpenType) fonts found in C:\GEMSYS\FONTS.  FreeType is built with
+ * 32-bit ints, and is large: this is only enabled by default for the
+ * targets that run from RAM with plenty of memory.
+ */
+#ifndef CONF_WITH_VDI_OUTLINE_FONTS
+# if defined(TARGET_QEMU_VIRT) || defined(TARGET_PRG)
+#  define CONF_WITH_VDI_OUTLINE_FONTS 1
+# else
+#  define CONF_WITH_VDI_OUTLINE_FONTS 0
+# endif
+#endif
+
+/*
  * The VDI functions v_fillarea(), v_pline(), v_pmarker() can handle
  * up to MAX_VERTICES coordinates (MAX_VERTICES/2 points).
  * TOS2 allows 512 vertices, TOS3/TOS4 allow 1024.
