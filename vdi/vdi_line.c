@@ -2399,6 +2399,7 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
         LONG n = (LONG)dy + 1;
         LONG stride = (LONG)yinc * 2;   /* in bytes, may be negative */
         UBYTE *a = (UBYTE *)addr;
+        LONG s2 = stride * 2, s3 = stride * 3, s4 = stride * 4;
 
         switch(wrt_mode) {
         case WM_ERASE:      /* reverse transparent: draws where the bit is clear */
@@ -2411,9 +2412,6 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
             break;
         case WM_TRANS:      /* transparent and replace both store the foreground */
         case WM_REPLACE:
-        default:
-            LONG s2 = stride * 2, s3 = stride * 3, s4 = stride * 4;
-
             for (; n >= 8; n -= 8) {
                 *(UWORD *)a = fgcol;
                 *(UWORD *)(a + stride) = fgcol;
