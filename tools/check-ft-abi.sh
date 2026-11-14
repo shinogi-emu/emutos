@@ -14,8 +14,9 @@
 # in those two headers.  It prints nothing and exits with 0 if there is
 # none; otherwise it prints the symbols, one per line, and exits with 1.
 #
-# The 32-bit int objects are obj/ft_*.o, obj/vdi_ft2.o and obj/vdi_ftlibc.o
-# (see FT_OBJ in the Makefile).  Set NM to override the nm program.
+# The 32-bit int objects are obj/ft_*.o, obj/vdi_ft2.o, obj/vdi_ftmap.o and
+# obj/vdi_ftlibc.o (see VDI_FT_OBJ in the Makefile).  Set NM to override the
+# nm program.
 #
 # This file is distributed under the GPL, version 2 or at your
 # option any later version.  See doc/license.txt for details.
@@ -40,8 +41,8 @@ wide=()     # objects built with 32-bit int
 narrow=()   # all the others
 for o in "$objdir"/*.o; do
     case $(basename "$o") in
-    ft_*.o|vdi_ft2.o|vdi_ftlibc.o)  wide+=("$o") ;;
-    *)                              narrow+=("$o") ;;
+    ft_*.o|vdi_ft2.o|vdi_ftmap.o|vdi_ftlibc.o)  wide+=("$o") ;;
+    *)                                          narrow+=("$o") ;;
     esac
 done
 

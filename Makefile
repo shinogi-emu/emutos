@@ -389,7 +389,7 @@ FT_SOURCES = base/ftbase.c base/ftinit.c base/ftbbox.c base/ftbitmap.c \
              raster/raster.c autofit/autofit.c
 
 FT_OBJ = $(foreach f,$(FT_SOURCES),obj/ft_$(subst /,_,$(basename $(f))).o)
-VDI_FT_OBJ = $(FT_OBJ) obj/vdi_ft2.o obj/vdi_ftlibc.o
+VDI_FT_OBJ = $(FT_OBJ) obj/vdi_ft2.o obj/vdi_ftmap.o obj/vdi_ftlibc.o
 
 # The source below must be the last VDI one
 vdi_src += endvdi.S
@@ -1351,7 +1351,7 @@ obj/ft_$(subst /,_,$(basename $(1))).o: freetype/src/$(1) $(FT_CONFIG_H)
 endef
 $(foreach f,$(FT_SOURCES),$(eval $(call FT_OBJ_RULE,$(f))))
 
-obj/vdi_ft2.o obj/vdi_ftlibc.o: obj/%.o: vdi/%.c vdi/vdi_ft2.h vdi/vdi_ftos.h $(FT_CONFIG_H)
+obj/vdi_ft2.o obj/vdi_ftmap.o obj/vdi_ftlibc.o: obj/%.o: vdi/%.c vdi/vdi_ft2.h vdi/vdi_ftos.h vdi/vdi_ftmap.h $(FT_CONFIG_H)
 	$(CC) $(FT_CFLAGS) -c $< -o $@
 	$(OBJCOPY) --redefine-syms=vdi/vdi_ftlibc.syms $@
 
