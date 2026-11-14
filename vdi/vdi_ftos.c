@@ -12,15 +12,9 @@
 #include "string.h"
 #include "cookie.h"
 #include "vdi_ftos.h"
+#include "vdi_ftmem.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
-
-/*
- * every block handed out by vdi_ft_alloc() is preceded by a header
- * holding its size, so that vdi_ft_realloc() can copy it.  The header
- * has the size of two longs to keep the block 8-byte aligned.
- */
-#define BLOCK_HEADER    (2 * sizeof(ULONG))
 
 /* the deepest level of sub-folders searched by vdi_font_dir_scan() */
 #define MAX_SCAN_DEPTH  8
@@ -81,52 +75,40 @@ static void *alloc_kept(LONG size)
 }
 
 
+/*
+ * the system blocks of the allocator (vdi_ftmem.c), which carves the
+ * engine's small blocks from them
+ */
+void *ftmem_os_alloc(ULONG size)
+{
+    if (size > 0x7fffffffUL)
+        return NULL;
+
+    return alloc_kept((LONG)size);
+}
+
+
+void ftmem_os_free(void *block)
+{
+    dos_free(block);
+}
+
+
 void *vdi_ft_alloc(ULONG size)
 {
-    ULONG *block;
-
-    if (size > 0x7fffffffUL - BLOCK_HEADER)
-        return NULL;
-
-    block = alloc_kept(size + BLOCK_HEADER);
-    if (!block)
-        return NULL;
-
-    block[0] = size;
-    return (UBYTE *)block + BLOCK_HEADER;
+    return ftmem_alloc(size);
 }
 
 
 void vdi_ft_free(void *block)
 {
-    if (block)
-        dos_free((UBYTE *)block - BLOCK_HEADER);
+    ftmem_free(block);
 }
 
 
 void *vdi_ft_realloc(void *block, ULONG size)
 {
-    ULONG oldsize;
-    void *newblock;
-
-    if (!block)
-        return vdi_ft_alloc(size);
-
-    if (size == 0)
-    {
-        vdi_ft_free(block);
-        return NULL;
-    }
-
-    oldsize = ((ULONG *)((UBYTE *)block - BLOCK_HEADER))[0];
-    newblock = vdi_ft_alloc(size);
-    if (!newblock)
-        return NULL;                /* the old block is left alone */
-
-    memcpy(newblock, block, (oldsize < size) ? oldsize : size);
-    vdi_ft_free(block);
-
-    return newblock;
+    return ftmem_realloc(block, size);
 }
 
 
