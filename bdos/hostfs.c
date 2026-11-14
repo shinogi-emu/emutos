@@ -1677,10 +1677,9 @@ WORD hostfs_claims(WORD fn, short *pw)
 
 /*
  * Ported from the reference implementation's fsfirst_match(). Matching
- * is against the RAW host name; the clipped 8.3 name is only ever what
- * gets written into the DTA. Listing membership and display names are
- * therefore computed independently, which is why a name can be visible
- * yet unmatchable by the pattern that appears to describe it.
+ * is against the RAW host name; hostfs_scan_match() below adds the one
+ * case that needs the clipped 8.3 name written into the DTA: an exact
+ * name, so anything a listing shows can be found by the name it shows.
  */
 static WORD hostfs_match(const char *pat, const char *name, WORD subdir)
 {
@@ -1732,6 +1731,33 @@ static WORD hostfs_match(const char *pat, const char *name, WORD subdir)
         p++;
 
     return p[0] == '\0';
+}
+
+/*
+ * A scan entry matches when the pattern describes its host name, or when
+ * a pattern without wildcards is exactly the 8.3 name it is listed
+ * under. The host name alone left a long-named entry listed but not
+ * findable by its own listed name: Fsfirst of "D:\APPLICAT" with
+ * FA_SUBDIR found nothing for a folder called "Applications", and
+ * FreeMiNT, which looks up every path component that way, showed every
+ * such folder empty.
+ *
+ * Wildcard scans still see host names only, so "*.PRG" in AUTO does not
+ * start to pick up "foo.prg~" through its clipped name FOO.PRG. Dot
+ * names keep the host-name rule alone, so the root still drops them.
+ *
+ * Static buffer: this runs on the BDOS's small private stack.
+ */
+static char match_clipped[13];
+
+static WORD hostfs_scan_match(const char *pat, const char *host, WORD subdir)
+{
+    if (hostfs_match(pat, host, subdir))
+        return 1;
+    if (host[0] == '.' || strchr(pat, '*') || strchr(pat, '?'))
+        return 0;
+    hostfs_host_to_atari(host, match_clipped);
+    return name_equal(pat, match_clipped);
 }
 
 static char fill_wire[HOSTFS_LINK_MAX_PATH];
@@ -2061,7 +2087,7 @@ LONG hostfs_dispatch(WORD fn, short *pw)
 
             dir_pos++;
             scan->pos = dir_pos;
-            if (!hostfs_match(dir_pattern, host, dir_subdir))
+            if (!hostfs_scan_match(dir_pattern, host, dir_subdir))
                 continue;
 
             rc = hostfs_fill_dta(host);
