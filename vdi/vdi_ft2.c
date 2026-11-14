@@ -90,6 +90,7 @@
 #define INSTANCE_MAX        10          /* open instances kept, at least */
 #define FF_KEEP_MAX         8           /* unreferenced buffers kept for reuse */
 #define MAX_FILE_FACES      32          /* faces registered from one file */
+#define GLYPH_TRIES         16          /* glyphs looked at to accept a face */
 
 #define KIND_FACE           0x46616365L /* 'Face' */
 #define KIND_SIZE           0x53697a65L /* 'Size' */
@@ -1362,13 +1363,110 @@ static WORD classify(const TT_OS2 *os2)
     return VDI_FCLASS_UNKNOWN;
 }
 
-/* register a face that is open; returns 0, or <0 if out of memory */
+/* is a name empty or all spaces? */
+static int blank(const char *s)
+{
+    for (; s && *s; s++)
+        if (*s != ' ')
+            return 0;
+    return 1;
+}
+
+/* does the glyph in the slot show anything? */
+static int has_ink(FT_GlyphSlot slot)
+{
+    if (slot->format == FT_GLYPH_FORMAT_OUTLINE)
+        return slot->outline.n_points > 0;
+    if (slot->format == FT_GLYPH_FORMAT_BITMAP)
+        return slot->bitmap.rows > 0 && slot->bitmap.width > 0;
+    return 0;
+}
+
+/* load a glyph: 1 if it shows something, 0 if not, -1 if out of memory */
+static LONG try_glyph(FT_Face face, FT_UInt index)
+{
+    FT_Error error = FT_Load_Glyph(face, index, FT_LOAD_NO_HINTING);
+
+    if (error == FT_Err_Out_Of_Memory)
+        return -1;
+    return !error && has_ink(face->glyph);
+}
+
+/*
+ * A font file cut short often still opens, and gives a face whose glyphs
+ * are missing or empty: it would be listed, and draw nothing.  So a face
+ * must show 'A' at a small size, or one of its first characters, or,
+ * without a character map, one of its first glyphs.
+ *
+ * Returns 0 if it does, -2 if not, -1 if out of memory.
+ */
+static LONG check_glyphs(FT_Face face)
+{
+    FT_ULong code;
+    FT_UInt index;
+    LONG i, r;
+
+    if (FT_IS_SCALABLE(face))
+    {
+        if (FT_Set_Pixel_Sizes(face, 0, 12))
+            return -2;
+    }
+    else if (face->num_fixed_sizes <= 0 || FT_Select_Size(face, 0))
+        return -2;
+
+    index = FT_Get_Char_Index(face, 'A');
+    if (index && (r = try_glyph(face, index)) != 0)
+        return (r > 0) ? 0 : -1;
+
+    code = FT_Get_First_Char(face, &index);
+    for (i = 0; index && i < GLYPH_TRIES; i++)
+    {
+        if ((r = try_glyph(face, index)) != 0)
+            return (r > 0) ? 0 : -1;
+        code = FT_Get_Next_Char(face, code, &index);
+    }
+
+    for (index = 1; index < (FT_UInt)face->num_glyphs && index <= GLYPH_TRIES; index++)
+        if ((r = try_glyph(face, index)) != 0)
+            return (r > 0) ? 0 : -1;
+
+    return -2;
+}
+
+/*
+ * register a face that is open; returns 0, -1 if out of memory, or -2 if
+ * the face has no name or draws nothing
+ */
 static LONG add_face(FT_Face face, const char *path, LONG index)
 {
     FaceRec *fr, **pp;
     VdiOutlineFont *font;
     TT_OS2 *os2;
+    char name[sizeof(font->name)];
     LONG i;
+
+    /* Best practice conveniently keeps this <= 32 chars */
+    name[0] = 0;
+    if (!get_name(face, TT_NAME_ID_FULL_NAME, name, sizeof(name)))
+    {
+        /* as the above function just sets the name from TTF fonts, we still do this */
+        append(name, sizeof(name), face->family_name);
+        append(name, sizeof(name), " ");
+        append(name, sizeof(name), face->style_name);
+        if (face->num_fixed_sizes > 0)
+        {
+            append(name, sizeof(name), " ");
+            append_number(name, sizeof(name), face->available_sizes[0].height);
+        }
+    }
+
+    /* a face that could not be told from others in a list */
+    if (blank(name) || blank(face->family_name))
+        return -2;
+
+    i = check_glyphs(face);
+    if (i < 0)
+        return i;
 
     fr = vdi_ft_alloc(sizeof(FaceRec) + ft_strlen(path));
     if (!fr)
@@ -1376,20 +1474,7 @@ static LONG add_face(FT_Face face, const char *path, LONG index)
     ft_memset(fr, 0, sizeof(FaceRec));
     ft_strcpy(fr->path, path);
     font = &fr->base.font;
-
-    /* Best practice conveniently keeps this <= 32 chars */
-    if (!get_name(face, TT_NAME_ID_FULL_NAME, font->name, sizeof(font->name)))
-    {
-        /* as the above function just sets the name from TTF fonts, we still do this */
-        append(font->name, sizeof(font->name), face->family_name);
-        append(font->name, sizeof(font->name), " ");
-        append(font->name, sizeof(font->name), face->style_name);
-        if (face->num_fixed_sizes > 0)
-        {
-            append(font->name, sizeof(font->name), " ");
-            append_number(font->name, sizeof(font->name), face->available_sizes[0].height);
-        }
-    }
+    ft_memcpy(font->name, name, sizeof(font->name));
 
     font->id = face_id(face);
     font->flags = (FT_IS_SCALABLE(face) ? VDI_FT_SCALABLE : 0) |
@@ -1653,9 +1738,12 @@ void vdi_ft_term(void)
  * their names, and is not kept: it is read again when a face is first
  * sized.
  *
+ * Faces without a name, or whose glyphs are missing or empty (a file cut
+ * short often still opens), are left out.
+ *
  * Returns the number of faces added (0 if the file is registered already,
  * or is an NVDI SPDCHAR.MAP, which is loaded), or a negative number if the
- * file cannot be read (-1), is not a font (-2) or there is not enough
+ * file cannot be read (-1), has no usable face (-2) or there is not enough
  * memory (-3).
  */
 LONG vdi_ft_register_file(const char *path)
@@ -1664,7 +1752,7 @@ LONG vdi_ft_register_file(const char *path)
     FT_Face face;
     void *data;
     ULONG size = 0;
-    LONG i, num, added = 0, result = 0;
+    LONG i, r, num, added = 0, result = 0;
 
     if (!library || !path)
         return -1;
@@ -1696,14 +1784,16 @@ LONG vdi_ft_register_file(const char *path)
         if (i > 0 && FT_New_Memory_Face(library, data, size, i, &face))
             continue;
 
-        if (add_face(face, path, i) < 0)
-            result = -3;
-        else
-            added++;
+        r = add_face(face, path, i);
         FT_Done_Face(face);
 
-        if (result < 0)
+        if (r == 0)
+            added++;
+        else if (r == -1)
+        {
+            result = -3;
             break;
+        }
     }
 
     vdi_font_file_free(data);
