@@ -386,7 +386,7 @@ FT_SOURCES = base/ftbase.c base/ftinit.c base/ftbbox.c base/ftbitmap.c \
              base/ftsynth.c \
              sfnt/sfnt.c truetype/truetype.c cff/cff.c psaux/psaux.c \
              pshinter/pshinter.c psnames/psnames.c smooth/smooth.c \
-             autofit/autofit.c
+             raster/raster.c autofit/autofit.c
 
 FT_OBJ = $(foreach f,$(FT_SOURCES),obj/ft_$(subst /,_,$(basename $(f))).o)
 VDI_FT_OBJ = $(FT_OBJ) obj/vdi_ft2.o obj/vdi_ftlibc.o

@@ -31,9 +31,10 @@ src/        the sources of the modules that are built, unchanged:
               pshinter  the PostScript hinter used by cff
               psnames   PostScript glyph names
               smooth    the anti-aliased rasterizer
+              raster    the monochrome rasterizer (FT_RENDER_MODE_MONO)
               autofit   the automatic hinter
             Not included: the bdf, pcf, pfr, type1, type42, winfnt, lzw,
-            gzip, cache and raster (monochrome rasterizer) modules.  This
+            gzip and cache modules.  This
             means there is no zlib: compressed fonts are not supported.
 config/     the configuration used by the EmuTOS build; the Makefile puts
             this directory in front of include/ and selects the files with
@@ -54,7 +55,8 @@ config/     the configuration used by the EmuTOS build; the Makefile puts
                                FT_CONFIG_OPTION_DISABLE_STREAM_SUPPORT
                              (fonts are always loaded into memory first).
               ftmodule.h       the modules listed above: autofit, truetype,
-                               cff, psaux, psnames, pshinter, sfnt, smooth.
+                               cff, psaux, psnames, pshinter, sfnt, smooth,
+                               raster.
               vdi_ftstdlib.h   replaces ftstdlib.h: the C library is the
                                one in vdi/vdi_ftlibc.c.  It does not define
                                FT_LLONG_MAX and friends on purpose, so that

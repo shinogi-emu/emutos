@@ -73,7 +73,7 @@ long strtol(const char *nptr, char **endptr, int base);
  */
 typedef long vdi_ft_jmp_buf[16];
 #define ft_jmp_buf     vdi_ft_jmp_buf
-int ft_setjmp(volatile long *buf);
-void ft_longjmp(volatile long *buf, int val);
+int ft_setjmp(volatile long *buf) __attribute__((returns_twice));
+void ft_longjmp(volatile long *buf, int val) __attribute__((noreturn));
 
 #endif /* VDI_FTSTDLIB_H_ */
