@@ -1799,6 +1799,23 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_FASTDRAW to 1 to use the faster (and larger) software
+ * drawing loops in the VDI: filled rectangles, horizontal and vertical
+ * lines, screen to screen copies, expanded monochrome bitmaps and text.
+ * They draw exactly what the plain loops draw.  The small ROM and floppy
+ * targets keep the plain loops, to stay within their size limits.
+ */
+#ifndef CONF_WITH_VDI_FASTDRAW
+# if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) \
+  || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) \
+  || defined(TARGET_LISA_FLOPPY)
+#  define CONF_WITH_VDI_FASTDRAW 0
+# else
+#  define CONF_WITH_VDI_FASTDRAW 1
+# endif
+#endif
+
+/*
  * Set CONF_WITH_VDI_OUTLINE_FONTS to 1 to build FreeType and the VDI
  * outline font engine, so that the VDI can draw scalable (TrueType and
  * OpenType) fonts found in C:\GEMSYS\FONTS.  FreeType is built with
