@@ -438,6 +438,245 @@ static void hwblit_rect_common(const VwkAttrib *attr, const Rect *rect)
 
 
 #if CONF_WITH_VDI_16BIT
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * solid_run16 - store n pixels of colour pix, starting at p
+ *
+ * The odd leading pixel is stored alone, so that every following store is
+ * a long word store at a long word address; the body then writes pairs of
+ * pixels as longs, unrolled eight deep (16 pixels a pass).
+ */
+static void solid_run16(UWORD *p, LONG n, UWORD pix)
+{
+    ULONG pair, *q;
+    LONG pairs;
+
+    if (n <= 0)
+        return;
+
+    if ((LONG)p & 2)
+    {
+        *p++ = pix;
+        n--;
+    }
+
+    pair = ((ULONG)pix << 16) | pix;
+    q = (ULONG *)p;
+
+    for (pairs = n >> 4; pairs > 0; pairs--)
+    {
+        q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
+        q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
+        q += 8;
+    }
+    for (pairs = (n & 15) >> 1; pairs > 0; pairs--)
+        *q++ = pair;
+
+    if (n & 1)
+        *(UWORD *)q = pix;
+}
+
+/*
+ * not_run16 - complement n pixels, starting at p; as solid_run16(), a pair
+ * of pixels at a time (complementing a long complements both its pixels)
+ */
+static void not_run16(UWORD *p, LONG n)
+{
+    ULONG *q;
+    LONG pairs;
+
+    if (n <= 0)
+        return;
+
+    if ((LONG)p & 2)
+    {
+        *p = ~*p;
+        p++;
+        n--;
+    }
+
+    q = (ULONG *)p;
+
+    for (pairs = n >> 4; pairs > 0; pairs--)
+    {
+        q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
+        q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
+        q += 8;
+    }
+    for (pairs = (n & 15) >> 1; pairs > 0; pairs--)
+    {
+        *q = ~*q;
+        q++;
+    }
+
+    if (n & 1)
+    {
+        UWORD *w = (UWORD *)q;
+        *w = ~*w;
+    }
+}
+
+/*
+ * pattern_run16 - replace mode: n pixels, set bits of the pattern word pw
+ * in fgcol, clear bits in bgcol; phase is the pattern bit of the first pixel
+ *
+ * The output repeats every 16 pixels, so one period is built per row, as
+ * eight longs, and stored over and over.  Each pass writes exactly 16
+ * pixels, so the same eight longs serve the whole row.
+ */
+static void pattern_run16(UWORD *p, LONG n, UWORD pw, WORD phase,
+                          UWORD fgcol, UWORD bgcol)
+{
+    ULONG blk[8], *q;
+    LONG k;
+
+    if (n <= 0)
+        return;
+
+    if ((LONG)p & 2)
+    {
+        *p++ = (pw & (0x8000U >> (phase & 15))) ? fgcol : bgcol;
+        phase++;
+        n--;
+    }
+
+    for (k = 0; k < 8; k++)
+    {
+        UWORD hi = (pw & (0x8000U >> ((phase + 2 * k) & 15))) ? fgcol : bgcol;
+        UWORD lo = (pw & (0x8000U >> ((phase + 2 * k + 1) & 15))) ? fgcol : bgcol;
+        blk[k] = ((ULONG)hi << 16) | lo;
+    }
+
+    q = (ULONG *)p;
+    for (k = n >> 4; k > 0; k--)
+    {
+        q[0] = blk[0]; q[1] = blk[1]; q[2] = blk[2]; q[3] = blk[3];
+        q[4] = blk[4]; q[5] = blk[5]; q[6] = blk[6]; q[7] = blk[7];
+        q += 8;
+    }
+
+    n &= 15;
+    k = 0;
+    while (n >= 2)
+    {
+        *q++ = blk[k++];
+        n -= 2;
+    }
+    if (n)
+        *(UWORD *)q = (UWORD)(blk[k] >> 16);
+}
+
+/*
+ * pair masks for sel_run16() and selnot_run16(): index = the two pattern
+ * bits of a pixel pair, the first pixel being the high bit and the high
+ * half of the long (big endian)
+ */
+static const ULONG pairmask16[4] = { 0x00000000UL, 0x0000ffffUL, 0xffff0000UL, 0xffffffffUL };
+
+/* rotate a pattern word left, so that its bit 15 is the pattern bit of the first pixel */
+#define ROTL16(w, n)    ((UWORD)(((ULONG)(w) << (n)) | ((ULONG)(w) >> (16 - (n)))))
+
+/*
+ * sel_run16 - n pixels from p: store fgcol in the pixels whose bit is set
+ * in the pattern word sel (phase is the bit of the first pixel), leave the
+ * others alone
+ *
+ * As pattern_run16(), one 16-pixel period is prepared per row, here as
+ * eight AND and eight OR masks; each long of the row is then updated with
+ * one read, one AND, one OR and one write, whatever the pattern.
+ */
+static void sel_run16(UWORD *p, LONG n, UWORD sel, WORD phase, UWORD fgcol)
+{
+    ULONG keep[8], put[8], *q, pair;
+    UWORD rot;
+    LONG k;
+
+    if (n <= 0)
+        return;
+
+    rot = ROTL16(sel, phase);
+    if ((LONG)p & 2)
+    {
+        if (rot & 0x8000)
+            *p = fgcol;
+        p++;
+        n--;
+        rot = ROTL16(rot, 1);
+    }
+
+    pair = ((ULONG)fgcol << 16) | fgcol;
+    for (k = 0; k < 8; k++)
+    {
+        ULONG m = pairmask16[(rot >> (14 - 2 * k)) & 3];
+        keep[k] = ~m;
+        put[k] = pair & m;
+    }
+
+    q = (ULONG *)p;
+    for (k = n >> 4; k > 0; k--)
+    {
+        q[0] = (q[0] & keep[0]) | put[0];
+        q[1] = (q[1] & keep[1]) | put[1];
+        q[2] = (q[2] & keep[2]) | put[2];
+        q[3] = (q[3] & keep[3]) | put[3];
+        q[4] = (q[4] & keep[4]) | put[4];
+        q[5] = (q[5] & keep[5]) | put[5];
+        q[6] = (q[6] & keep[6]) | put[6];
+        q[7] = (q[7] & keep[7]) | put[7];
+        q += 8;
+    }
+
+    n &= 15;
+    for (k = 0; n >= 2; k++, n -= 2, q++)
+        *q = (*q & keep[k]) | put[k];
+    if (n && (rot & (0x8000U >> (2 * k))))
+        *(UWORD *)q = fgcol;
+}
+
+/*
+ * selnot_run16 - the same, complementing the selected pixels (xor mode)
+ */
+static void selnot_run16(UWORD *p, LONG n, UWORD sel, WORD phase)
+{
+    ULONG flip[8], *q;
+    UWORD rot;
+    LONG k;
+
+    if (n <= 0)
+        return;
+
+    rot = ROTL16(sel, phase);
+    if ((LONG)p & 2)
+    {
+        if (rot & 0x8000)
+            *p = ~*p;
+        p++;
+        n--;
+        rot = ROTL16(rot, 1);
+    }
+
+    for (k = 0; k < 8; k++)
+        flip[k] = pairmask16[(rot >> (14 - 2 * k)) & 3];
+
+    q = (ULONG *)p;
+    for (k = n >> 4; k > 0; k--)
+    {
+        q[0] ^= flip[0]; q[1] ^= flip[1]; q[2] ^= flip[2]; q[3] ^= flip[3];
+        q[4] ^= flip[4]; q[5] ^= flip[5]; q[6] ^= flip[6]; q[7] ^= flip[7];
+        q += 8;
+    }
+
+    n &= 15;
+    for (k = 0; n >= 2; k++, n -= 2, q++)
+        *q ^= flip[k];
+    if (n && (rot & (0x8000U >> (2 * k))))
+    {
+        UWORD *w = (UWORD *)q;
+        *w = ~*w;
+    }
+}
+#endif /* CONF_WITH_VDI_FASTDRAW */
+
 /*
  * swblit_rect_common16 - draw one or more horizontal lines via software, 16-bit mode
  *
@@ -454,6 +693,10 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
     UWORD *addr, *work, *palette;
     UWORD bgcol, fgcol, mask, pattern;
     int x, y, patind;
+#if CONF_WITH_VDI_FASTDRAW
+    const LONG count = (LONG)rect->x2 - rect->x1 + 1;
+    const WORD phase = rect->x1 & 0x000f;   /* before mask and x change */
+#endif
 
     addr = get_start_addr16(rect->x1, rect->y1);
     palette = CUR_WORK->ext->palette;
@@ -466,11 +709,21 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0x0000) {        /* simple case */
+                solid_run16(work, count, fgcol);
+            } else if (pattern != 0xffff) { /* (0xffff: nothing to draw) */
+                sel_run16(work, count, ~pattern, phase, fgcol);
+            }
+            continue;
+#else
             if (pattern == 0x0000) {        /* simple case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     *work++ = fgcol;
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++, work++) {
                     if (!(pattern & mask)) {
@@ -488,12 +741,22 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0xffff) {        /* common case */
+                not_run16(work, count);
+            } else if (pattern != 0x0000) { /* (0x0000: nothing to draw) */
+                selnot_run16(work, count, pattern, phase);
+            }
+            continue;
+#else
             if (pattern == 0xffff) {        /* common case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     temp = *work;
                     *work++ = ~temp;        /* complement the existing colour */
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++, work++) {
                     if (pattern & mask) {
@@ -510,11 +773,21 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0xffff) {        /* common case */
+                solid_run16(work, count, fgcol);
+            } else if (pattern != 0x0000) { /* (0x0000: nothing to draw) */
+                sel_run16(work, count, pattern, phase, fgcol);
+            }
+            continue;
+#else
             if (pattern == 0xffff) {        /* common case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     *work++ = fgcol;
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++, work++) {
                     if (pattern & mask) {
@@ -530,11 +803,23 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0xffff) {        /* common case */
+                solid_run16(work, count, fgcol);
+            } else if (pattern == 0x0000) { /* every pixel is background */
+                solid_run16(work, count, bgcol);
+            } else {
+                pattern_run16(work, count, pattern, phase, fgcol, bgcol);
+            }
+            continue;
+#else
             if (pattern == 0xffff) {        /* common case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     *work++ = fgcol;
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++) {
                     if (pattern & mask) {
@@ -2104,6 +2389,52 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
     bgcol = palette[0];     //FIXME ??
 
     linemask = LN_MASK;
+
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * a solid line (every bit of the line style set): the style cannot
+     * change as it rotates, so there is nothing to test per pixel
+     */
+    if (linemask == 0xffff) {
+        LONG n = (LONG)dy + 1;
+        LONG stride = (LONG)yinc * 2;   /* in bytes, may be negative */
+        UBYTE *a = (UBYTE *)addr;
+
+        switch(wrt_mode) {
+        case WM_ERASE:      /* reverse transparent: draws where the bit is clear */
+            break;
+        case WM_XOR:
+            for (; n > 0; n--) {
+                *(UWORD *)a = ~*(UWORD *)a;
+                a += stride;
+            }
+            break;
+        case WM_TRANS:      /* transparent and replace both store the foreground */
+        case WM_REPLACE:
+        default:
+            LONG s2 = stride * 2, s3 = stride * 3, s4 = stride * 4;
+
+            for (; n >= 8; n -= 8) {
+                *(UWORD *)a = fgcol;
+                *(UWORD *)(a + stride) = fgcol;
+                *(UWORD *)(a + s2) = fgcol;
+                *(UWORD *)(a + s3) = fgcol;
+                a += s4;
+                *(UWORD *)a = fgcol;
+                *(UWORD *)(a + stride) = fgcol;
+                *(UWORD *)(a + s2) = fgcol;
+                *(UWORD *)(a + s3) = fgcol;
+                a += s4;
+            }
+            for (; n > 0; n--) {
+                *(UWORD *)a = fgcol;
+                a += stride;
+            }
+            break;
+        }
+        return;                         /* LN_MASK stays 0xffff */
+    }
+#endif
 
     switch(wrt_mode) {
     case WM_ERASE:          /* reverse transparent */
