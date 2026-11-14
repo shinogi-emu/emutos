@@ -1310,11 +1310,21 @@ void vdi_vst_load_fonts(Vwk * vwk)
     /* CONTRL[9]     = Offset to buffer 2       */
     /* CONTRL[10-11] = Pointer to first font    */
 
+    /*
+     * Without a GDOS, a program's own call reaches us with no font list
+     * (gemlib passes NULL): there is nothing to link in, and CONTRL[7-9]
+     * do not describe a scratch buffer either, so leave everything alone.
+     */
+    first_font = (Fonthead *) ULONG_AT(&control[10]);
+    if (!first_font || ((LONG)first_font & 1)) {
+        INTOUT[0] = 0;
+        return;
+    }
+
     /* Init the global structures           */
     vwk->scrpt2 = control[9];
     vwk->scrtchp = (WORD *) ULONG_AT(&control[7]);
 
-    first_font = (Fonthead *) ULONG_AT(&control[10]);
     vwk->loaded_fonts = first_font;
 
     /* Find out how many distinct font id numbers have just been linked in. */
