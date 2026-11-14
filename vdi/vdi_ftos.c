@@ -10,6 +10,7 @@
 #include "emutos.h"
 #include "gemdos.h"
 #include "string.h"
+#include "cookie.h"
 #include "vdi_ftos.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
@@ -27,6 +28,58 @@
 /* room for the longest path built while scanning */
 #define SCAN_PATH_LEN   128
 
+#define COOKIE_MINT     0x4d694e54L     /* 'MiNT' */
+#define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
+
+/*
+ * Mxalloc() mode used under MiNT and MagiC: prefer TT-RAM, keep the block
+ * when its owner terminates (0x4000) and make it accessible from supervisor
+ * mode (0x30), as fVDI does for its own memory.
+ */
+#define MX_KEEP_MODE    (MX_PREFTTRAM | 0x4030)
+
+/*
+ * the memory is shared by all programs: the engine keeps its caches (sized
+ * fonts, glyphs, font files, FreeType internals) until vdi_ft_term(), so it
+ * must not be freed when the program that happened to make the VDI call
+ * terminates.
+ */
+static BOOL other_gemdos(void)
+{
+    ULONG value;
+
+    return cookie_get(COOKIE_MINT, &value) || cookie_get(COOKIE_MAGX, &value);
+}
+
+
+/*
+ * allocate a block that lives until it is freed, whoever frees it
+ *
+ * Under MiNT or MagiC the mode of Mxalloc() does it.  EmuTOS's own GEMDOS
+ * records the calling process as owner of every block and frees them when
+ * it terminates, so the block is given to the initial process: that is
+ * the one running before the first program starts, and it never terminates.
+ * Mfree() does not check the owner, so any process can free the block.
+ */
+static void *alloc_kept(LONG size)
+{
+    void *block;
+
+    if (other_gemdos())
+    {
+        block = (void *)Mxalloc(size, MX_KEEP_MODE);
+        if ((LONG)block <= 0)
+            return NULL;
+        return block;
+    }
+
+    block = dos_alloc_anyram(size);
+    if (block)
+        bdos_keep_block(block);
+
+    return block;
+}
+
 
 void *vdi_ft_alloc(ULONG size)
 {
@@ -35,7 +88,7 @@ void *vdi_ft_alloc(ULONG size)
     if (size > 0x7fffffffUL - BLOCK_HEADER)
         return NULL;
 
-    block = dos_alloc_anyram(size + BLOCK_HEADER);
+    block = alloc_kept(size + BLOCK_HEADER);
     if (!block)
         return NULL;
 

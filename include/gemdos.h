@@ -27,6 +27,11 @@ LONG dos_avail_anyram(void);
 WORD dos_free(void *maddr);
 WORD dos_shrink(void *maddr, LONG length);
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/* give a block to the initial process, so that it survives its caller */
+void bdos_keep_block(void *addr);
+#endif
+
 static __inline__ LONG dos_rawcin(void)
 {
     return Crawcin();
