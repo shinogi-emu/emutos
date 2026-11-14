@@ -1006,9 +1006,14 @@ void vdi_vst_font(Vwk * vwk)
     }
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
-    /* the outline fonts loaded by vst_load_fonts() come after those */
-    if (!found)
+    /*
+     * the outline fonts come after those; their ids are 5000 and up, and
+     * asking for one has the fonts folder scanned if nothing did yet
+     */
+    if (!found && (face >= OUTLINE_FIRST_ID)) {
+        outline_scan();
         found = ((test_font = outline_find_face(vwk, face)) != NULL);
+    }
 #endif
 
     /* If we fell through the loop, we could not find the face. */
@@ -1197,7 +1202,7 @@ void vdi_vqt_name(Vwk * vwk)
     }
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
-    /* the outline fonts loaded by vst_load_fonts() come after those */
+    /* the outline fonts come after those */
     if (!found)
         found = ((tmp_font = outline_face_number(vwk, element - i)) != NULL);
 #endif
@@ -1496,3 +1501,234 @@ static UWORD clc_dda(Vwk * vwk, UWORD act, UWORD req)
 
     return divu(((ULONG)req)<<16, act);
 }
+
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/*
+ * ===========================================================================
+ * For the NVDI calls (vdi_nvdi.c)
+ * ===========================================================================
+ */
+
+static WORD clamp_to_word(LONG value)
+{
+    if (value > 32767L)
+        return 32767;
+    if (value < -32768L)
+        return -32768;
+
+    return (WORD)value;
+}
+
+
+/* the character and cell sizes of the current font, as vst_point() gives them */
+void text_size_out(Vwk *vwk)
+{
+    setup_width_height(vwk->cur_font);
+}
+
+
+/*
+ * the font that vqt_name() lists as number n, counting from 1 (the first
+ * size of its face); NULL if there is none
+ */
+const Fonthead *text_font_number(Vwk *vwk, WORD n)
+{
+    const Fonthead **chain_ptr = font_ring, *f;
+    WORD i = 0, current_id = -1;
+
+    if (n < 1)
+        return NULL;
+
+    while ((f = *chain_ptr++)) {
+        do {
+            if (f->font_id != current_id) {
+                current_id = f->font_id;
+                if (++i == n)
+                    return f;
+            }
+        } while ((f = f->next_font));
+    }
+
+    return outline_face_number(vwk, n - i);
+}
+
+
+/*
+ * the number vqt_name() lists the font with this id as, with the font in
+ * *font; 0 if the workstation has no such font
+ */
+WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font)
+{
+    const Fonthead **chain_ptr = font_ring, *f;
+    WORD i = 0, j, current_id = -1;
+
+    while ((f = *chain_ptr++)) {
+        do {
+            if (f->font_id != current_id) {
+                current_id = f->font_id;
+                i++;
+                if (f->font_id == id) {
+                    *font = f;
+                    return i;
+                }
+            }
+        } while ((f = f->next_font));
+    }
+
+    for (j = 1; (f = outline_face_number(vwk, j)); j++) {
+        if (f->font_id == id) {
+            *font = f;
+            return i + j;
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * v_ftext() (241): what NVDI positions more finely than v_gtext(), here
+ * drawn just as v_gtext() draws it
+ *
+ * With more points than the first, it is v_ftext_offset(): each character
+ * is drawn on its own, moved by its offset from where the one before it
+ * went (the first from the point given), as fVDI places them.  Characters
+ * without an offset are left out.  The horizontal alignment takes the
+ * text from the point to the end of the last character.
+ */
+void vdi_v_ftext(Vwk * vwk)
+{
+    WORD count = CONTRL[3], offsets = CONTRL[1] - 1, i, h_align;
+    WORD *off = PTSIN + 2;
+    LONG x, y, width, sx = 0, sy = 0;
+
+    if ((offsets <= 0) || (count <= 0)) {
+        output_text(vwk, count, INTIN, -1, NULL);
+        return;
+    }
+    if (count > offsets)
+        count = offsets;
+
+    if (vwk->h_align) {
+        for (i = 0, width = 0; i < count; i++)
+            width += off[2*i];
+        width += calc_width(vwk, 1, &INTIN[count-1]);
+        if (vwk->h_align == 1)
+            width /= 2;
+        switch(vwk->chup) {             /* as output_text() moves for it */
+        default:
+            sx = -width;
+            break;
+        case 900:
+            sy = width;
+            break;
+        case 1800:
+            sx = width;
+            break;
+        case 2700:
+            sy = -width;
+            break;
+        }
+    }
+
+    /*
+     * the offsets are read before the character they move is drawn: the
+     * underline of one uses PTSIN[0-3]
+     */
+    h_align = vwk->h_align;
+    vwk->h_align = 0;
+    x = PTSIN[0];
+    y = PTSIN[1];
+    for (i = 0; i < count; i++) {
+        x += off[2*i];
+        y += off[2*i+1];
+        PTSIN[0] = clamp_to_word(x + sx);
+        PTSIN[1] = clamp_to_word(y + sy);
+        output_text(vwk, 1, &INTIN[i], -1, NULL);
+    }
+    vwk->h_align = h_align;
+}
+
+
+/*
+ * vqt_real_extent() (240 sub 4200): the box that the string drawn by
+ * v_gtext() at PTSIN[0],PTSIN[1] covers, with the text alignment and
+ * effects, as its corners bottom left, bottom right, top right and top
+ * left along the text, turned with the text when it is rotated
+ *
+ * As in fVDI, the width is vqt_f_extent()'s and the top and bottom lines
+ * are vqt_fontinfo()'s, so the box of italic text holds its slant.
+ */
+void vdi_vqt_real_extent(Vwk * vwk)
+{
+    const Fonthead *fnt_ptr;
+    LONG width, left, right, top, bottom, base, u, v, x, y;
+    WORD i;
+
+    width = calc_width(vwk, CONTRL[3], INTIN);
+    fnt_ptr = measured_in_system_font ? def_font : vwk->cur_font;
+
+    switch(vwk->h_align) {
+    case 1:
+        left = -(width / 2);
+        break;
+    case 2:
+        left = -width;
+        break;
+    default:
+        left = 0;
+        break;
+    }
+    right = left + width;
+
+    /* the baseline, from the line of the text at PTSIN[1] */
+    switch(vwk->v_align) {
+    case 1:
+        base = fnt_ptr->half;
+        break;
+    case 2:
+        base = fnt_ptr->ascent;
+        break;
+    case 3:
+        base = -(LONG)fnt_ptr->bottom;
+        break;
+    case 4:
+        base = -(LONG)fnt_ptr->descent;
+        break;
+    case 5:
+        base = fnt_ptr->top;
+        break;
+    default:
+        base = 0;
+        break;
+    }
+    top = base - fnt_ptr->top;
+    bottom = base + fnt_ptr->bottom;
+
+    for (i = 0; i < 4; i++) {
+        u = ((i == 0) || (i == 3)) ? left : right;
+        v = (i < 2) ? bottom : top;
+        switch(vwk->chup) {             /* as output_text() turns the text */
+        default:
+            x = u;
+            y = v;
+            break;
+        case 900:
+            x = v;
+            y = -u;
+            break;
+        case 1800:
+            x = -u;
+            y = -v;
+            break;
+        case 2700:
+            x = -v;
+            y = u;
+            break;
+        }
+        PTSOUT[2*i] = clamp_to_word(PTSIN[0] + x);
+        PTSOUT[2*i+1] = clamp_to_word(PTSIN[1] + y);
+    }
+}
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS */

@@ -114,6 +114,58 @@ static struct vdi_jmptab const jmptb2[] = {
 #define JMPTB1_ENTRIES  ARRAY_SIZE(jmptb1)
 #define JMPTB2_ENTRIES  ARRAY_SIZE(jmptb2)
 
+/* the opcodes outside the two tables above are served when this is 1 */
+#define WITH_JMPTB3     CONF_WITH_VDI_OUTLINE_FONTS
+
+#if WITH_JMPTB3
+/* opcodes outside 1-39 and 100-134; first matching row wins */
+struct vdi_xjmptab {
+    UWORD opcode;
+    UWORD subop;            /* VDI_ANY_SUBOP, or the one CONTRL[5] this row takes */
+    UBYTE nptsout;          /* preset into CONTRL[2]; the handler may change it */
+    UBYTE nintout;          /* preset into CONTRL[4]; the handler may change it */
+    VDI_OP_T op;
+};
+#define VDI_ANY_SUBOP 0xffffU
+
+static const struct vdi_xjmptab jmptb3[] = {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* the NVDI and SpeedoGDOS text calls, in vdi_nvdi.c and vdi_text.c */
+    { 190, VDI_ANY_SUBOP, 0,  1, vdi_vqt_char_index },
+    { 229, VDI_ANY_SUBOP, 0,  3, vdi_vqt_xfntinfo },
+    { 230, 100,           0, 33, vdi_vqt_name_and_id },
+    { 231, VDI_ANY_SUBOP, 2,  0, vdi_vst_width },
+    { 232, VDI_ANY_SUBOP, 0,  0, vdi_vqt_fontheader },
+    { 234, VDI_ANY_SUBOP, 0,  4, vdi_vqt_kerns },           /* vqt_trackkern */
+    { 235, VDI_ANY_SUBOP, 0,  4, vdi_vqt_kerns },           /* vqt_pairkern */
+    { 236, VDI_ANY_SUBOP, 0,  1, vdi_vst_charmap },         /* also vst_map_mode */
+    { 237, VDI_ANY_SUBOP, 0,  2, vdi_vst_kern },            /* also vst_track_offset */
+    { 240, 4200,          4,  0, vdi_vqt_real_extent },
+    { 240, VDI_ANY_SUBOP, 4,  0, vdi_vqt_extent },          /* vqt_f_extent */
+    { 241, VDI_ANY_SUBOP, 0,  0, vdi_v_ftext },             /* also v_ftext_offset */
+    { 243, VDI_ANY_SUBOP, 0,  1, vdi_v_getoutline },        /* also v_get_outline */
+    { 244, VDI_ANY_SUBOP, 0,  0, vdi_v_nop },               /* vst_scratch */
+    { 245, VDI_ANY_SUBOP, 0,  0, vdi_v_nop },               /* vst_error */
+    { 246, VDI_ANY_SUBOP, 2,  1, vdi_vst_arbpt },           /* also vst_arbpt32 */
+    { 247, VDI_ANY_SUBOP, 4,  0, vdi_vqt_advance },         /* also vqt_advance32 */
+    { 252, VDI_ANY_SUBOP, 2,  1, vdi_vst_setsize },         /* also vst_setsize32 */
+    { 253, VDI_ANY_SUBOP, 0,  1, vdi_vst_skew },
+#endif
+};
+
+/* the row of jmptb3 for an opcode and sub-opcode; NULL if there is none */
+static const struct vdi_xjmptab *find_xjmptab(UWORD opcode, UWORD subop)
+{
+    const struct vdi_xjmptab *x;
+
+    for (x = jmptb3; x < jmptb3 + ARRAY_SIZE(jmptb3); x++)
+        if ((x->opcode == opcode) && ((x->subop == VDI_ANY_SUBOP) || (x->subop == subop)))
+            return x;
+
+    return NULL;
+}
+#endif /* WITH_JMPTB3 */
+
 
 /*
  * screen - Screen driver entry point
@@ -124,6 +176,10 @@ void screen(void)
     WORD *contrl = CONTRL;
     const struct vdi_jmptab *jmptab;
     Vwk *vwk = NULL;
+#if WITH_JMPTB3
+    const struct vdi_xjmptab *xjmptab;
+    struct vdi_jmptab row;
+#endif
 
     /* get workstation handle */
     handle = CONTRL[6];
@@ -153,7 +209,17 @@ void screen(void)
     else if ((opcode >= V_OPNVWK_OP) && (opcode < V_OPNVWK_OP+JMPTB2_ENTRIES)) {
         jmptab = &jmptb2[opcode - V_OPNVWK_OP];
     } else {
+#if WITH_JMPTB3
+        xjmptab = find_xjmptab(opcode, contrl[5]);
+        if (!xjmptab)
+            return;
+        row.nptsout = xjmptab->nptsout;
+        row.nintout = xjmptab->nintout;
+        row.op = xjmptab->op;
+        jmptab = &row;
+#else
         return;
+#endif
     }
     contrl[2] = jmptab->nptsout;
     contrl[4] = jmptab->nintout;

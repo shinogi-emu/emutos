@@ -13,6 +13,9 @@
 #include "emutos.h"
 #include "cookie.h"
 #include "tosvars.h"
+#if CONF_WITH_VDI_OUTLINE_FONTS
+#include "vdiext.h"
+#endif
 
 #define DEF_IDT_TIME    (1<<12)     /* 24-hour clock */
 #define DEF_IDT_DATE    (2<<8)      /* YY-MM-DD */
@@ -129,7 +132,14 @@ WORD get_floppy_type(void)
  */
 BOOL nvdi_cookie_present(void)
 {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    ULONG value;
+
+    /* the cookie that EmuTOS's own VDI adds for its outline fonts is not NVDI */
+    return cookie_get(COOKIE_NVDI, &value) && !vdi_own_nvdi_cookie(value);
+#else
     ULONG dummy;
     return cookie_get(COOKIE_NVDI, &dummy);
+#endif
 }
 #endif

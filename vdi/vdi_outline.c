@@ -11,12 +11,15 @@
  * The outline font engine (vdi_ft2.c) knows nothing of workstations.
  * This puts its fonts on them:
  *
- * - The first vst_load_fonts() made by any workstation registers the font
- *   files of C:\GEMSYS\FONTS with the engine.  Each face gets a font
- *   header, flagged F_OUTLINE_FONT and without a bitmap, which vqt_name()
- *   and vst_font() find after the fonts of font_ring[].  They are kept out
- *   of font_ring[] itself, which line-A programs walk, and which cannot
- *   grow.  A workstation sees them once it has called vst_load_fonts().
+ * - The first vst_load_fonts() made by any workstation, or the first call
+ *   that asks for an outline font by its id or name (outline_scan()),
+ *   registers the font files of C:\GEMSYS\FONTS with the engine.  Each
+ *   face gets a font header, flagged F_OUTLINE_FONT and without a bitmap,
+ *   which vqt_name() and vst_font() find after the fonts of font_ring[].
+ *   They are kept out of font_ring[] itself, which line-A programs walk,
+ *   and which cannot grow.  Every workstation sees them, as under fVDI and
+ *   NVDI: programs select their fonts before they call vst_load_fonts()
+ *   (HighWire does), which then gives their number.
  *
  * - Selecting a face and a size gives the workstation a sized font from
  *   the engine, and copies its metrics into vwk->outline_head, which
@@ -30,6 +33,11 @@
  *   engine's.  Outline text is always clipped to the screen.
  *
  * - The engine is called on a stack of its own (outline_on_stack()).
+ *
+ * - The NVDI calls (vdi_nvdi.c) add arbitrary sizes, widths, character
+ *   sets (Unicode for one) and skew to the selected font, and fonts found
+ *   in more folders later on (outline_rescan()): those come after the
+ *   others.
  *
  * This file is compiled with -mshort like the rest of the VDI, so the
  * engine is only called through vdi_ft2.h, and sizes are LONGs.
@@ -50,6 +58,15 @@
 #define MAX_FACES       1000    /* faces put on the workstations */
 #define MAX_VALUE       32000L  /* the largest size or metric kept */
 #define HEIGHT_STEPS    8       /* to find the size of a character height */
+#define MAX_SCAN_DIRS   64      /* folders taken from one outline_rescan() */
+#define SKEW_LIMIT      800     /* vst_skew(), either way: the engine's limit */
+#define MAX_STRETCH     (32L << 16)     /* vst_setsize(): width to height, at most */
+#define MIN_STRETCH     ((1L << 16) / 32)       /* and at least */
+
+/* the codes vqt_fontinfo() gives for an outline font, by character set */
+#define BICS_CHARS      564     /* BICS_COUNT in vdi_ftmap.h */
+#define UNICODE_FIRST   0x0020  /* the codes the BICS characters have in Unicode */
+#define UNICODE_LAST    0xfb04
 
 /* the effects the engine draws: all that the VDI has */
 #define ENGINE_EFFECTS  (F_THICKEN | F_LIGHT | F_SKEW | F_UNDER | F_OUTLINE)
@@ -60,7 +77,7 @@ typedef struct {
     VdiOutlineFont *face;       /* as registered with the engine */
 } OutlineFace;
 
-static OutlineFace *faces;
+static OutlineFace **face_tab;  /* the faces, in the engine's order */
 static WORD face_count;
 static BOOL scan_begun;         /* the fonts folder is being or has been scanned */
 static BOOL scanned;            /* the faces are ready */
@@ -116,28 +133,38 @@ static void found_font(const char *path, void *ctx)
 }
 
 
-/* give each registered face a font header */
+/*
+ * give each face registered since the last call a font header
+ *
+ * The headers of the faces already there stay where they are: a
+ * workstation's current font may be one of them.
+ */
 static void make_faces(void)
 {
     LONG n = vdi_ft_face_count(), i;
-    OutlineFace *f;
+    OutlineFace *f, **tab;
 
-    if (n <= 0)
-        return;
     if (n > MAX_FACES)
         n = MAX_FACES;
-
-    faces = vdi_ft_alloc(n * sizeof(OutlineFace));
-    if (!faces)
+    if (n <= face_count)
         return;
-    bzero(faces, n * sizeof(OutlineFace));
 
-    for (i = 0, f = faces; i < n; i++, f++)
+    tab = vdi_ft_realloc(face_tab, n * sizeof(OutlineFace *));
+    if (!tab)
+        return;
+    face_tab = tab;
+    f = vdi_ft_alloc((n - face_count) * sizeof(OutlineFace));
+    if (!f)
+        return;
+    bzero(f, (n - face_count) * sizeof(OutlineFace));
+
+    for (i = face_count; i < n; i++, f++)
     {
         VdiOutlineFont *face = vdi_ft_face(i);
 
         if (!face)
             break;
+        tab[i] = f;
         f->face = face;
         f->head.font_id = (WORD)face->id;
         memcpy(f->head.name, face->name, FONT_NAME_LEN);
@@ -148,9 +175,20 @@ static void make_faces(void)
         if (face->flags & VDI_FT_MONOSPACE)
             f->head.flags |= F_MONOSPACE;
         if (i > 0)
-            f[-1].head.next_font = &f->head;
+            tab[i-1]->head.next_font = &f->head;
     }
     face_count = (WORD)i;
+}
+
+
+/* a workstation that has loaded the outline fonts counts those added since */
+static void show_new_faces(Vwk *vwk)
+{
+    if (vwk->outline_count && (vwk->outline_count < face_count))
+    {
+        vwk->num_fonts += face_count - vwk->outline_count;
+        vwk->outline_count = face_count;
+    }
 }
 
 
@@ -160,6 +198,13 @@ void outline_init_vwk(Vwk *vwk)
     vwk->outline_face = NULL;
     vwk->outline_font = NULL;
     vwk->outline_count = 0;
+    vwk->outline_em = 0;
+    vwk->outline_width = 0;
+    vwk->outline_map = VDI_FT_MAP_ATARI;
+    vwk->outline_skew = 0;
+
+    /* this VDI serves outline fonts: say so to who looks for NVDI */
+    nvdi_add_cookie();
 }
 
 
@@ -192,26 +237,47 @@ void outline_unload_fonts(Vwk *vwk)
 }
 
 
-/* vst_font(): the face with this id, if the workstation has loaded it */
+/*
+ * vst_font(): the face with this id; NULL if there is none
+ *
+ * As under fVDI and NVDI, every workstation sees the faces once the fonts
+ * folder has been scanned, whether it called vst_load_fonts() or not:
+ * programs select their fonts before (HighWire does).
+ */
 const Fonthead *outline_find_face(const Vwk *vwk, WORD id)
 {
     WORD i;
 
-    for (i = 0; i < vwk->outline_count; i++)
-        if (faces[i].head.font_id == id)
-            return &faces[i].head;
+    UNUSED(vwk);
+    for (i = 0; i < face_count; i++)
+        if (face_tab[i]->head.font_id == id)
+            return &face_tab[i]->head;
 
     return NULL;
 }
 
 
-/* vqt_name(): the nth face loaded by the workstation, from 1 */
+/* vqt_name(): the nth outline face, from 1 */
 const Fonthead *outline_face_number(const Vwk *vwk, WORD n)
 {
-    if ((n < 1) || (n > vwk->outline_count))
+    UNUSED(vwk);
+    if ((n < 1) || (n > face_count))
         return NULL;
 
-    return &faces[n-1].head;
+    return &face_tab[n-1]->head;
+}
+
+
+/* the outline face whose header this is; NULL if it is no outline face */
+VdiOutlineFont *outline_face_of(const Fonthead *head)
+{
+    WORD i;
+
+    for (i = 0; i < face_count; i++)
+        if (head == &face_tab[i]->head)
+            return face_tab[i]->face;
+
+    return NULL;
 }
 
 
@@ -235,8 +301,8 @@ static VdiOutlineFont *current_face(const Vwk *vwk)
         return vwk->outline_face;
 
     for (i = 0; i < face_count; i++)
-        if (vwk->cur_font == &faces[i].head)
-            return faces[i].face;
+        if (vwk->cur_font == &face_tab[i]->head)
+            return face_tab[i]->face;
 
     return NULL;
 }
@@ -284,8 +350,32 @@ static WORD clamp_word(LONG value)
 }
 
 
-/* make a sized font the current font, with its metrics in outline_head */
-static void use_font(Vwk *vwk, VdiOutlineFont *face, VdiOutlineFont *f)
+/* the codes of an outline font in a character set, for vqt_fontinfo() */
+static void set_char_range(Fonthead *h, WORD map)
+{
+    switch(map) {
+    case VDI_FT_MAP_BICS:
+        h->first_ade = 0;
+        h->last_ade = BICS_CHARS;
+        break;
+    case VDI_FT_MAP_UNICODE:
+        h->first_ade = UNICODE_FIRST;
+        h->last_ade = UNICODE_LAST;
+        break;
+    default:
+        h->first_ade = 0;
+        h->last_ade = 255;
+        break;
+    }
+}
+
+
+/*
+ * make a sized font the current font, with its metrics in outline_head;
+ * em is the size of its em in pixels, width the character width it was
+ * made with (0: natural)
+ */
+static void use_font(Vwk *vwk, VdiOutlineFont *face, VdiOutlineFont *f, LONG em, LONG width)
 {
     Fonthead *h = &vwk->outline_head;
 
@@ -294,8 +384,7 @@ static void use_font(Vwk *vwk, VdiOutlineFont *face, VdiOutlineFont *f)
     h->point = (WORD)metric(f->points);
     memcpy(h->name, f->name, FONT_NAME_LEN);
     h->name[FONT_NAME_LEN-1] = '\0';
-    h->first_ade = (UWORD)f->first_ade;
-    h->last_ade = (UWORD)f->last_ade;
+    set_char_range(h, vwk->outline_map);
     h->top = metric(f->top);
     h->ascent = metric(f->ascent);
     h->half = metric(f->half);
@@ -311,6 +400,8 @@ static void use_font(Vwk *vwk, VdiOutlineFont *face, VdiOutlineFont *f)
 
     vwk->outline_face = face;
     vwk->outline_font = f;
+    vwk->outline_em = (WORD)em;
+    vwk->outline_width = (WORD)width;
     vwk->cur_font = h;
     vwk->scaled = FALSE;
 }
@@ -329,6 +420,9 @@ static LONG dpi(void)
 static LONG em_pixels(LONG points)
 {
     LONG px = (points * dpi() + 36) / 72;
+
+    if (px > MAX_VALUE)
+        px = MAX_VALUE;
 
     return (px > 0) ? px : 1;
 }
@@ -388,7 +482,92 @@ static BOOL set_point(Vwk *vwk, WORD point)
     if (!f)
         return FALSE;
 
-    use_font(vwk, face, f);
+    use_font(vwk, face, f, em_pixels(pt), 0);
+    return TRUE;
+}
+
+
+/*
+ * vst_arbpt(): size the current outline face at any size in points, not
+ * only those of its list; FALSE if it cannot be used
+ */
+static BOOL set_arbpt(Vwk *vwk, LONG point)
+{
+    VdiOutlineFont *face = current_face(vwk), *f;
+    LONG em;
+
+    if (!face)
+        return FALSE;
+    if (point < 1)
+        point = 1;
+    if (point > MAX_VALUE)
+        point = MAX_VALUE;
+
+    em = em_pixels(point);
+    f = vdi_ft_size(face, point, em, 0);
+    if (!f)
+        return FALSE;
+
+    use_font(vwk, face, f, em, 0);
+    return TRUE;
+}
+
+
+/*
+ * vst_width(): the selected size with its widest character this many
+ * pixels wide, and its height unchanged (as NVDI); FALSE if that cannot be
+ */
+static BOOL set_width(Vwk *vwk, LONG width)
+{
+    VdiOutlineFont *f = outline_current(vwk), *g;
+
+    if (!f || !(f->flags & VDI_FT_SCALABLE) || (width <= 0) || (width > MAX_VALUE))
+        return FALSE;
+
+    g = vdi_ft_size(vwk->outline_face, f->points, vwk->outline_em, width);
+    if (!g)
+        return FALSE;
+
+    use_font(vwk, vwk->outline_face, g, vwk->outline_em, width);
+    return TRUE;
+}
+
+
+/*
+ * vst_setsize(): the selected size made as wide as a size of this many
+ * points (in 1/65536 points), its height unchanged; FALSE if that cannot be
+ */
+static BOOL set_size(Vwk *vwk, LONG width)
+{
+    VdiOutlineFont *f = outline_current(vwk), *natural, *g;
+    LONG ratio, chars;
+
+    if (!f || !(f->flags & VDI_FT_SCALABLE) || (width <= 0) || (f->points <= 0))
+        return FALSE;
+
+    natural = vdi_ft_size(vwk->outline_face, f->points, vwk->outline_em, 0);
+    if (!natural)
+        return FALSE;
+
+    /* width to height, in 1/65536, then the widest character at that */
+    ratio = width / f->points;
+    if (ratio > MAX_STRETCH)
+        ratio = MAX_STRETCH;
+    if (ratio < MIN_STRETCH)
+        ratio = MIN_STRETCH;
+    chars = (LONG)(((ULONG)natural->max_char_width * (ULONG)(ratio >> 5) + 1024) >> 11);
+    if (chars < 1)
+        chars = 1;
+    if (chars > MAX_VALUE)
+        chars = MAX_VALUE;
+    if (chars == natural->max_char_width)
+        chars = 0;                  /* that is the natural width */
+
+    g = chars ? vdi_ft_size(vwk->outline_face, f->points, vwk->outline_em, chars) : natural;
+    if (!g)
+        return FALSE;
+
+    use_font(vwk, vwk->outline_face, g, vwk->outline_em, chars);
     return TRUE;
 }
 
@@ -451,7 +630,7 @@ static BOOL set_height(Vwk *vwk, WORD height)
         f = g;
     }
 
-    use_font(vwk, face, f);
+    use_font(vwk, face, f, em, 0);
     return TRUE;
 }
 
@@ -481,7 +660,7 @@ static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
         return -1;
     if (count <= 0)
         return 0;
-    if (vdi_ft_text_extent(f, str, count, VDI_FT_MAP_ATARI, effects_of(vwk), &width, NULL) < 0)
+    if (vdi_ft_text_extent(f, str, count, vwk->outline_map, effects_of(vwk), &width, NULL) < 0)
         return -1;
 
     return clamp_word(width);
@@ -496,7 +675,7 @@ static LONG char_width(Vwk *vwk, WORD ch)
 
     if (!f)
         return -1;
-    if (vdi_ft_char_advance(f, (UWORD)ch, VDI_FT_MAP_ATARI, effects_of(vwk), advance) < 0)
+    if (vdi_ft_char_advance(f, (UWORD)ch, vwk->outline_map, effects_of(vwk), advance) < 0)
         return -1;
 
     return clamp_word(advance[0]);
@@ -669,7 +848,7 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
     LONG u, advance, wd;
     UWORD *turned;
 
-    if (vdi_ft_render(f, str, count, VDI_FT_MAP_ATARI, effects_of(vwk), 0, &bm) < 0)
+    if (vdi_ft_render(f, str, count, vwk->outline_map, effects_of(vwk), vwk->outline_skew, &bm) < 0)
         return -1;
     advance = bm.advance_x;
     if (!bm.data)
@@ -873,6 +1052,8 @@ typedef struct {
     LONG x, y;                  /* the reference point of the text */
     WORD count;
     WORD value;                 /* a size, a width or a character */
+    LONG a, b;                  /* more numbers */
+    void *p, *q;                /* and pointers */
 } OutlineCall;
 
 static LONG scan_fonts_call(void *p)
@@ -917,6 +1098,108 @@ static LONG draw_text_call(void *p)
     return draw_text(c->vwk, c->count, c->str, c->value, c->justified, c->x, c->y);
 }
 
+static LONG set_arbpt_call(void *p)
+{
+    OutlineCall *c = p;
+
+    return set_arbpt(c->vwk, c->a);
+}
+
+static LONG set_width_call(void *p)
+{
+    OutlineCall *c = p;
+
+    return set_width(c->vwk, c->a);
+}
+
+static LONG set_size_call(void *p)
+{
+    OutlineCall *c = p;
+
+    return set_size(c->vwk, c->a);
+}
+
+static LONG char_index_call(void *p)
+{
+    OutlineCall *c = p;
+    VdiOutlineFont *f = outline_current(c->vwk);
+
+    return f ? vdi_ft_char_index(f, (UWORD)c->value, c->a, c->b) : 0xffffL;
+}
+
+static LONG get_outline_call(void *p)
+{
+    OutlineCall *c = p;
+    VdiOutlineFont *f = outline_current(c->vwk);
+
+    if (!f)
+        return 0;
+
+    return vdi_ft_get_outline(f, (UWORD)c->value, c->vwk->outline_map, c->p, c->q, c->a);
+}
+
+static LONG xfntinfo_call(void *p)
+{
+    OutlineCall *c = p;
+
+    vdi_ft_xfntinfo(c->p, c->a, c->q);
+    return 0;
+}
+
+static LONG fontheader_call(void *p)
+{
+    OutlineCall *c = p;
+    VdiOutlineFont *face = current_face(c->vwk);
+
+    if (!face)
+        return FALSE;
+    vdi_ft_fontheader(face, c->p);
+    return TRUE;
+}
+
+/*
+ * scan more folders, which can be in the fonts folder or anywhere, for
+ * fonts that are not yet there; returns the number of faces added
+ */
+static LONG rescan_call(void *p)
+{
+    OutlineCall *c = p;
+    char **dirs = c->p;
+    LONG count = c->a, i;
+    WORD before, handle;
+    Vwk *vwk;
+
+    if (!scan_begun)
+        scan_fonts();               /* the first scan, of the fonts folder */
+    if (!scanned || !dirs)
+        return 0;
+
+    before = face_count;
+    if (count > MAX_SCAN_DIRS)
+        count = MAX_SCAN_DIRS;
+    for (i = 0; i < count; i++)
+        if (dirs[i] && dirs[i][0])
+            vdi_font_dir_scan(dirs[i], found_font, NULL);  /* registered once only */
+    make_faces();
+
+    for (handle = 1; handle <= NUM_VDI_HANDLES; handle++)
+        if ((vwk = get_vwk_by_handle(handle)) != NULL)
+            show_new_faces(vwk);
+
+    return face_count - before;
+}
+
+
+/*
+ * the first call scans the fonts folder: the first vst_load_fonts(), or
+ * the first call that asks for an outline font by its id or name
+ */
+void outline_scan(void)
+{
+    if (!scan_begun)
+        outline_on_stack(scan_fonts_call, NULL, NULL);
+}
+
 
 /*
  * vst_load_fonts(): the number of outline faces
@@ -925,8 +1208,7 @@ static LONG draw_text_call(void *p)
  */
 WORD outline_load_fonts(Vwk *vwk)
 {
-    if (!scan_begun)
-        outline_on_stack(scan_fonts_call, NULL, NULL);
+    outline_scan();
     if (!scanned)
         return 0;                   /* no memory, or the scan is not over */
 
@@ -935,6 +1217,7 @@ WORD outline_load_fonts(Vwk *vwk)
         vwk->outline_count = face_count;
         vwk->num_fonts += face_count;
     }
+    show_new_faces(vwk);
 
     return face_count;
 }
@@ -1018,6 +1301,176 @@ BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *j
     c.x = PTSIN[0];             /* before anything can sleep */
     c.y = PTSIN[1];
     return outline_on_stack(draw_text_call, &c, &ok) && ok;
+}
+
+
+/*
+ * ===========================================================================
+ * For the NVDI calls (vdi_nvdi.c)
+ * ===========================================================================
+ */
+
+/* vst_arbpt(): size the current outline face in points; FALSE if it cannot be used */
+BOOL outline_set_arbpt(Vwk *vwk, LONG point)
+{
+    OutlineCall c;
+    LONG ok;
+
+    c.vwk = vwk;
+    c.a = point;
+    return outline_on_stack(set_arbpt_call, &c, &ok) && ok;
+}
+
+
+/* vst_width(): the character width of the selected size; FALSE if unchanged */
+BOOL outline_set_width(Vwk *vwk, WORD width)
+{
+    OutlineCall c;
+    LONG ok;
+
+    c.vwk = vwk;
+    c.a = width;
+    return outline_on_stack(set_width_call, &c, &ok) && ok;
+}
+
+
+/* vst_setsize(): the width of the selected size, in 1/65536 points; FALSE if unchanged */
+BOOL outline_set_size(Vwk *vwk, LONG width)
+{
+    OutlineCall c;
+    LONG ok;
+
+    c.vwk = vwk;
+    c.a = width;
+    return outline_on_stack(set_size_call, &c, &ok) && ok;
+}
+
+
+/*
+ * vst_charmap(), vst_map_mode(): the character set of the text; returns
+ * the one set, which is always the Atari set unless an outline font is
+ * selected (as fVDI)
+ */
+WORD outline_set_map(Vwk *vwk, WORD map)
+{
+    if ((map != VDI_FT_MAP_ATARI) && !outline_face_selected(vwk))
+        map = VDI_FT_MAP_ATARI;
+
+    vwk->outline_map = map;
+    if (outline_font_selected(vwk))
+        set_char_range(&vwk->outline_head, map);
+
+    return map;
+}
+
+
+/* vst_skew(): the slant of outline text, in tenths of a degree; returns it */
+WORD outline_set_skew(Vwk *vwk, WORD skew)
+{
+    if (skew > SKEW_LIMIT)
+        skew = SKEW_LIMIT;
+    if (skew < -SKEW_LIMIT)
+        skew = -SKEW_LIMIT;
+
+    return vwk->outline_skew = skew;
+}
+
+
+/* vqt_char_index(): a code from one character set to another, 0xffff if none */
+WORD outline_char_index(Vwk *vwk, UWORD ch, WORD from_map, WORD to_map)
+{
+    OutlineCall c;
+    LONG index;
+
+    c.vwk = vwk;
+    c.value = ch;
+    c.a = from_map;
+    c.b = to_map;
+    if (!outline_on_stack(char_index_call, &c, &index))
+        return -1;
+
+    return (WORD)index;
+}
+
+
+/*
+ * v_getoutline(): a character's outline as v_bez points in pixels, y up
+ * from the baseline; returns their number, 0 if none, -1 if more than
+ * max_points
+ */
+WORD outline_get_outline(Vwk *vwk, UWORD ch, WORD *xy, BYTE *flags, WORD max_points)
+{
+    OutlineCall c;
+    LONG n;
+
+    c.vwk = vwk;
+    c.value = ch;
+    c.p = xy;
+    c.q = flags;
+    c.a = max_points;
+    if (!outline_on_stack(get_outline_call, &c, &n))
+        return 0;
+
+    return (WORD)n;
+}
+
+
+/* vqt_xfntinfo(): what the engine knows of a face; FALSE if it cannot tell now */
+BOOL outline_xfntinfo(VdiOutlineFont *face, WORD flags, VdiXfntInfo *info)
+{
+    OutlineCall c;
+
+    c.p = face;
+    c.q = info;
+    c.a = (UWORD)flags;
+    return outline_on_stack(xfntinfo_call, &c, NULL);
+}
+
+
+/* vqt_fontheader(): the header of the current outline face; FALSE if none or not now */
+BOOL outline_fontheader(Vwk *vwk, VdiFontHeader *fhdr)
+{
+    OutlineCall c;
+    LONG ok;
+
+    c.vwk = vwk;
+    c.p = fhdr;
+    return outline_on_stack(fontheader_call, &c, &ok) && ok;
+}
+
+
+/*
+ * vq_vgdos(): FALSE once the fonts folder is known to hold no font; until
+ * the first vst_load_fonts() looks, there may be some
+ */
+BOOL outline_fonts_present(void)
+{
+    return !(scanned && (face_count == 0));
+}
+
+
+/*
+ * NVDI's scan_fonts: the fonts in these folders that are not there yet are
+ * added after the others; returns their number
+ */
+LONG outline_rescan(char **dirs, LONG count)
+{
+    OutlineCall c;
+    LONG added;
+
+    c.p = dirs;
+    c.a = count;
+    if (!outline_on_stack(rescan_call, &c, &added))
+        return 0;
+
+    return added;
+}
+
+
+/* NVDI's get_font_dir: the fonts folder, without a trailing backslash */
+const char *outline_font_dir(void)
+{
+    return FONT_DIR;
 }
 
 #endif /* CONF_WITH_VDI_OUTLINE_FONTS */

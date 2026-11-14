@@ -1516,6 +1516,34 @@ static LONG add_face(FT_Face face, const char *path, LONG index)
     return 0;
 }
 
+/*
+ * Case, and which slash, do not make two paths different files (as fVDI's
+ * same_path()): a folder scanned again can give its names in another case
+ * than the caller, under MiNT for one.
+ */
+static int same_path(const char *a, const char *b)
+{
+    char ca, cb;
+
+    do
+    {
+        ca = *a++;
+        cb = *b++;
+        if (ca == '/')
+            ca = '\\';
+        if (cb == '/')
+            cb = '\\';
+        if (ca >= 'a' && ca <= 'z')
+            ca -= 'a' - 'A';
+        if (cb >= 'a' && cb <= 'z')
+            cb -= 'a' - 'A';
+        if (ca != cb)
+            return 0;
+    } while (ca);
+
+    return 1;
+}
+
 /* is this the name of an NVDI/SpeedoGDOS character map file? */
 static int is_spdchar_map(const char *path)
 {
@@ -1761,7 +1789,7 @@ LONG vdi_ft_register_file(const char *path)
         return load_spdchar_map(path);
 
     for (fr = faces; fr; fr = fr->next)
-        if (ft_strcmp(fr->path, path) == 0)
+        if (same_path(fr->path, path))
             return 0;
 
     data = vdi_font_file_load(path, &size);

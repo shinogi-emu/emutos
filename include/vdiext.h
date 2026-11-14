@@ -63,6 +63,14 @@ extern struct _mcs *mcs_ptr;    /* ptr to mouse cursor save area in use */
 /* functions used by VDI & lineA */
 void update_rez_dependent(void);
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/* vdi_nvdi.c: what vq_vgdos() answers; another trap #2 front end can ask too */
+LONG vdi_gdos_version(void);
+
+/* vdi_nvdi.c: TRUE if this NVDI cookie value is the one the VDI added */
+BOOL vdi_own_nvdi_cookie(ULONG value);
+#endif
+
 #endif /* ASM_SOURCE */
 
 #endif /* _VDIEXT_H */

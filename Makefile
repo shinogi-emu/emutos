@@ -368,9 +368,9 @@ endif
 #
 # FreeType and the outline font engine need 32-bit int, so they are built
 # without -mshort (see the rules near obj/%.o below).  vdi_ftos.c, which
-# implements the services they call, vdi_ftmem.c, its memory allocator, and
-# vdi_outline.c, which puts the fonts on the workstations, are built like the
-# rest of the VDI.
+# implements the services they call, vdi_ftmem.c, its memory allocator,
+# vdi_outline.c, which puts the fonts on the workstations, and vdi_nvdi.c,
+# the NVDI and SpeedoGDOS text calls, are built like the rest of the VDI.
 #
 
 # The flag is evaluated here, while the Makefile is read, to know which files
@@ -379,7 +379,7 @@ endif
 VDI_OUTLINE_FONTS := $(shell echo CONF_WITH_VDI_OUTLINE_FONTS | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
 
 ifeq (1,$(VDI_OUTLINE_FONTS))
-vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c
+vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
 endif
 
 # FreeType sources, relative to freetype/src

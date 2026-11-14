@@ -40,6 +40,10 @@ _vditrap:
 no_vdi:
         cmp.w   #0xffff,d0              // query for jsr:able address?
         jeq     query
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        cmp.w   #0xfffe,d0              // vq_gdos()?
+        jeq     gdos_query
+#endif
 
 /*
  * Just like Atari TOS, we leave d0 unchanged, indicating the absence of
@@ -50,6 +54,81 @@ no_vdi:
 query:
         move.l  #_GSX_ENTRY,d0          // Return address of VDI dispatcher
         rte
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/*
+ * With outline fonts, d0 = -2 gets the answer of a vector font GDOS (see
+ * vdi_trap_gdos_version() in vdi_nvdi.c).  The C function may change
+ * d0-d1/a0-a1.
+ */
+gdos_query:
+#ifdef __mcoldfire__
+        lea     -12(sp),sp
+        movem.l d1/a0-a1,(sp)
+#else
+        movem.l d1/a0-a1,-(sp)
+#endif
+        jsr     _vdi_trap_gdos_version
+#ifdef __mcoldfire__
+        movem.l (sp),d1/a0-a1
+        lea     12(sp),sp
+#else
+        movem.l (sp)+,d1/a0-a1
+#endif
+        rte
+
+/*
+ * NVDI 5's font vectors, which the NVDI cookie of vdi_nvdi.c publishes.
+ * Their arguments come in registers, and every register but d0 is kept:
+ *
+ *   scan_fonts    d0.w = number of folders, d1 = flags, a0 = char *folders[];
+ *                 d0 = number of fonts added
+ *   get_font_dir  d0.w = folder number from 1, a0 = buffer;
+ *                 d0 = 0 if there is no such folder
+ */
+        .globl  _nvdi_scan_fonts_entry
+_nvdi_scan_fonts_entry:
+#ifdef __mcoldfire__
+        lea     -56(sp),sp
+        movem.l d1-d7/a0-a6,(sp)
+#else
+        movem.l d1-d7/a0-a6,-(sp)
+#endif
+        ext.l   d0
+        move.l  a0,-(sp)
+        move.l  d1,-(sp)
+        move.l  d0,-(sp)
+        jsr     _nvdi_scan_fonts
+        lea     12(sp),sp
+#ifdef __mcoldfire__
+        movem.l (sp),d1-d7/a0-a6
+        lea     56(sp),sp
+#else
+        movem.l (sp)+,d1-d7/a0-a6
+#endif
+        rts
+
+        .globl  _nvdi_get_font_dir_entry
+_nvdi_get_font_dir_entry:
+#ifdef __mcoldfire__
+        lea     -56(sp),sp
+        movem.l d1-d7/a0-a6,(sp)
+#else
+        movem.l d1-d7/a0-a6,-(sp)
+#endif
+        ext.l   d0
+        move.l  a0,-(sp)
+        move.l  d0,-(sp)
+        jsr     _nvdi_get_font_dir
+        addq.l  #8,sp
+#ifdef __mcoldfire__
+        movem.l (sp),d1-d7/a0-a6
+        lea     56(sp),sp
+#else
+        movem.l (sp)+,d1-d7/a0-a6
+#endif
+        rts
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS */
 
 /*
  * _GSX_ENTRY - front end of the GIOS for the screen driver

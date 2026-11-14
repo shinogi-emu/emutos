@@ -231,6 +231,10 @@ struct Vwk_ {
     VdiOutlineFont *outline_face;   /* its face; NULL if none was selected */
     VdiOutlineFont *outline_font;   /* that face at the selected size */
     WORD outline_count;         /* outline faces added by vst_load_fonts() */
+    WORD outline_em;            /* the size of the em in pixels, at that size */
+    WORD outline_width;         /* the character width set (vst_width), 0 if natural */
+    WORD outline_map;           /* character set of the text (vst_charmap), VDI_FT_MAP_* */
+    WORD outline_skew;          /* vst_skew(), tenths of a degree */
 #endif
 };
 
@@ -471,8 +475,10 @@ void direct_screen_blit(WORD count, WORD *str);
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 /* vdi_outline.c: outline fonts on the workstations */
+#define OUTLINE_FIRST_ID    5000    /* the ids of outline faces are above (SpeedoGDOS's rule) */
 void outline_init_vwk(Vwk *vwk);
 WORD outline_load_fonts(Vwk *vwk);
+void outline_scan(void);
 void outline_unload_fonts(Vwk *vwk);
 const Fonthead *outline_find_face(const Vwk *vwk, WORD id);
 const Fonthead *outline_face_number(const Vwk *vwk, WORD n);
@@ -485,6 +491,43 @@ BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width);
 BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width);
 BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
 BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result);
+/* the NVDI calls (vdi_nvdi.c) */
+BOOL outline_set_arbpt(Vwk *vwk, LONG point);
+BOOL outline_set_width(Vwk *vwk, WORD width);
+BOOL outline_set_size(Vwk *vwk, LONG width);
+WORD outline_set_map(Vwk *vwk, WORD map);
+WORD outline_set_skew(Vwk *vwk, WORD skew);
+WORD outline_char_index(Vwk *vwk, UWORD ch, WORD from_map, WORD to_map);
+WORD outline_get_outline(Vwk *vwk, UWORD ch, WORD *xy, BYTE *flags, WORD max_points);
+VdiOutlineFont *outline_face_of(const Fonthead *head);
+BOOL outline_xfntinfo(VdiOutlineFont *face, WORD flags, VdiXfntInfo *info);
+BOOL outline_fontheader(Vwk *vwk, VdiFontHeader *fhdr);
+BOOL outline_fonts_present(void);
+LONG outline_rescan(char **dirs, LONG count);
+const char *outline_font_dir(void);
+
+/* vdi_text.c, for the NVDI calls */
+void text_size_out(Vwk *vwk);
+const Fonthead *text_font_number(Vwk *vwk, WORD n);
+WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font);
+void vdi_v_ftext(Vwk *);            /* 241 */
+void vdi_vqt_real_extent(Vwk *);    /* 240 sub 4200 */
+
+/* vdi_nvdi.c: the NVDI and SpeedoGDOS text calls, the GDOS answer, the NVDI cookie */
+void nvdi_add_cookie(void);
+void vdi_vqt_char_index(Vwk *);     /* 190 */
+void vdi_vqt_xfntinfo(Vwk *);       /* 229 */
+void vdi_vqt_name_and_id(Vwk *);    /* 230 sub 100 */
+void vdi_vst_width(Vwk *);          /* 231 */
+void vdi_vqt_fontheader(Vwk *);     /* 232 */
+void vdi_vqt_kerns(Vwk *);          /* 234, 235 */
+void vdi_vst_charmap(Vwk *);        /* 236 */
+void vdi_vst_kern(Vwk *);           /* 237 */
+void vdi_v_getoutline(Vwk *);       /* 243 */
+void vdi_vst_arbpt(Vwk *);          /* 246 */
+void vdi_vqt_advance(Vwk *);        /* 247 */
+void vdi_vst_setsize(Vwk *);        /* 252 */
+void vdi_vst_skew(Vwk *);           /* 253 */
 #endif
 
 #if HAVE_BEZIER
