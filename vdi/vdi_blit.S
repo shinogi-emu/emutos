@@ -552,7 +552,7 @@ f2op_04:
         and.w   d0,(a1)
         jra     f2_rtn
 
-mode_05:                        // dummy label. Never called!!!!
+mode_05:                        // dummy label. Never called: next_plane skips op 5
 
         and.w   d7,d0           // S and P                                       4
 mode_06:
@@ -1083,7 +1083,10 @@ next_plane:
         swap    d5
         move.w  INNER_CT(a6),d5         // d5(15:00) <- inner loop counter
 
-        move.l  #0x8421,d1              // logic ops 15,10,5, and 0 are special cases ($8421=%1000010000100001)
+        cmp.w   #5,d0                   // logic op 5 (D' <- D) leaves the destination
+        jeq     np_cont                 // alone: there is no fragment for it, skip the plane
+
+        move.l  #0x8421,d1              // logic ops 15,10, and 0 are special cases ($8421=%1000010000100001)
         btst    d0,d1                   // where operation is performed directly upon
         jne     unary_blt               // the destination independent of the source
 
