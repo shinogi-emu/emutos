@@ -125,30 +125,6 @@
  */
 
 
-/*
- * Local structure for passing justification info
- *
- * note 1: in each of the following pairs of variables, only one variable
- * has a non-zero value:
- *  (wordx,wordy), (rmwordx,rmwordy), (charx,chary), (rmcharx,rmchary)
- *
- * note 2: if rmword is zero, there are no 'remainder pixels' to use up
- * between words; otherwise, rmword = max(rmwordx/rmwordy).  similarly
- * for rmchar/rmcharx/rmchary.
- */
-typedef struct
-{
-                        /* word-spacing variables */
-    WORD wordx, wordy;          /* #pixels to add to each space */
-    WORD rmword;                /* remaining #pixels to add over all spaces */
-    WORD rmwordx, rmwordy;      /* add this to use up remainder */
-                        /* character-spacing variables */
-    WORD charx, chary;          /* #pixels to add to each character */
-    WORD rmchar;                /* remaining #pixels to add over all characters */
-    WORD rmcharx, rmchary;      /* add this to use up remainder */
-} JUSTINFO;
-
-
 /* Prototypes for this module */
 static void make_header(Vwk * vwk);
 static UWORD clc_dda(Vwk * vwk, UWORD act, UWORD req);
@@ -161,6 +137,11 @@ static WORD calc_height(Vwk *vwk)
 {
     const Fonthead *fnt_ptr = vwk->cur_font;
     WORD height;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_font_selected(vwk))     /* the height of what is drawn */
+        return fnt_ptr->top + fnt_ptr->bottom;
+#endif
 
     height = fnt_ptr->top + fnt_ptr->bottom + 1;    /* handles scaled fonts */
 
@@ -178,6 +159,11 @@ static WORD calc_width(Vwk *vwk, WORD cnt, WORD *str)
     const Fonthead *fnt_ptr = vwk->cur_font;
     WORD table_start = fnt_ptr->first_ade;
     WORD i, chr, width;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_font_selected(vwk))     /* effects included */
+        return outline_text_width(vwk, cnt, str);
+#endif
 
     if (fnt_ptr->flags & F_MONOSPACE)
     {
@@ -301,6 +287,14 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
 
     if (count <= 0)     /* quick out for unlikely occurrence */
         return;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_font_selected(vwk))
+    {
+        outline_text(vwk, count, str, width, justified);
+        return;
+    }
+#endif
 
     if (width < 0)      /* called from vdi_v_gtext() */
         width = calc_width(vwk, count, str);
@@ -584,6 +578,9 @@ void text_init2(Vwk * vwk)
     vwk->v_align = 0;
     vwk->chup = 0;
     vwk->pts_mode = FALSE;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_init_vwk(vwk);
+#endif
 
     font_ring[2] = vwk->loaded_fonts;
     DEV_TAB[10] = vwk->num_fonts;
@@ -685,6 +682,19 @@ void vdi_vst_height(Vwk * vwk)
     WORD font_id;
     UWORD test_height;
     BOOL found;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_face_selected(vwk))
+    {
+        vwk->pts_mode = FALSE;
+        if (outline_set_height(vwk, PTSIN[1]))
+        {
+            setup_width_height(vwk->cur_font);
+            return;
+        }
+        vwk->cur_font = &fon6x6;    /* the face cannot be used: the system font */
+    }
+#endif
 
     font_id = vwk->cur_font->font_id;
     vwk->pts_mode = FALSE;
@@ -825,6 +835,20 @@ void vdi_vst_point(Vwk * vwk)
     WORD test_height, h;
     BOOL found;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_face_selected(vwk))
+    {
+        vwk->pts_mode = TRUE;
+        if (outline_set_point(vwk, INTIN[0]))
+        {
+            setup_width_height(vwk->cur_font);
+            INTOUT[0] = vwk->cur_font->point;
+            return;
+        }
+        vwk->cur_font = &fon6x6;    /* the face cannot be used: the system font */
+    }
+#endif
+
     font_id = vwk->cur_font->font_id;
     vwk->pts_mode = TRUE;
 
@@ -958,6 +982,12 @@ void vdi_vst_font(Vwk * vwk)
         } while (!found && (test_font = test_font->next_font));
     }
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* the outline fonts loaded by vst_load_fonts() come after those */
+    if (!found)
+        found = ((test_font = outline_find_face(vwk, face)) != NULL);
+#endif
+
     /* If we fell through the loop, we could not find the face. */
     /* Default to the system font.                  */
     if (!found)
@@ -1075,6 +1105,12 @@ void vdi_vqt_width(Vwk * vwk)
     k = INTIN[0];
     if ((k < fnt_ptr->first_ade) || (k > fnt_ptr->last_ade))
         INTOUT[0] = -1;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    else if (outline_font_selected(vwk)) {
+        INTOUT[0] = k;
+        *pointer = outline_char_width(vwk, k);
+    }
+#endif
     else {
         INTOUT[0] = k;
         k -= fnt_ptr->first_ade;
@@ -1120,6 +1156,12 @@ void vdi_vqt_name(Vwk * vwk)
             }
         } while (!found && (tmp_font = tmp_font->next_font));
     }
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* the outline fonts loaded by vst_load_fonts() come after those */
+    if (!found)
+        found = ((tmp_font = outline_face_number(vwk, element - i)) != NULL);
+#endif
 
     /* The element is out of bounds - default to the system font */
     if (!found)
@@ -1301,7 +1343,11 @@ void vdi_vst_load_fonts(Vwk * vwk)
 
     /* You only get one chance to load fonts.  If fonts are linked in, exit  */
     if (vwk->loaded_fonts) {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        INTOUT[0] = outline_load_fonts(vwk);
+#else
         INTOUT[0] = 0;
+#endif
         return;
     }
 
@@ -1317,7 +1363,11 @@ void vdi_vst_load_fonts(Vwk * vwk)
      */
     first_font = (Fonthead *) ULONG_AT(&control[10]);
     if (!first_font || ((LONG)first_font & 1)) {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        INTOUT[0] = outline_load_fonts(vwk);
+#else
         INTOUT[0] = 0;
+#endif
         return;
     }
 
@@ -1353,7 +1403,12 @@ void vdi_vst_load_fonts(Vwk * vwk)
 
     /* Update the device table count of faces. */
     vwk->num_fonts += count;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    count += outline_load_fonts(vwk);
+#endif
     INTOUT[0] = count;
+#elif CONF_WITH_VDI_OUTLINE_FONTS
+    INTOUT[0] = outline_load_fonts(vwk);
 #else
     INTOUT[0] = 0;      /* we loaded no new fonts */
 #endif
@@ -1362,6 +1417,9 @@ void vdi_vst_load_fonts(Vwk * vwk)
 
 void vdi_vst_unload_fonts(Vwk * vwk)
 {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_unload_fonts(vwk);
+#endif
 #if CONF_WITH_GDOS
     /* Since we always unload all fonts, this is easy. */
     vwk->loaded_fonts = NULL;           /* No fonts installed */

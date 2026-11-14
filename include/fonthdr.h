@@ -22,6 +22,7 @@
 #define F_HORZ_OFF  2   /* there is a horizontal offset table */
 #define F_STDFORM   4   /* the font is in standard (Motorola) format */
 #define F_MONOSPACE 8   /* the font is monospaced */
+#define F_OUTLINE_FONT 0x10 /* an outline font of the VDI, without a bitmap (vdi/vdi_outline.c) */
 
 /* the font header describes a font */
 

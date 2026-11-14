@@ -14,6 +14,9 @@
 #include "fonthdr.h"
 #include "aesext.h"
 #include "vdiext.h"
+#if CONF_WITH_VDI_OUTLINE_FONTS
+#include "vdi_ft2.h"
+#endif
 
 #define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
 
@@ -222,6 +225,13 @@ struct Vwk_ {
 #if HAVE_BEZIER
     WORD bez_qual;              /* actual quality for bezier curves */
 #endif
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* see vdi_outline.c */
+    Fonthead outline_head;      /* the selected outline font, as cur_font */
+    VdiOutlineFont *outline_face;   /* its face; NULL if none was selected */
+    VdiOutlineFont *outline_font;   /* that face at the selected size */
+    WORD outline_count;         /* outline faces added by vst_load_fonts() */
+#endif
 };
 
 /*
@@ -242,6 +252,30 @@ typedef struct {
     WORD x1,y1;
     WORD x2,y2;
 } Line;
+
+
+/*
+ * Structure for passing justification info (vdi_text.c)
+ *
+ * note 1: in each of the following pairs of variables, only one variable
+ * has a non-zero value:
+ *  (wordx,wordy), (rmwordx,rmwordy), (charx,chary), (rmcharx,rmchary)
+ *
+ * note 2: if rmword is zero, there are no 'remainder pixels' to use up
+ * between words; otherwise, rmword = max(rmwordx/rmwordy).  similarly
+ * for rmchar/rmcharx/rmchary.
+ */
+typedef struct
+{
+                        /* word-spacing variables */
+    WORD wordx, wordy;          /* #pixels to add to each space */
+    WORD rmword;                /* remaining #pixels to add over all spaces */
+    WORD rmwordx, rmwordy;      /* add this to use up remainder */
+                        /* character-spacing variables */
+    WORD charx, chary;          /* #pixels to add to each character */
+    WORD rmchar;                /* remaining #pixels to add over all characters */
+    WORD rmcharx, rmchary;      /* add this to use up remainder */
+} JUSTINFO;
 
 
 /*
@@ -433,6 +467,24 @@ void vdi_vex_wheelv(Vwk *);         /* 134 */
 
 #if CONF_WITH_VDI_TEXT_SPEEDUP
 void direct_screen_blit(WORD count, WORD *str);
+#endif
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/* vdi_outline.c: outline fonts on the workstations */
+void outline_init_vwk(Vwk *vwk);
+WORD outline_load_fonts(Vwk *vwk);
+void outline_unload_fonts(Vwk *vwk);
+const Fonthead *outline_find_face(const Vwk *vwk, WORD id);
+const Fonthead *outline_face_number(const Vwk *vwk, WORD n);
+BOOL outline_face_selected(const Vwk *vwk);
+BOOL outline_set_point(Vwk *vwk, WORD point);
+BOOL outline_set_height(Vwk *vwk, WORD height);
+BOOL outline_font_selected(const Vwk *vwk);
+VdiOutlineFont *outline_current(Vwk *vwk);
+WORD outline_text_width(Vwk *vwk, WORD count, const WORD *str);
+WORD outline_char_width(Vwk *vwk, WORD ch);
+void outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
+LONG outline_on_stack(LONG (*fn)(void *), void *arg);
 #endif
 
 #if HAVE_BEZIER

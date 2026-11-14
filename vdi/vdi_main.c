@@ -180,7 +180,12 @@ void screen(void)
          * ensure that the values in the line-A variables mirror those
          * in the current virtual workstation, just like in Atari TOS.
          */
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        /* line-A draws bitmap fonts only: show it the system font instead */
+        CUR_FONT = outline_font_selected(vwk) ? def_font : vwk->cur_font;
+#else
         CUR_FONT = vwk->cur_font;
+#endif
         WRT_MODE = vwk->wrt_mode;
         CLIP = vwk->clip;
         XMINCL = vwk->xmn_clip;
