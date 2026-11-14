@@ -62,7 +62,8 @@ typedef struct {
 
 static OutlineFace *faces;
 static WORD face_count;
-static BOOL scanned;            /* the fonts folder has been scanned */
+static BOOL scan_begun;         /* the fonts folder is being or has been scanned */
+static BOOL scanned;            /* the faces are ready */
 static VdiXfntInfo xfnt;        /* too large for the stack */
 
 /*
@@ -73,6 +74,28 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
  * of C:\GEMSYS\FONTS were measured to use 18.5 KB of it.
  */
 #define FONT_STACK_SIZE 32768L  /* bytes */
+
+/*
+ * The engine is not reentrant, and the font stack is used by one call at a
+ * time.  While it is busy, outline_on_stack() refuses: the calls below then
+ * report a failure, and the text is measured and drawn in the system font.
+ *
+ * Under EmuTOS's own GEMDOS nothing can come in while a call is on the font
+ * stack.  Under a multitasking GEMDOS, a program can sleep in a file read
+ * that the engine makes, and another can then call the VDI: that call gets
+ * the system font.
+ *
+ * Known limits:
+ * - if a call never comes back (a program killed while it sleeps in the
+ *   engine, or a fault in it), the font stack stays busy and the outline
+ *   fonts are drawn in the system font until the next boot.  Clearing the
+ *   flag then is not safe, as the engine may have been left halfway through
+ *   a change to its caches;
+ * - like any VDI call under such a system, a call that sleeps here can have
+ *   CONTRL, INTIN, PTSIN, INTOUT and PTSOUT repointed by the VDI call of
+ *   another program, and then write its results there.  The coordinates are
+ *   read before the engine is called, which narrows this for v_gtext().
+ */
 
 static LONG font_stack[FONT_STACK_SIZE / sizeof(LONG)];
 static BOOL font_stack_busy;
@@ -140,25 +163,18 @@ void outline_init_vwk(Vwk *vwk)
 }
 
 
-/* see outline_load_fonts() */
-static WORD load_fonts(Vwk *vwk)
+/* scan the fonts folder, once: on the font stack */
+static void scan_fonts(void)
 {
-    if (!scanned)
+    scan_begun = TRUE;              /* before anything that can sleep */
+    if (vdi_ft_init() < 0)
     {
-        if (vdi_ft_init() < 0)
-            return 0;               /* no memory: maybe next time */
-        vdi_font_dir_scan(FONT_DIR, found_font, NULL);
-        make_faces();
-        scanned = TRUE;
+        scan_begun = FALSE;         /* no memory: maybe next time */
+        return;
     }
-
-    if (!vwk->outline_count)
-    {
-        vwk->outline_count = face_count;
-        vwk->num_fonts += face_count;
-    }
-
-    return face_count;
+    vdi_font_dir_scan(FONT_DIR, found_font, NULL);
+    make_faces();
+    scanned = TRUE;
 }
 
 
@@ -452,31 +468,36 @@ static LONG effects_of(const Vwk *vwk)
 }
 
 
-/* vqt_extent(), v_gtext(): the width of a string, effects included */
-static WORD text_width(Vwk *vwk, WORD count, const WORD *str)
+/*
+ * vqt_extent(), v_gtext(): the width of a string, effects included;
+ * negative if the engine cannot measure it
+ */
+static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
 {
     VdiOutlineFont *f = outline_current(vwk);
     LONG width;
 
-    if (!f || (count <= 0))
+    if (!f)
+        return -1;
+    if (count <= 0)
         return 0;
     if (vdi_ft_text_extent(f, str, count, VDI_FT_MAP_ATARI, effects_of(vwk), &width, NULL) < 0)
-        return 0;
+        return -1;
 
     return clamp_word(width);
 }
 
 
-/* vqt_width(): the advance of a character */
-static WORD char_width(Vwk *vwk, WORD ch)
+/* vqt_width(): the advance of a character; negative if the engine cannot tell */
+static LONG char_width(Vwk *vwk, WORD ch)
 {
     VdiOutlineFont *f = outline_current(vwk);
     LONG advance[4];
 
     if (!f)
-        return 0;
+        return -1;
     if (vdi_ft_char_advance(f, (UWORD)ch, VDI_FT_MAP_ATARI, effects_of(vwk), advance) < 0)
-        return 0;
+        return -1;
 
     return clamp_word(advance[0]);
 }
@@ -636,6 +657,9 @@ static UWORD *turn(const VdiOutlineBitmap *bm, WORD angle, LONG *new_wdwidth)
  * Rotated text goes where the VDI puts rotated system-font text: a point
  * u,v away from the reference point goes to x+u,y+v at 0 degrees,
  * x+v,y-u at 90, x-u,y-v at 180 and x-v,y+u at 270.
+ *
+ * Returns -1, having drawn nothing, if the engine cannot render the
+ * string or there is no memory to turn it.
  */
 static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD count,
                      LONG x, LONG y, LONG u0, LONG v0)
@@ -646,7 +670,7 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
     UWORD *turned;
 
     if (vdi_ft_render(f, str, count, VDI_FT_MAP_ATARI, effects_of(vwk), 0, &bm) < 0)
-        return 0;
+        return -1;
     advance = bm.advance_x;
     if (!bm.data)
         return advance;
@@ -661,7 +685,9 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
     }
 
     turned = turn(&bm, angle, &wd);
-    if (turned)
+    if (!turned)
+        advance = -1;
+    else
     {
         switch (angle)
         {
@@ -684,23 +710,35 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
 
 
 /*
- * v_gtext(), v_justified(): draw a string in the current outline font
+ * v_gtext(), v_justified(): draw a string in the current outline font,
+ * with its reference point at x,y
  *
  * 'width' is the width of the text for the horizontal alignment, or
  * negative if it has to be measured.  Justified text is drawn a
  * character at a time, spaced as output_text() spaces bitmap fonts.
+ *
+ * Returns FALSE, having drawn nothing, if the engine cannot draw it.
  */
-static void draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified)
+static BOOL draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified,
+                      LONG x, LONG y)
 {
     VdiOutlineFont *f = outline_current(vwk);
-    LONG x, y, delh, delv, pen, dx, dy;
+    LONG delh, delv, pen, dx, dy, advance;
     WORD j;
 
-    if (!f || (count <= 0))
-        return;
+    if (!f)
+        return FALSE;
+    if (count <= 0)
+        return TRUE;
 
     if (width < 0)
-        width = text_width(vwk, count, str);
+    {
+        LONG w = text_width(vwk, count, str);
+
+        if (w < 0)
+            return FALSE;
+        width = (WORD)w;
+    }
 
     switch(vwk->h_align) {
     default:                /* normally case 0: left justified */
@@ -736,21 +774,22 @@ static void draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINF
         break;
     }
 
-    x = PTSIN[0];
-    y = PTSIN[1];
-
     if (!justified)
-    {
-        draw_run(vwk, f, str, count, x, y, -delh, -delv);
-        return;
-    }
+        return draw_run(vwk, f, str, count, x, y, -delh, -delv) >= 0;
 
     pen = 0;
     dx = 0;
     dy = 0;
     for (j = 0; j < count; j++)
     {
-        pen += draw_run(vwk, f, &str[j], 1, x + dx, y + dy, pen - delh, -delv);
+        advance = draw_run(vwk, f, &str[j], 1, x + dx, y + dy, pen - delh, -delv);
+        if (advance < 0)
+        {
+            if (j == 0)
+                return FALSE;   /* nothing drawn yet: all in the system font */
+            advance = 0;        /* else leave out what cannot be drawn */
+        }
+        pen += advance;
 
         dx += justified->charx;
         dy += justified->chary;
@@ -769,6 +808,8 @@ static void draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINF
             }
         }
     }
+
+    return TRUE;
 }
 
 
@@ -801,28 +842,26 @@ static LONG switch_stack(LONG (*fn)(void *), void *arg, void *top)
 
 
 /*
- * call fn(arg) on the font stack
+ * call fn(arg) on the font stack, and put what it returns in *result
  *
- * The VDI is not reentered while the font stack is in use, except under
- * a multitasking GEMDOS, when a program sleeps in a file read made by the
- * engine and another one draws text: that one stays on its own stack,
- * which such a system makes large enough.
- *
- * Whatever calls the engine (vdi_ft2.h) for a workstation goes through
- * here.
+ * Returns FALSE, without calling fn, if the font stack is in use (see
+ * font_stack_busy).  Whatever calls the engine (vdi_ft2.h) for a
+ * workstation goes through here.
  */
-LONG outline_on_stack(LONG (*fn)(void *), void *arg)
+BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result)
 {
     LONG ret;
 
     if (font_stack_busy)
-        return fn(arg);
+        return FALSE;
 
     font_stack_busy = TRUE;
     ret = switch_stack(fn, arg, font_stack + FONT_STACK_SIZE / sizeof(LONG));
     font_stack_busy = FALSE;
 
-    return ret;
+    if (result)
+        *result = ret;
+    return TRUE;
 }
 
 
@@ -831,15 +870,16 @@ typedef struct {
     Vwk *vwk;
     const WORD *str;
     JUSTINFO *justified;
+    LONG x, y;                  /* the reference point of the text */
     WORD count;
     WORD value;                 /* a size, a width or a character */
 } OutlineCall;
 
-static LONG load_fonts_call(void *p)
+static LONG scan_fonts_call(void *p)
 {
-    OutlineCall *c = p;
-
-    return load_fonts(c->vwk);
+    UNUSED(p);
+    scan_fonts();
+    return 0;
 }
 
 static LONG set_point_call(void *p)
@@ -874,8 +914,7 @@ static LONG draw_text_call(void *p)
 {
     OutlineCall *c = p;
 
-    draw_text(c->vwk, c->count, c->str, c->value, c->justified);
-    return 0;
+    return draw_text(c->vwk, c->count, c->str, c->value, c->justified, c->x, c->y);
 }
 
 
@@ -886,10 +925,18 @@ static LONG draw_text_call(void *p)
  */
 WORD outline_load_fonts(Vwk *vwk)
 {
-    OutlineCall c;
+    if (!scan_begun)
+        outline_on_stack(scan_fonts_call, NULL, NULL);
+    if (!scanned)
+        return 0;                   /* no memory, or the scan is not over */
 
-    c.vwk = vwk;
-    return (WORD)outline_on_stack(load_fonts_call, &c);
+    if (!vwk->outline_count)
+    {
+        vwk->outline_count = face_count;
+        vwk->num_fonts += face_count;
+    }
+
+    return face_count;
 }
 
 
@@ -897,10 +944,11 @@ WORD outline_load_fonts(Vwk *vwk)
 BOOL outline_set_point(Vwk *vwk, WORD point)
 {
     OutlineCall c;
+    LONG ok;
 
     c.vwk = vwk;
     c.value = point;
-    return (BOOL)outline_on_stack(set_point_call, &c);
+    return outline_on_stack(set_point_call, &c, &ok) && ok;
 }
 
 
@@ -908,47 +956,68 @@ BOOL outline_set_point(Vwk *vwk, WORD point)
 BOOL outline_set_height(Vwk *vwk, WORD height)
 {
     OutlineCall c;
+    LONG ok;
 
     c.vwk = vwk;
     c.value = height;
-    return (BOOL)outline_on_stack(set_height_call, &c);
+    return outline_on_stack(set_height_call, &c, &ok) && ok;
 }
 
 
-/* vqt_extent(), v_justified(): the width of a string, effects included */
-WORD outline_text_width(Vwk *vwk, WORD count, const WORD *str)
+/*
+ * vqt_extent(), v_justified(): the width of a string, effects included;
+ * FALSE if the engine cannot measure it now, for the system font to
+ */
+BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width)
 {
     OutlineCall c;
+    LONG w;
 
     c.vwk = vwk;
     c.count = count;
     c.str = str;
-    return (WORD)outline_on_stack(text_width_call, &c);
+    if (!outline_on_stack(text_width_call, &c, &w) || (w < 0))
+        return FALSE;
+
+    *width = (WORD)w;
+    return TRUE;
 }
 
 
-/* vqt_width(): the advance of a character */
-WORD outline_char_width(Vwk *vwk, WORD ch)
+/* vqt_width(): the advance of a character; FALSE as above */
+BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width)
 {
     OutlineCall c;
+    LONG w;
 
     c.vwk = vwk;
     c.value = ch;
-    return (WORD)outline_on_stack(char_width_call, &c);
+    if (!outline_on_stack(char_width_call, &c, &w) || (w < 0))
+        return FALSE;
+
+    *width = (WORD)w;
+    return TRUE;
 }
 
 
-/* v_gtext(), v_justified(): draw a string in the current outline font */
-void outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified)
+/*
+ * v_gtext(), v_justified(): draw a string in the current outline font at
+ * PTSIN[0],PTSIN[1]; FALSE, having drawn nothing, if the engine cannot
+ * draw it now, for the system font to
+ */
+BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified)
 {
     OutlineCall c;
+    LONG ok;
 
     c.vwk = vwk;
     c.count = count;
     c.str = str;
     c.value = width;
     c.justified = justified;
-    outline_on_stack(draw_text_call, &c);
+    c.x = PTSIN[0];             /* before anything can sleep */
+    c.y = PTSIN[1];
+    return outline_on_stack(draw_text_call, &c, &ok) && ok;
 }
 
 #endif /* CONF_WITH_VDI_OUTLINE_FONTS */

@@ -481,10 +481,10 @@ BOOL outline_set_point(Vwk *vwk, WORD point);
 BOOL outline_set_height(Vwk *vwk, WORD height);
 BOOL outline_font_selected(const Vwk *vwk);
 VdiOutlineFont *outline_current(Vwk *vwk);
-WORD outline_text_width(Vwk *vwk, WORD count, const WORD *str);
-WORD outline_char_width(Vwk *vwk, WORD ch);
-void outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
-LONG outline_on_stack(LONG (*fn)(void *), void *arg);
+BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width);
+BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width);
+BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
+BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result);
 #endif
 
 #if HAVE_BEZIER

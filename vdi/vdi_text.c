@@ -125,6 +125,14 @@
  */
 
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/*
+ * set by calc_width() when the outline font engine could not measure the
+ * text, which was then measured in the system font
+ */
+static BOOL measured_in_system_font;
+#endif
+
 /* Prototypes for this module */
 static void make_header(Vwk * vwk);
 static UWORD clc_dda(Vwk * vwk, UWORD act, UWORD req);
@@ -161,8 +169,16 @@ static WORD calc_width(Vwk *vwk, WORD cnt, WORD *str)
     WORD i, chr, width;
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
+    measured_in_system_font = FALSE;
     if (outline_font_selected(vwk))     /* effects included */
-        return outline_text_width(vwk, cnt, str);
+    {
+        if (outline_text_width(vwk, cnt, str, &width))
+            return width;
+        /* the engine cannot measure it now: measure it in the system font */
+        measured_in_system_font = TRUE;
+        fnt_ptr = def_font;
+        table_start = fnt_ptr->first_ade;
+    }
 #endif
 
     if (fnt_ptr->flags & F_MONOSPACE)
@@ -291,7 +307,14 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
 #if CONF_WITH_VDI_OUTLINE_FONTS
     if (outline_font_selected(vwk))
     {
-        outline_text(vwk, count, str, width, justified);
+        if (!outline_text(vwk, count, str, width, justified))
+        {
+            /* the engine cannot draw it now: draw it in the system font */
+            fnt_ptr = vwk->cur_font;
+            vwk->cur_font = def_font;
+            output_text(vwk, count, str, width, justified);
+            vwk->cur_font = fnt_ptr;
+        }
         return;
     }
 #endif
@@ -1057,6 +1080,16 @@ void vdi_vqt_extent(Vwk * vwk)
 
     height = calc_height(vwk);
     width = calc_width(vwk, CONTRL[3], INTIN);
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (measured_in_system_font)        /* and so is its height */
+    {
+        const Fonthead *fnt_ptr = vwk->cur_font;
+
+        vwk->cur_font = def_font;
+        height = calc_height(vwk);
+        vwk->cur_font = fnt_ptr;
+    }
+#endif
 
     bzero(PTSOUT,8*sizeof(WORD));
     switch (vwk->chup) {
@@ -1103,14 +1136,20 @@ void vdi_vqt_width(Vwk * vwk)
     *(pointer + 4) = 0;
 
     k = INTIN[0];
-    if ((k < fnt_ptr->first_ade) || (k > fnt_ptr->last_ade))
-        INTOUT[0] = -1;
 #if CONF_WITH_VDI_OUTLINE_FONTS
-    else if (outline_font_selected(vwk)) {
-        INTOUT[0] = k;
-        *pointer = outline_char_width(vwk, k);
+    if (outline_font_selected(vwk) && (k >= fnt_ptr->first_ade) && (k <= fnt_ptr->last_ade))
+    {
+        if (outline_char_width(vwk, k, pointer))
+        {
+            INTOUT[0] = k;
+            flip_y = 1;
+            return;
+        }
+        fnt_ptr = def_font;     /* the engine cannot tell now: the system font */
     }
 #endif
+    if ((k < fnt_ptr->first_ade) || (k > fnt_ptr->last_ade))
+        INTOUT[0] = -1;
     else {
         INTOUT[0] = k;
         k -= fnt_ptr->first_ade;
