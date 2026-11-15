@@ -15,6 +15,7 @@
 #include "kprint.h"
 #include "qemuvirt.h"
 #include "tosvars.h"
+#include "lineavars.h"   /* vdi_screen_swapped */
 
 #ifdef MACHINE_QEMU_VIRT
 
@@ -323,6 +324,12 @@ void virtio_gpu_present(void)
 
     if (!gpu_ready || gpu_present_busy)
         return;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    /* v_bas_ad points to an off-screen bitmap while the VDI draws in it; next frame */
+    if (vdi_screen_swapped)
+        return;
+#endif
 
     /* Scan still screens at 10 Hz; resume 50 Hz immediately on input or
      * observed drawing. This avoids burning CPU on unchanged pixels. */

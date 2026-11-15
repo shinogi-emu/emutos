@@ -155,6 +155,7 @@ static const struct vdi_xjmptab jmptb3[] = {
     /* the NVDI colour calls, in vdi_nvdicol.c; the raster and bitmap calls are added here */
     { 138, VDI_ANY_SUBOP, 0,  0, vdi_v_setrgb },
     { 171, VDI_ANY_SUBOP, 4,  1, vdi_vr_clip_rects },       /* in vdi_nvdimisc.c */
+    /* off-screen bitmaps: 100 and 101 with a sub-opcode are in vdi_control.c and vdi_bitmap.c */
     { 200, VDI_ANY_SUBOP, 0,  1, vdi_vs_fg_color },
     { 201, VDI_ANY_SUBOP, 0,  1, vdi_vs_bg_color },
     { 202, VDI_ANY_SUBOP, 0,  6, vdi_vq_fg_color },
@@ -192,6 +193,9 @@ void screen(void)
 #if WITH_JMPTB3
     const struct vdi_xjmptab *xjmptab;
     struct vdi_jmptab row;
+#endif
+#if CONF_WITH_VDI_NVDI_EXT
+    BOOL swapped = FALSE;
 #endif
 
     /* get workstation handle */
@@ -245,7 +249,18 @@ void screen(void)
         CUR_WORK = vwk;
 #endif
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /* a call on the handle of an off-screen bitmap draws in it */
+    if (vwk && vwk->bm.addr && !vdi_acts_on_screen(opcode))
+        swapped = vdi_bitmap_swap_in(vwk);
+#endif
+
     (*jmptab->op) (vwk);
+
+#if CONF_WITH_VDI_NVDI_EXT
+    if (swapped)
+        vdi_bitmap_swap_out();
+#endif
 
 #if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
     /* line-A draws with pen 0 as the background */

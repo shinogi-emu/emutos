@@ -430,6 +430,14 @@ void vdi_v_opnvwk(Vwk * vwk)
     LONG size;
     Vwk **p;
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /* v_opnbm(), v_resize_bm() and v_open_bm() are opcode 100 too; no other sub-opcode is known */
+    if (CONTRL[5] != 0) {
+        vdi_bitmap_open();
+        return;
+    }
+#endif
+
     /*
      * ensure that CUR_WORK always points to a valid workstation
      * even if v_opnvwk() exits early.
@@ -475,6 +483,10 @@ void vdi_v_opnvwk(Vwk * vwk)
     }
 #endif
 
+#if CONF_WITH_VDI_NVDI_EXT
+    vwk->bm.addr = NULL;        /* a workstation of the screen */
+    vwk->bm.mem = NULL;
+#endif
     vwk_ptr[handle] = vwk;
     vwk->handle = CONTRL[6] = handle;
     init_wk(vwk);
@@ -485,6 +497,15 @@ void vdi_v_opnvwk(Vwk * vwk)
 void vdi_v_clsvwk(Vwk * vwk)
 {
     WORD handle;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * v_clsbm() is opcode 101 with sub-opcode 1 and closes bitmaps only;
+     * any sub-opcode but 0 and 1 is unknown
+     */
+    if (CONTRL[5] != 0 && (CONTRL[5] != 1 || vwk->bm.addr == NULL))
+        return;
+#endif
 
     /* vwk points to workstation to deallocate */
     handle = vwk->handle;
@@ -510,6 +531,9 @@ void vdi_v_clsvwk(Vwk * vwk)
      */
     CUR_WORK = &phys_work;
 
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
+#endif
     Mfree(vwk);
 }
 
@@ -601,6 +625,9 @@ void vdi_v_clswk(Vwk * vwk)
     /* close all open virtual workstations */
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
         if (*p) {
+#if CONF_WITH_VDI_NVDI_EXT
+            vdi_bitmap_release(*p);
+#endif
             Mfree(*p);
             *p = NULL;
         }
@@ -782,4 +809,12 @@ void vdi_vq_extnd(Vwk * vwk)
     dst = INTOUT;
     for (i = 0; i < 45; i++)
         *dst++ = *src++;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    /* the size of a bitmap, not of the screen (DEV_TAB[0] and [1] are not swapped) */
+    if (vdi_screen_swapped && *(INTIN) == 0) {
+        INTOUT[0] = vdi_bm_xres;
+        INTOUT[1] = vdi_bm_yres;
+    }
+#endif
 }

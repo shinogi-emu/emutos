@@ -388,7 +388,7 @@ vdi_src += vdi_kept.c
 endif
 
 ifeq (1,$(VDI_NVDI_EXT))
-vdi_src += vdi_nvdimath.c vdi_nvdicol.c vdi_nvdimisc.c
+vdi_src += vdi_nvdimath.c vdi_nvdicol.c vdi_nvdimisc.c vdi_bitmap.c
 endif
 
 ifeq (1,$(VDI_OUTLINE_FONTS))

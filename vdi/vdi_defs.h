@@ -103,8 +103,19 @@
 #define ROUND       2
 
 /* aliases for different table positions */
+#if CONF_WITH_VDI_NVDI_EXT
+/*
+ * while a call draws in an off-screen bitmap (vdi_screen_swapped), the
+ * size of the bitmap; DEV_TAB[0] and [1] stay those of the screen, as
+ * the mouse interrupt clips the pointer to them
+ */
+extern WORD vdi_bm_xres, vdi_bm_yres;
+#define xres        (vdi_screen_swapped ? vdi_bm_xres : DEV_TAB[0])
+#define yres        (vdi_screen_swapped ? vdi_bm_yres : DEV_TAB[1])
+#else
 #define xres        DEV_TAB[0]
 #define yres        DEV_TAB[1]
+#endif
 #define xsize       DEV_TAB[3]
 #define ysize       DEV_TAB[4]
 #define numcolors   DEV_TAB[13]
@@ -202,6 +213,16 @@ typedef struct {
     UWORD rgbmask;                      /* bit 2*kind+bg: set by RGB value (16-bit screens) */
     COLOR_RGB extra[4];                 /* highlight, minimum, maximum and weight colours */
 } VwkColors;
+
+/* the bitmap of an off-screen bitmap workstation (see vdi_bitmap.c) */
+typedef struct {
+    UBYTE *addr;                /* the pixels; NULL: a workstation of the screen */
+    void *mem;                  /* the block the VDI allocated for them (to free); NULL: the caller's */
+    WORD width;                 /* in pixels, a multiple of 16 */
+    WORD height;
+    UWORD wbytes;               /* bytes per line */
+    WORD pixw, pixh;            /* the size of a pixel in microns */
+} VwkBitmap;
 #endif
 
 /* Structure to hold data for a virtual workstation */
@@ -277,6 +298,7 @@ struct Vwk_ {
 #endif
 #if CONF_WITH_VDI_NVDI_EXT
     VwkColors col;              /* see vdi_nvdicol.c */
+    VwkBitmap bm;               /* see vdi_bitmap.c */
 #endif
 };
 
@@ -529,6 +551,13 @@ void vdi_vq_fg_color(Vwk *);        /* 202 */
 void vdi_vq_bg_color(Vwk *);        /* 203 */
 void vdi_color_entry(Vwk *);        /* 204 */
 void vdi_vr_clip_rects(Vwk *);      /* 171 */
+
+/* vdi_bitmap.c: off-screen bitmaps */
+void vdi_bitmap_open(void);         /* 100 with a sub-opcode of 1, 2 or 3; others are refused */
+void vdi_bitmap_release(Vwk *vwk);  /* free the memory the VDI gave a bitmap */
+BOOL vdi_bitmap_swap_in(Vwk *vwk);  /* draw in the bitmap of vwk (screen globals) */
+void vdi_bitmap_swap_out(void);     /* back to the screen */
+BOOL vdi_acts_on_screen(WORD opcode);   /* opcodes that ignore the swap */
 void vdi_vs_x_color(Vwk *);         /* 207 */
 void vdi_vq_x_color(Vwk *);         /* 209 */
 
