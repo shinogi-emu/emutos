@@ -147,8 +147,8 @@ _nvdi_get_font_dir_entry:
  * not saved here: the compiler keeps them, and every assembler routine
  * the VDI calls does (see fast_bit_blt, normal_blit; the user vectors run
  * only from the interrupt paths of vdi_mouse.c and vdi_misc.c, which save
- * what they use).  Only
- * what C may change, and this routine uses, is kept for the caller.
+ * what they use).  Only what C may change, and this routine uses, is
+ * kept for the caller.
  */
 _GSX_ENTRY:
 #ifdef __mcoldfire__
@@ -291,9 +291,11 @@ no_ptsin:
  * of them.  Every other call (the opening calls, the NVDI calls of the
  * third table, a handle without a workstation, and the workstation of an
  * off-screen bitmap) jumps to _screen_general, which returns to the
- * caller of _screen.  The registers a C function keeps are kept: only
- * a2 is used besides d0, d1, a0 and a1.  The offsets and constants are
- * those of vdiscreen.h, which vdi_main.c checks against the structures.
+ * caller of _screen.  The registers a C function keeps are kept: a2,
+ * the only one used besides d0, d1, a0 and a1, is saved before it is
+ * loaded, after the last jump to _screen_general.  The offsets and
+ * constants are those of vdiscreen.h, which vdi_main.c checks against
+ * the structures.
  *
  *      a0  CONTRL          d0  the handle, then the opcode
  *      a1  the workstation d1  the index into a table
@@ -339,6 +341,7 @@ _screen:
         cmp.w   #VS_OP_TAB1_LAST-VS_OP_CLSWK,d1
         jhi     scr_tab2
         lsl.w   #VS_ROW_SHIFT,d1
+        move.l  a2,-(sp)                        // the caller's a2, back at scr_done
         lea     _jmptb1+(1<<VS_ROW_SHIFT),a2
         jra     scr_row
 scr_tab2:
@@ -346,11 +349,10 @@ scr_tab2:
         cmp.w   #VS_OP_TAB2_LAST-VS_OP_CLSVWK,d1
         jhi     _screen_general
         lsl.w   #VS_ROW_SHIFT,d1
+        move.l  a2,-(sp)                        // the caller's a2, back at scr_done
         lea     _jmptb2+(1<<VS_ROW_SHIFT),a2
 scr_row:
         adda.w  d1,a2
-        // a2 is kept from here on: the call is made, so it is saved
-        move.l  a2,-(sp)
         move.l  d0,-(sp)                        // the opcode
         move.w  VS_ROW_NPTSOUT(a2),VS_CONTRL_NPTSOUT(a0)
         move.w  VS_ROW_NINTOUT(a2),VS_CONTRL_NINTOUT(a0)
@@ -401,7 +403,7 @@ scr_font:
         move.w  VS_VWK_YMX_CLIP(a1),_YMAXCL
         move.l  a1,_CUR_WORK
 scr_done:
-        movea.l (sp)+,a2
+        movea.l (sp)+,a2                        // the caller's a2
         rts
 #endif /* CONF_WITH_VDI_FASTDRAW && !__mcoldfire__ */
 
