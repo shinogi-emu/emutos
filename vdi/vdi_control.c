@@ -107,7 +107,11 @@ static const WORD INQ_TAB_rom[45] = {
     0,                  /* 29 -  */
     0,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling? */
     0,                  /* 31 -  */
+#if CONF_WITH_VDI_NVDI_EXT
+    1,                  /* 32 - the NVDI colour calls (v_setrgb, vs_fg_color, v_color2value ...) */
+#else
     0,                  /* 32 -  */
+#endif
     0,                  /* 33 -  */
     0,                  /* 34 -  */
     0,                  /* 35 -  */
@@ -340,6 +344,10 @@ static void init_wk(Vwk * vwk)
 
     vwk->multifill = 0;
     vwk->ud_ls = LINE_STYLE[0];
+
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_color_init(vwk);
+#endif
 
     pointer = INTOUT;
     src_ptr = DEV_TAB;

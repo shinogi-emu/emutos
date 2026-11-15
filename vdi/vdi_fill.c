@@ -211,6 +211,9 @@ void vdi_vsf_color(Vwk * vwk)
 
     INTOUT[0] = fc;
     vwk->fill_color = MAP_COL[fc];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_FILL);
+#endif
 }
 
 
@@ -324,7 +327,11 @@ void vdi_vqf_attributes(Vwk * vwk)
 
     pointer = INTOUT;
     *pointer++ = vwk->fill_style;
+#if CONF_WITH_VDI_NVDI_EXT
+    *pointer++ = VDI_PEN_OF(vwk, VDI_COL_FILL, vwk->fill_color);
+#else
     *pointer++ = REV_MAP_COL[vwk->fill_color];
+#endif
     *pointer++ = vwk->fill_index + 1;
     *pointer++ = vwk->wrt_mode + 1;
     *pointer = vwk->fill_per;

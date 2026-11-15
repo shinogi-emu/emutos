@@ -387,6 +387,10 @@ ifneq (,$(filter 1,$(VDI_OUTLINE_FONTS) $(VDI_NVDI_EXT)))
 vdi_src += vdi_kept.c
 endif
 
+ifeq (1,$(VDI_NVDI_EXT))
+vdi_src += vdi_nvdimath.c vdi_nvdicol.c
+endif
+
 ifeq (1,$(VDI_OUTLINE_FONTS))
 vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
 endif

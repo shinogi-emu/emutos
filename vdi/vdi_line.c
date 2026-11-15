@@ -147,6 +147,9 @@ void vdi_vsl_color(Vwk * vwk)
     lc = validate_color_index(INTIN[0]);
     INTOUT[0] = lc;
     vwk->line_color = MAP_COL[lc];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_LINE);
+#endif
 }
 
 
@@ -156,7 +159,11 @@ void vdi_vsl_color(Vwk * vwk)
 void vdi_vql_attributes(Vwk * vwk)
 {
     INTOUT[0] = vwk->line_index + 1;
+#if CONF_WITH_VDI_NVDI_EXT
+    INTOUT[1] = VDI_PEN_OF(vwk, VDI_COL_LINE, vwk->line_color);
+#else
     INTOUT[1] = REV_MAP_COL[vwk->line_color];
+#endif
     INTOUT[2] = vwk->wrt_mode + 1;
 
     PTSOUT[0] = vwk->line_width;
@@ -458,7 +465,11 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
     addr = get_start_addr16(rect->x1, rect->y1);
     palette = CUR_WORK->ext->palette;
     fgcol = palette[attr->color];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[attr->bgcolor];
+#else
     bgcol = palette[0];     //FIXME ??
+#endif
 
     switch(attr->wrt_mode) {
     case WM_ERASE:          /* erase (reverse transparent) mode */
@@ -825,6 +836,9 @@ void Vwk2Attrib(const Vwk *vwk, VwkAttrib *attr, const UWORD color)
     attr->patptr = vwk->patptr;
     attr->wrt_mode = vwk->wrt_mode;
     attr->color = color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    attr->bgcolor = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_FILL) : 0;
+#endif
 }
 
 
@@ -894,6 +908,9 @@ static void lineA2Attrib(VwkAttrib *attr)
     }
     attr->wrt_mode = WRT_MODE;
     attr->color = linea_color();
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    attr->bgcolor = 0;
+#endif
 }
 
 
@@ -1103,6 +1120,9 @@ void polyline(Vwk * vwk, Point * point, int count, WORD color)
     int i;
     Line line;
 
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    vdi_bg_line = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_LINE) : 0;
+#endif
     for (i = count-1, LSTLIN = FALSE; i > 0; i--) {
         if (i == 1)
             LSTLIN = TRUE;
@@ -1640,7 +1660,11 @@ static void draw_line16(const Line *line, WORD wrt_mode, UWORD color)
     addr = get_start_addr16(line->x1, line->y1);    /* init address counter */
     palette = CUR_WORK->ext->palette;
     fgcol = palette[color];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_line];
+#else
     bgcol = palette[0];
+#endif
 
     linemask = LN_MASK;
 
@@ -2101,7 +2125,11 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
     addr = get_start_addr16(line->x1, line->y1);    /* init address counter */
     palette = CUR_WORK->ext->palette;
     fgcol = palette[color];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_line];
+#else
     bgcol = palette[0];     //FIXME ??
+#endif
 
     linemask = LN_MASK;
 
@@ -2338,6 +2366,9 @@ void abline(const Line *line, const WORD wrt_mode, UWORD color)
         attr.patptr = &linemask;
         attr.wrt_mode = wrt_mode;
         attr.color = color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+        attr.bgcolor = vdi_bg_line;
+#endif
         rect.x1 = x1;
         rect.y1 = y1;
         rect.x2 = x2;

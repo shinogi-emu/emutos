@@ -17,6 +17,9 @@
 #if CONF_WITH_VDI_OUTLINE_FONTS
 #include "vdi_ft2.h"
 #endif
+#if CONF_WITH_VDI_NVDI_EXT
+#include "vdi_nvdiext.h"
+#endif
 
 #define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
 
@@ -143,6 +146,9 @@ typedef struct {
     const UWORD *patptr;        /* Current pattern pointer */
     WORD wrt_mode;              /* Current writing mode    */
     UWORD color;                /* fill color */
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    UWORD bgcolor;              /* 16-bit palette index of the replace-mode background */
+#endif
 } VwkAttrib;
 
 
@@ -159,10 +165,41 @@ typedef struct {
 
 #if CONF_WITH_VDI_16BIT
 /* virtual workstation extension, used for VDI Trucolor (16-bit) support */
+#if CONF_WITH_VDI_NVDI_EXT
+/*
+ * pens 256 and up are not VDI pens: they hold the colours that were set by
+ * RGB value, a foreground and a background for each of the text, fill, line
+ * and marker colours
+ */
+#define VDI_PAL_RGB(kind, bg)   (256 + 2 * (kind) + (bg))
+#define VWKEXT_PALETTE  (256 + 8)
+#else
+#define VWKEXT_PALETTE  256
+#endif
+
 typedef struct {
-    UWORD palette[256];         /* pseudo-palette with pixel value RRRRRGGGGG0BBBBB */
+    UWORD palette[VWKEXT_PALETTE];  /* pseudo-palette with pixel value RRRRRGGGGG0BBBBB */
     WORD req_col[256][3];       /* requested colour */
 } VwkExt;
+#endif
+
+#if CONF_WITH_VDI_NVDI_EXT
+/* the kinds of colour of vs_fg_color() and friends */
+#define VDI_COL_TEXT    0
+#define VDI_COL_FILL    1
+#define VDI_COL_LINE    2
+#define VDI_COL_MARKER  3
+#define VDI_COL_RASTER  4
+#define VDI_COL_KINDS   5
+
+/* the colours of the NVDI calls, part of every workstation (see vdi_nvdicol.c) */
+typedef struct {
+    COLOR_RGB req[VDI_COL_KINDS][2];    /* [kind][0 foreground, 1 background]: the colour as asked for */
+    WORD pen[VDI_COL_KINDS][2];         /* the VDI pen: of a background and of the raster
+                                           colours, as set; of an RGB colour, the nearest */
+    UWORD rgbmask;                      /* bit 2*kind+bg: set by RGB value (16-bit screens) */
+    COLOR_RGB extra[4];                 /* highlight, minimum, maximum and weight colours */
+} VwkColors;
 #endif
 
 /* Structure to hold data for a virtual workstation */
@@ -235,6 +272,9 @@ struct Vwk_ {
     WORD outline_width;         /* the character width set (vst_width), 0 if natural */
     WORD outline_map;           /* character set of the text (vst_charmap), VDI_FT_MAP_* */
     WORD outline_skew;          /* vst_skew(), tenths of a degree */
+#endif
+#if CONF_WITH_VDI_NVDI_EXT
+    VwkColors col;              /* see vdi_nvdicol.c */
 #endif
 };
 
@@ -467,6 +507,45 @@ void vdi_vqt_fontinfo(Vwk *);       /* 131 */
 
 #if CONF_WITH_EXTENDED_MOUSE
 void vdi_vex_wheelv(Vwk *);         /* 134 */
+#endif
+
+#if CONF_WITH_VDI_NVDI_EXT
+/* vdi_col.c: pens and their requested colours */
+void vdi_pen_request(Vwk *vwk, WORD pen, WORD *rgb);
+WORD vdi_nearest_pen_in(Vwk *vwk, const COLOR_RGB *c);
+
+/* vdi_nvdicol.c: the NVDI colour calls */
+void vdi_color_init(Vwk *vwk);
+ULONG vdi_px_format(void);
+ULONG vdi_rgb_to_value(const COLOR_RGB *c);
+WORD vdi_nearest_pen(const COLOR_RGB *c);
+void vdi_pen_rgb(Vwk *vwk, WORD pen, COLOR_RGB *c);
+void vdi_v_setrgb(Vwk *);           /* 138 */
+void vdi_vs_fg_color(Vwk *);        /* 200 */
+void vdi_vs_bg_color(Vwk *);        /* 201 */
+void vdi_vq_fg_color(Vwk *);        /* 202 */
+void vdi_vq_bg_color(Vwk *);        /* 203 */
+void vdi_color_entry(Vwk *);        /* 204 */
+void vdi_vs_x_color(Vwk *);         /* 207 */
+void vdi_vq_x_color(Vwk *);         /* 209 */
+
+/*
+ * the VDI pen of a colour field of the workstation (text_color and
+ * friends): an RGB colour on a 16-bit screen keeps a pseudo-pen above 255
+ * there, and the pen for the attribute inquiries is kept beside it
+ */
+#define VDI_FG_BY_PEN(vwk, kind) ((vwk)->col.rgbmask &= (UWORD)~(1U << (2 * (kind))))
+#define VDI_PEN_OF(vwk, kind, color) \
+    ((UWORD)(color) > 255 ? (vwk)->col.pen[kind][0] : REV_MAP_COL[color])
+
+#if CONF_WITH_VDI_16BIT
+/*
+ * the 16-bit palette index of the background of text and of lines, set
+ * while a call draws with them; 0 (pen 0) otherwise, as for line-A
+ */
+extern UWORD vdi_bg_text, vdi_bg_line;
+UWORD vdi_bg_index(const Vwk *vwk, WORD kind);
+#endif
 #endif
 
 #if CONF_WITH_VDI_TEXT_SPEEDUP

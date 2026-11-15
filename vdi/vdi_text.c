@@ -458,6 +458,9 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
     }
 
     TEXTFG = vwk->text_color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    vdi_bg_text = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_TEXT) : 0;
+#endif
     DELY = fnt_ptr->form_height;
 
 #if CONF_WITH_VDI_TEXT_SPEEDUP
@@ -1051,6 +1054,9 @@ void vdi_vst_color(Vwk * vwk)
 
     INTOUT[0] = r;
     vwk->text_color = MAP_COL[r];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_TEXT);
+#endif
 }
 
 
@@ -1063,7 +1069,11 @@ void vdi_vqt_attributes(Vwk * vwk)
     fnt_ptr = vwk->cur_font;
 
     *pointer++ = fnt_ptr->font_id;      /* INTOUT[0] */
+#if CONF_WITH_VDI_NVDI_EXT
+    *pointer++ = VDI_PEN_OF(vwk, VDI_COL_TEXT, vwk->text_color);   /* INTOUT[1] */
+#else
     *pointer++ = REV_MAP_COL[vwk->text_color];     /* INTOUT[1] */
+#endif
     *pointer++ = vwk->chup;        /* INTOUT[2] */
     *pointer++ = vwk->h_align;     /* INTOUT[3] */
     *pointer++ = vwk->v_align;     /* INTOUT[4] */

@@ -152,7 +152,15 @@ static const struct vdi_xjmptab jmptb3[] = {
     { 253, VDI_ANY_SUBOP, 0,  1, vdi_vst_skew },
 #endif
 #if CONF_WITH_VDI_NVDI_EXT
-    /* the NVDI colour, raster and bitmap calls are added here */
+    /* the NVDI colour calls, in vdi_nvdicol.c; the raster and bitmap calls are added here */
+    { 138, VDI_ANY_SUBOP, 0,  0, vdi_v_setrgb },
+    { 200, VDI_ANY_SUBOP, 0,  1, vdi_vs_fg_color },
+    { 201, VDI_ANY_SUBOP, 0,  1, vdi_vs_bg_color },
+    { 202, VDI_ANY_SUBOP, 0,  6, vdi_vq_fg_color },
+    { 203, VDI_ANY_SUBOP, 0,  6, vdi_vq_bg_color },
+    { 204, VDI_ANY_SUBOP, 0,  0, vdi_color_entry },         /* sets 2, 6, 6 or 4 of intout */
+    { 207, VDI_ANY_SUBOP, 0,  1, vdi_vs_x_color },
+    { 209, VDI_ANY_SUBOP, 0,  6, vdi_vq_x_color },
 #endif
     { 0,   VDI_ANY_SUBOP, 0,  0, NULL }                     /* end of table */
 };
@@ -207,6 +215,15 @@ void screen(void)
             vwk->multifill = 0;
     }
 
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    /*
+     * the 16-bit drawing routines read the colours of CUR_WORK: it is this
+     * workstation while the call runs, not the one of the previous call
+     */
+    if (vwk && TRUECOLOR_MODE)
+        CUR_WORK = vwk;
+#endif
+
     if ((opcode >= V_OPNWK_OP) && (opcode < V_OPNWK_OP+JMPTB1_ENTRIES)) {
         jmptab = &jmptb1[opcode - V_OPNWK_OP];
     }
@@ -228,6 +245,11 @@ void screen(void)
     contrl[2] = jmptab->nptsout;
     contrl[4] = jmptab->nintout;
     (*jmptab->op) (vwk);
+
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    /* line-A draws with pen 0 as the background */
+    vdi_bg_text = vdi_bg_line = 0;
+#endif
 
     /*
      * at this point, for v_opnwk() and v_opnvwk(), vwk is NULL.  we

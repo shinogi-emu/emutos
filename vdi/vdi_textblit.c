@@ -763,7 +763,11 @@ static void direct_screen_blit16(WORD count, WORD *str)
 
     palette = CUR_WORK->ext->palette;
     fgcol = palette[TEXTFG];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_text];
+#else
     bgcol = palette[0];
+#endif
 
     dst = get_start_addr16(DESTX, DESTY);
 
@@ -1041,7 +1045,11 @@ static void screen_blit16(LOCALVARS *vars)
      */
     palette = CUR_WORK->ext->palette;
     fgcol = palette[vars->forecol];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_text];
+#else
     bgcol = palette[0];
+#endif
 
     switch(vars->WRT_MODE) {
     /*

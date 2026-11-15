@@ -76,6 +76,9 @@ void vdi_vsm_color(Vwk * vwk)
     i = validate_color_index(INTIN[0]);
     INTOUT[0] = i;
     vwk->mark_color = MAP_COL[i];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_MARKER);
+#endif
 }
 
 
@@ -169,7 +172,11 @@ void vdi_v_pmarker(Vwk * vwk)
 void vdi_vqm_attributes(Vwk * vwk)
 {
     INTOUT[0] = vwk->mark_index;
+#if CONF_WITH_VDI_NVDI_EXT
+    INTOUT[1] = VDI_PEN_OF(vwk, VDI_COL_MARKER, vwk->mark_color);
+#else
     INTOUT[1] = REV_MAP_COL[vwk->mark_color];
+#endif
     INTOUT[2] = vwk->wrt_mode + 1;
 
     PTSOUT[0] = 0;

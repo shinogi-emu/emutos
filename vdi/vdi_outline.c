@@ -757,6 +757,9 @@ static void blit(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LO
     CLIP = 0;                   /* clipped above */
     WRT_MODE = vwk->wrt_mode;
     TEXTFG = vwk->text_color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    vdi_bg_text = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_TEXT) : 0;
+#endif
     SCRTCHP = vwk->scrtchp;
     SCRPT2 = vwk->scrpt2;
 
