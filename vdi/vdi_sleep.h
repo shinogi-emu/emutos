@@ -40,7 +40,17 @@
  * only one that may swap, and two programs can each sleep inside a call.
  * Do not make one OS call from the middle of another bracket; make the
  * pair part of the one function that makes the OS call, so that no path
- * can miss the end.
+ * can miss the end.  The pair works outside a VDI call too (the NVDI font
+ * vectors, vq_vgdos), and the OS call itself must keep nothing in statics
+ * across its sleep (hence the traps of vdi_ftos.c and vdi_kept.c, not
+ * trap1()).  A static of the VDI that is set before an OS call and read
+ * after it is not saved: no code may do that (set it after the call).
+ * End leaves CUR_WORK alone when its workstation was closed meanwhile.
+ *
+ * Known limits: the waits of request-mode input (Bconin() in v_choice,
+ * v_string, vrq_locator) and of the escapes' Bconout() are not bracketed;
+ * they are in calls that act on the screen and the text console, which the
+ * bitmaps do not touch, and they block the VDI as they always did.
  *
  * Not saved: the rest of vdishare (the PTSIN points past the fourth, the
  * fill buffer, the text scratch buffer), which no call holds across an OS
@@ -54,6 +64,7 @@
 typedef struct {
     WORD *pb[5];                /* CONTRL, INTIN, PTSIN, INTOUT, PTSOUT */
     void *cur_work;
+    WORD cur_handle;            /* its handle, to see that it is still open */
     WORD flip_y;
     WORD ptsin[8];              /* the first four points of the copy of PTSIN */
     void *vwk;                  /* the bitmap workstation in use, or NULL */

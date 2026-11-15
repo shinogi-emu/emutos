@@ -19,6 +19,7 @@ void screen(void);
 
 
 WORD flip_y;                    /* True if magnitudes being returned */
+extern Vwk phys_work;           /* attribute area for physical workstation */
 
 typedef void (*VDI_OP_T)(Vwk *); /* Pointer type to VDI operation */
 #define vdi_v_nop ((VDI_OP_T)just_rts) /* VDI dummy operation */
@@ -195,6 +196,7 @@ void vdi_sleep_begin(VdiSleepState *state)
     state->pb[3] = INTOUT;
     state->pb[4] = PTSOUT;
     state->cur_work = CUR_WORK;
+    state->cur_handle = CUR_WORK ? CUR_WORK->handle : 0;
     state->flip_y = flip_y;
     memcpy(state->ptsin, vdishare.main.local_ptsin, sizeof(state->ptsin));
     state->vwk = NULL;
@@ -210,7 +212,10 @@ void vdi_sleep_end(VdiSleepState *state)
     PTSIN = state->pb[2];
     INTOUT = state->pb[3];
     PTSOUT = state->pb[4];
-    CUR_WORK = (Vwk *)state->cur_work;
+    /* not a workstation that was closed meanwhile (the physical one never is) */
+    if (state->cur_work == NULL || state->cur_work == (void *)&phys_work ||
+        get_vwk_by_handle(state->cur_handle) == (Vwk *)state->cur_work)
+        CUR_WORK = (Vwk *)state->cur_work;
     flip_y = state->flip_y;
     memcpy(vdishare.main.local_ptsin, state->ptsin, sizeof(state->ptsin));
 #if CONF_WITH_VDI_NVDI_EXT

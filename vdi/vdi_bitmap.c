@@ -34,6 +34,7 @@
 #include "tosvars.h"
 #include "gsxdefs.h"
 #include "vdi_sleep.h"
+#include "vdi_kept.h"
 
 #if CONF_WITH_VDI_NVDI_EXT
 
@@ -64,21 +65,14 @@ WORD vdi_bm_xres, vdi_bm_yres;  /* the size of the bitmap in use, less one */
 static void *bm_alloc(LONG size)
 {
     LONG block;
-    VdiSleepState sw;
 
-    vdi_sleep_begin(&sw);
-    block = Mxalloc(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
-    vdi_sleep_end(&sw);
+    block = vdi_os_mxalloc(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
     return block ? (void *)block : NULL;
 }
 
 static void bm_free(void *block)
 {
-    VdiSleepState sw;
-
-    vdi_sleep_begin(&sw);
-    Mfree(block);
-    vdi_sleep_end(&sw);
+    vdi_os_mfree(block);
 }
 
 

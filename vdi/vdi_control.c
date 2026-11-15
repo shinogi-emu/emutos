@@ -21,6 +21,7 @@
 #include "intmath.h"
 #include "bdosbind.h"
 #include "tosvars.h"
+#include "vdi_kept.h"
 
 #define FIRST_VDI_HANDLE    1
 #define LAST_VDI_HANDLE     (FIRST_VDI_HANDLE+NUM_VDI_HANDLES-1)
@@ -472,14 +473,8 @@ void vdi_v_opnvwk(Vwk * vwk)
     if (TRUECOLOR_MODE)
         size += sizeof(VwkExt); /* for simplicity, allocate them together */
 #endif
-#if CONF_WITH_VDI_NVDI_EXT
-    {
-        VdiSleepState sw;
-
-        vdi_sleep_begin(&sw);       /* the call may sleep */
-        vwk = (Vwk *)Mxalloc(size, MX_SUPER);
-        vdi_sleep_end(&sw);
-    }
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    vwk = (Vwk *)vdi_os_mxalloc(size, MX_SUPER);    /* may sleep: see vdi_sleep.h */
 #else
     vwk = (Vwk *)Mxalloc(size, MX_SUPER);
 #endif
@@ -538,13 +533,9 @@ void vdi_v_clsvwk(Vwk * vwk)
 
 #if CONF_WITH_VDI_NVDI_EXT
     vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
-    {
-        VdiSleepState sw;
-
-        vdi_sleep_begin(&sw);       /* the call may sleep */
-        Mfree(vwk);
-        vdi_sleep_end(&sw);
-    }
+#endif
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    vdi_os_mfree(vwk);          /* may sleep: see vdi_sleep.h */
 #else
     Mfree(vwk);
 #endif
@@ -638,19 +629,20 @@ void vdi_v_clswk(Vwk * vwk)
     /* close all open virtual workstations */
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
         if (*p) {
-#if CONF_WITH_VDI_NVDI_EXT
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
             {
-                VdiSleepState sw;
+                Vwk *closing = *p;
 
-                vdi_bitmap_release(*p);
-                vdi_sleep_begin(&sw);       /* the call may sleep */
-                Mfree(*p);
-                vdi_sleep_end(&sw);
+                *p = NULL;          /* closed before the call that may sleep */
+#if CONF_WITH_VDI_NVDI_EXT
+                vdi_bitmap_release(closing);
+#endif
+                vdi_os_mfree(closing);
             }
 #else
             Mfree(*p);
-#endif
             *p = NULL;
+#endif
         }
     }
     CUR_WORK = vwk_ptr[VDI_PHYS_HANDLE];

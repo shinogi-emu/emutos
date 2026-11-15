@@ -108,10 +108,12 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
  *   fonts are drawn in the system font until the next boot.  Clearing the
  *   flag then is not safe, as the engine may have been left halfway through
  *   a change to its caches;
- * - like any VDI call under such a system, a call that sleeps here can have
- *   CONTRL, INTIN, PTSIN, INTOUT and PTSOUT repointed by the VDI call of
- *   another program, and then write its results there.  The coordinates are
- *   read before the engine is called, which narrows this for v_gtext().
+ * - the state of a call that sleeps here (the parameter block, the current
+ *   workstation, the first points of PTSIN) is kept and put back by
+ *   vdi_sleep_begin() and vdi_sleep_end() around every OS call (see
+ *   vdi_sleep.h); a static of this file that is set before a call into
+ *   the engine and read after it is wrong, as another program's call can
+ *   set it meanwhile.
  */
 
 static LONG font_stack[FONT_STACK_SIZE / sizeof(LONG)];

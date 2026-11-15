@@ -32,7 +32,7 @@
  * call can sleep while another program's VDI call goes through trap1().
  * These keep nothing outside the stack.  GEMDOS may change d0-d2 and a0-a2.
  */
-static LONG os_mxalloc(LONG size, WORD mode)
+LONG vdi_os_mxalloc(LONG size, WORD mode)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
@@ -55,7 +55,7 @@ static LONG os_mxalloc(LONG size, WORD mode)
     }
 }
 
-static void os_mfree(void *block)
+void vdi_os_mfree(void *block)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
@@ -102,13 +102,13 @@ void *vdi_alloc_kept(LONG size)
 
     if (vdi_other_gemdos())
     {
-        block = (void *)os_mxalloc(size, MX_KEEP_MODE);
+        block = (void *)vdi_os_mxalloc(size, MX_KEEP_MODE);
         if ((LONG)block <= 0)
             return NULL;
         return block;
     }
 
-    block = (void *)os_mxalloc(size, MX_PREFTTRAM);
+    block = (void *)vdi_os_mxalloc(size, MX_PREFTTRAM);
     if ((LONG)block <= 0)
         return NULL;
     bdos_keep_block(block);
@@ -119,7 +119,7 @@ void *vdi_alloc_kept(LONG size)
 
 void vdi_free_kept(void *block)
 {
-    os_mfree(block);
+    vdi_os_mfree(block);
 }
 
 
@@ -135,7 +135,7 @@ void *vdi_alloc_readable(LONG size)
     if (!vdi_other_gemdos())
         return vdi_alloc_kept(size);    /* EmuTOS's own GEMDOS protects nothing */
 
-    block = (void *)os_mxalloc(size, MX_READABLE_MODE);
+    block = (void *)vdi_os_mxalloc(size, MX_READABLE_MODE);
     if ((LONG)block <= 0)
         return NULL;
 

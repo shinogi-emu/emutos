@@ -21,4 +21,12 @@ void *vdi_alloc_kept(LONG size);
 void vdi_free_kept(void *block);
 void *vdi_alloc_readable(LONG size);    /* every program can read it */
 
+/*
+ * GEMDOS Mxalloc() and Mfree() with a trap of their own, bracketed as
+ * vdi_sleep.h says: for the workstations and bitmaps, which belong to
+ * the calling program
+ */
+LONG vdi_os_mxalloc(LONG size, WORD mode);
+void vdi_os_mfree(void *block);
+
 #endif /* VDI_KEPT_H */

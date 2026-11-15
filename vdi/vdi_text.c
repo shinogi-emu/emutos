@@ -173,9 +173,13 @@ static WORD calc_width(Vwk *vwk, WORD cnt, WORD *str)
     if (outline_font_selected(vwk))     /* effects included */
     {
         if (outline_text_width(vwk, cnt, str, &width))
+        {
+            /* set after the engine has been called: it can sleep, and another program can set it meanwhile */
+            measured_in_system_font = FALSE;
             return width;
+        }
         /* the engine cannot measure it now: measure it in the system font */
-        measured_in_system_font = TRUE;
+        measured_in_system_font = TRUE;     /* (after the call, as above) */
         fnt_ptr = def_font;
         table_start = fnt_ptr->first_ade;
     }
@@ -1615,6 +1619,7 @@ void vdi_v_ftext(Vwk * vwk)
 {
     WORD count = CONTRL[3], offsets = CONTRL[1] - 1, i, h_align;
     WORD *off;
+    BOOL owner;
     LONG x, y, width, sx = 0, sy = 0;
 
     if ((offsets <= 0) || (count <= 0)) {
@@ -1629,18 +1634,22 @@ void vdi_v_ftext(Vwk * vwk)
      * VDI's copy of the points, which shares vdishare with other things
      * (the text scratch buffer, and what another program's VDI call puts
      * there while this one sleeps in the outline font engine).  If
-     * another call is using the buffer, the string is drawn as v_gtext()
-     * draws it; a string too long for it is cut short.
+     * another call is using the buffer, its owner sleeps in the font
+     * engine and holds the font stack: this call cannot sleep there, and
+     * keeps the offsets in vdishare past the scratch area.  A string too
+     * long for the room is cut short.
      */
-    if (ftext_offs_busy) {
-        output_text(vwk, count, INTIN, -1, NULL);
-        return;
-    }
     if (count > FTEXT_MAX_OFFS)
         count = FTEXT_MAX_OFFS;
-    off = ftext_offs;
-    memcpy(off, PTSIN + 2, count * 2 * sizeof(WORD));
-    ftext_offs_busy = TRUE;
+    owner = !ftext_offs_busy;
+    if (owner) {
+        off = ftext_offs;
+        memcpy(off, PTSIN + 2, count * 2 * sizeof(WORD));
+        ftext_offs_busy = TRUE;
+    } else {
+        off = PTSIN + SCRATCHBUF_SIZE/sizeof(WORD);
+        memmove(off, PTSIN + 2, count * 2 * sizeof(WORD));
+    }
 
     if (vwk->h_align) {
         for (i = 0, width = 0; i < count; i++)
@@ -1676,7 +1685,8 @@ void vdi_v_ftext(Vwk * vwk)
         output_text(vwk, 1, &INTIN[i], -1, NULL);
     }
     vwk->h_align = h_align;
-    ftext_offs_busy = FALSE;
+    if (owner)
+        ftext_offs_busy = FALSE;
 }
 
 
