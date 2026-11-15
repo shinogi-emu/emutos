@@ -107,8 +107,8 @@ static VdiOutlineFont unsized;
  * past the bottom, it overwrites the canary below it, which is checked
  * after every call: the engine is then turned off for good, as nothing it
  * holds can be trusted.  The flags are kept above the stack, out of an
- * overflow's reach, and the canary and a scratch buffer keep what lies
- * below the stack (the allocator's state) at a distance.
+ * overflow's reach, and the canary and a scratch buffer keep whatever the
+ * linker puts below the stack (other variables of the VDI) at a distance.
  *
  * The engine is not reentrant, and the font stack is used by one call at a
  * time.  Under EmuTOS's own GEMDOS nothing can come in while a call is on
