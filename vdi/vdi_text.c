@@ -1600,7 +1600,7 @@ WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font)
 void vdi_v_ftext(Vwk * vwk)
 {
     WORD count = CONTRL[3], offsets = CONTRL[1] - 1, i, h_align;
-    WORD *off = PTSIN + 2;
+    WORD *off;
     LONG x, y, width, sx = 0, sy = 0;
 
     if ((offsets <= 0) || (count <= 0)) {
@@ -1609,6 +1609,18 @@ void vdi_v_ftext(Vwk * vwk)
     }
     if (count > offsets)
         count = offsets;
+
+    /*
+     * PTSIN is the VDI's copy of the points, which shares vdishare with
+     * the default text scratch buffer (vdishare.deftxbuf): text_blt()
+     * writes there for effects, rotation and scaling.  The offsets are
+     * moved past it before anything is drawn; a string too long for the
+     * room left is cut short.
+     */
+    if (count > (2*MAX_VERTICES - SCRATCHBUF_SIZE/(WORD)sizeof(WORD)) / 2)
+        count = (2*MAX_VERTICES - SCRATCHBUF_SIZE/(WORD)sizeof(WORD)) / 2;
+    off = PTSIN + SCRATCHBUF_SIZE/sizeof(WORD);
+    memmove(off, PTSIN + 2, count * 2 * sizeof(WORD));
 
     if (vwk->h_align) {
         for (i = 0, width = 0; i < count; i++)
@@ -1632,10 +1644,6 @@ void vdi_v_ftext(Vwk * vwk)
         }
     }
 
-    /*
-     * the offsets are read before the character they move is drawn: the
-     * underline of one uses PTSIN[0-3]
-     */
     h_align = vwk->h_align;
     vwk->h_align = 0;
     x = PTSIN[0];

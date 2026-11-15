@@ -37,12 +37,10 @@
 #include "lineavars.h"
 #include "biosext.h"
 #include "vdi_ft2.h"
-#include "vdi_ftmem.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 
 #define GDOS_FSM            0x5F46534DL /* '_FSM': SpeedoGDOS, or NVDI with vector fonts */
-#define COOKIE_MINT         0x4d694e54L /* 'MiNT' */
 
 #define NVDI_VERSION        0x0501
 #define NVDI_DATE           0x13052005L /* the date fVDI gives, 13 May 2005 */
@@ -95,56 +93,18 @@ LONG vdi_gdos_version(void)
 
 
 /*
- * Pgetppid(), MiNT's GEMDOS 0x10C, with its own trap: trap1() keeps the
- * caller's return address in a static variable, which another VDI call
- * would change while this one sleeps in GEMDOS
- */
-static LONG pgetppid(void)
-{
-    register LONG ret __asm__("d0");
-
-    __asm__ volatile
-    ("move.w  #0x10c,-(%%sp)\n\t"
-     "trap    #1\n\t"
-     "addq.l  #2,%%sp"
-    : "=r"(ret)                                 /* outputs */
-    :                                           /* inputs */
-    : "d1", "d2", "a0", "a1", "a2", "cc", "memory"      /* clobbered */
-    );
-
-    return ret;
-}
-
-
-/*
- * TRUE for a process that the MiNT kernel started itself, such as XaAES's
- * AES thread: its parent is process 0
- */
-static BOOL mint_kernel_process(void)
-{
-    ULONG value;
-
-    if (!cookie_get(COOKIE_MINT, &value))
-        return FALSE;
-
-    return pgetppid() == 0;
-}
-
-
-/*
  * vq_vgdos() through this VDI's own trap #2 (vdi_asm.S)
  *
- * The system itself is told there is no GDOS, as before outline fonts.
- * Under MiNT, the VDI is called from inside the kernel, so the caller's
- * mode does not tell the system from a program; a process the kernel
- * started itself does.  XaAES asks during its start, from its AES thread,
- * and on a GDOS answer calls vst_load_fonts(): reading the fonts folder
- * from there upsets the kernel (XaAES then fails to load its resource
- * file).  The programs that XaAES or a shell starts get the answer.
+ * A process the MiNT kernel started itself is told there is no GDOS, as
+ * before outline fonts: XaAES asks during its start, from its AES thread,
+ * and keeps to the system font then.  Under MiNT the VDI is called from
+ * inside the kernel, so the caller's mode does not tell the system from a
+ * program; the parent does (vdi_kernel_process()).  That thread could not
+ * scan the fonts folder anyway (vdi_outline.c).
  */
 LONG vdi_trap_gdos_version(void)
 {
-    if (mint_kernel_process())
+    if (vdi_kernel_process())
         return -2L;
 
     return vdi_gdos_version();
@@ -161,12 +121,12 @@ void nvdi_add_cookie(void)
         return;
 
     /*
-     * Programs read it as they find it, so it lives in memory that is kept
-     * and readable from any program, as the engine's
+     * Programs read it in user mode, so it lives in a block that is kept
+     * and that every program can read, as fVDI's (Mxalloc mode 0x4043)
      */
     if (!c)
     {
-        c = ftmem_os_alloc(sizeof(NvdiCookie));
+        c = vdi_alloc_readable(sizeof(NvdiCookie));
         if (!c)
             return;
         bzero(c, sizeof(NvdiCookie));

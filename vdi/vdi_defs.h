@@ -506,6 +506,10 @@ BOOL outline_fonts_present(void);
 LONG outline_rescan(char **dirs, LONG count);
 const char *outline_font_dir(void);
 
+/* vdi_ftos.c: a kept block that every program can read; is the caller part of MiNT? */
+void *vdi_alloc_readable(LONG size);
+BOOL vdi_kernel_process(void);
+
 /* vdi_text.c, for the NVDI calls */
 void text_size_out(Vwk *vwk);
 const Fonthead *text_font_number(Vwk *vwk, WORD n);

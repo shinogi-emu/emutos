@@ -13,6 +13,7 @@
 #include "cookie.h"
 #include "vdi_ftos.h"
 #include "vdi_ftmem.h"
+#include "vdi_defs.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 
@@ -28,9 +29,123 @@
 /*
  * Mxalloc() mode used under MiNT and MagiC: prefer TT-RAM, keep the block
  * when its owner terminates (0x4000) and make it accessible from supervisor
- * mode (0x30), as fVDI does for its own memory.
+ * mode only (0x30), as fVDI does for its own memory.
  */
 #define MX_KEEP_MODE    (MX_PREFTTRAM | 0x4030)
+
+/* the same, but readable by every program (0x40), as fVDI's cookie data */
+#define MX_READABLE_MODE (MX_PREFTTRAM | 0x4040)
+
+
+/*
+ * GEMDOS with a trap of its own
+ *
+ * trap1() keeps its caller's return address and two registers in static
+ * variables.  Under a multitasking GEMDOS, a call from the font engine can
+ * sleep in a file read while another program's VDI call goes through
+ * trap1(), which then returns the first one to the wrong place.  These
+ * keep nothing outside the stack.  GEMDOS may change d0-d2 and a0-a2.
+ */
+#define GEMDOS_CLOBBERS "d1", "d2", "a0", "a1", "a2", "cc", "memory"
+
+static LONG gemdos_w(WORD fn)
+{
+    register LONG ret __asm__("d0");
+
+    __asm__ volatile
+    ("move.w  %1,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "addq.l  #2,%%sp"
+    : "=r"(ret) : "r"(fn) : GEMDOS_CLOBBERS);
+
+    return ret;
+}
+
+static LONG gemdos_ww(WORD fn, WORD a)
+{
+    register LONG ret __asm__("d0");
+
+    __asm__ volatile
+    ("move.w  %2,-(%%sp)\n\t"
+     "move.w  %1,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "addq.l  #4,%%sp"
+    : "=r"(ret) : "r"(fn), "r"(a) : GEMDOS_CLOBBERS);
+
+    return ret;
+}
+
+static LONG gemdos_wl(WORD fn, LONG a)
+{
+    register LONG ret __asm__("d0");
+
+    __asm__ volatile
+    ("move.l  %2,-(%%sp)\n\t"
+     "move.w  %1,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "addq.l  #6,%%sp"
+    : "=r"(ret) : "r"(fn), "r"(a) : GEMDOS_CLOBBERS);
+
+    return ret;
+}
+
+static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
+{
+    register LONG ret __asm__("d0");
+
+    __asm__ volatile
+    ("move.w  %3,-(%%sp)\n\t"
+     "move.l  %2,-(%%sp)\n\t"
+     "move.w  %1,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "addq.l  #8,%%sp"
+    : "=r"(ret) : "r"(fn), "r"(a), "r"(b) : GEMDOS_CLOBBERS);
+
+    return ret;
+}
+
+static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
+{
+    register LONG ret __asm__("d0");
+
+    __asm__ volatile
+    ("move.w  %4,-(%%sp)\n\t"
+     "move.w  %3,-(%%sp)\n\t"
+     "move.l  %2,-(%%sp)\n\t"
+     "move.w  %1,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "lea     10(%%sp),%%sp"
+    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c) : GEMDOS_CLOBBERS);
+
+    return ret;
+}
+
+static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
+{
+    register LONG ret __asm__("d0");
+
+    __asm__ volatile
+    ("move.l  %4,-(%%sp)\n\t"
+     "move.l  %3,-(%%sp)\n\t"
+     "move.w  %2,-(%%sp)\n\t"
+     "move.w  %1,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "lea     12(%%sp),%%sp"
+    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c) : GEMDOS_CLOBBERS);
+
+    return ret;
+}
+
+#define os_setdta(dta)              gemdos_wl(0x1a, (LONG)(dta))
+#define os_getdta()                 ((void *)gemdos_w(0x2f))
+#define os_open(name, mode)         gemdos_wlw(0x3d, (LONG)(name), mode)
+#define os_close(handle)            gemdos_ww(0x3e, handle)
+#define os_read(handle, count, buf) gemdos_wwll(0x3f, handle, count, (LONG)(buf))
+#define os_seek(offset, handle, mode) gemdos_wlww(0x42, offset, handle, mode)
+#define os_mxalloc(size, mode)      gemdos_wlw(0x44, size, mode)
+#define os_mfree(block)             gemdos_wl(0x49, (LONG)(block))
+#define os_sfirst(spec, attr)       gemdos_wlw(0x4e, (LONG)(spec), attr)
+#define os_snext()                  gemdos_w(0x4f)
 
 /*
  * the memory is shared by all programs: the engine keeps its caches (sized
@@ -43,6 +158,26 @@ static BOOL other_gemdos(void)
     ULONG value;
 
     return cookie_get(COOKIE_MINT, &value) || cookie_get(COOKIE_MAGX, &value);
+}
+
+
+/*
+ * TRUE when the VDI is called by a process that the MiNT kernel started
+ * itself (its parent is process 0), such as XaAES's AES thread
+ *
+ * Such a process must not search folders through GEMDOS: when XaAES's AES
+ * thread scanned the fonts folder during XaAES's start, XaAES then read
+ * its resource file wrongly and gave up.  Reading files and starting
+ * FreeType there did not do it; the Fsfirst()/Fsnext() walk alone did.
+ */
+BOOL vdi_kernel_process(void)
+{
+    ULONG value;
+
+    if (!cookie_get(COOKIE_MINT, &value))
+        return FALSE;
+
+    return gemdos_w(0x10c) == 0;        /* Pgetppid() */
 }
 
 
@@ -61,15 +196,36 @@ static void *alloc_kept(LONG size)
 
     if (other_gemdos())
     {
-        block = (void *)Mxalloc(size, MX_KEEP_MODE);
+        block = (void *)os_mxalloc(size, MX_KEEP_MODE);
         if ((LONG)block <= 0)
             return NULL;
         return block;
     }
 
-    block = dos_alloc_anyram(size);
-    if (block)
-        bdos_keep_block(block);
+    block = (void *)os_mxalloc(size, MX_PREFTTRAM);
+    if ((LONG)block <= 0)
+        return NULL;
+    bdos_keep_block(block);
+
+    return block;
+}
+
+
+/*
+ * a block that lives until it is freed and that every program can read,
+ * for data programs are given a pointer to (the NVDI cookie): under MiNT
+ * with memory protection, the engine's blocks are for supervisor mode only
+ */
+void *vdi_alloc_readable(LONG size)
+{
+    void *block;
+
+    if (!other_gemdos())
+        return alloc_kept(size);    /* EmuTOS's own GEMDOS protects nothing */
+
+    block = (void *)os_mxalloc(size, MX_READABLE_MODE);
+    if ((LONG)block <= 0)
+        return NULL;
 
     return block;
 }
@@ -90,7 +246,7 @@ void *ftmem_os_alloc(ULONG size)
 
 void ftmem_os_free(void *block)
 {
-    dos_free(block);
+    os_mfree(block);
 }
 
 
@@ -123,19 +279,19 @@ void *vdi_font_file_load(const char *path, ULONG *size)
     WORD fh;
     void *data;
 
-    ret = dos_open((char *)path, 0);
+    ret = os_open(path, 0);
     if (ret < 0)
         return NULL;
     fh = (WORD)ret;
 
     data = NULL;
-    length = dos_lseek(fh, 2, 0L);          /* seek to the end */
-    if ((length > 0) && (dos_lseek(fh, 0, 0L) == 0))
+    length = os_seek(0L, fh, 2);            /* seek to the end */
+    if ((length > 0) && (os_seek(0L, fh, 0) == 0))
     {
         data = vdi_ft_alloc(length);
         if (data)
         {
-            if (dos_read(fh, length, data) == length)
+            if (os_read(fh, length, data) == length)
             {
                 if (size)
                     *size = length;
@@ -147,7 +303,7 @@ void *vdi_font_file_load(const char *path, ULONG *size)
             }
         }
     }
-    dos_close(fh);
+    os_close(fh);
 
     return data;
 }
@@ -207,14 +363,14 @@ static LONG scan_folder(char *path, WORD len, WORD depth,
     if (len + 5 > SCAN_PATH_LEN)        /* backslash, "*.*" and NUL */
         return -1;
 
-    olddta = dos_gdta();
-    dos_sdta(&dta);
+    olddta = os_getdta();
+    os_setdta(&dta);
 
     strcpy(path + len, "\\*.*");
-    ret = dos_sfirst(path, FA_SUBDIR);
+    ret = (WORD)os_sfirst(path, FA_SUBDIR);
     if ((ret < 0) && (depth == 0))
     {
-        dos_sdta(olddta);
+        os_setdta(olddta);
         path[len] = '\0';
         return ret;
     }
@@ -234,7 +390,7 @@ static LONG scan_folder(char *path, WORD len, WORD depth,
                                          found, ctx);
                     if (n > 0)
                         count += n;
-                    dos_sdta(&dta);     /* the recursion changed the DTA */
+                    os_setdta(&dta);    /* the recursion changed the DTA */
                 }
             }
             else if (!(dta.d_attrib & FA_VOL) && is_font_name(dta.d_fname))
@@ -243,11 +399,11 @@ static LONG scan_folder(char *path, WORD len, WORD depth,
                 count++;
             }
         }
-        ret = dos_snext();
+        ret = (WORD)os_snext();
     }
 
     path[len] = '\0';
-    dos_sdta(olddta);
+    os_setdta(olddta);
 
     return count;
 }
