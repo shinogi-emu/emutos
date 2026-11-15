@@ -1819,11 +1819,15 @@
  * Set CONF_WITH_VDI_OUTLINE_FONTS to 1 to build FreeType and the VDI
  * outline font engine, so that the VDI can draw scalable (TrueType and
  * OpenType) fonts found in C:\GEMSYS\FONTS.  FreeType is built with
- * 32-bit ints, and is large: this is only enabled by default for the
- * targets that run from RAM with plenty of memory.
+ * 32-bit ints, and is large: about 400 KB of code, and a 64 KB stack of
+ * its own in RAM.  So this is only enabled by default for the QEMU virt
+ * machine and the 1024 KB ROM image.  The PRG builds, which owners of
+ * machines with 1 MB of RAM run, and the smaller ROMs leave it out; add
+ * it with DEF="-DCONF_WITH_VDI_OUTLINE_FONTS=1" on the make command line,
+ * for example "make prg DEF=-DCONF_WITH_VDI_OUTLINE_FONTS=1".
  */
 #ifndef CONF_WITH_VDI_OUTLINE_FONTS
-# if defined(TARGET_QEMU_VIRT) || defined(TARGET_PRG)
+# if defined(TARGET_QEMU_VIRT) || defined(TARGET_1024)
 #  define CONF_WITH_VDI_OUTLINE_FONTS 1
 # else
 #  define CONF_WITH_VDI_OUTLINE_FONTS 0
