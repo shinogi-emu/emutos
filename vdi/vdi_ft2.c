@@ -794,6 +794,14 @@ static FT_Error load_glyph(Instance *in, UWORD ch, LONG map, CachedGlyph *cached
     }
 
     error = FT_Load_Glyph(face, cached->index, FT_LOAD_DEFAULT);
+    /*
+     * The hinting can fail where the outline does not: when the font's
+     * prep or fpgm program overruns the instruction limit, FreeType keeps
+     * that error for the size, and every glyph fails.  Such a glyph is
+     * drawn unhinted.  (Not for want of memory: that is the answer.)
+     */
+    if (error && (error != FT_Err_Out_Of_Memory))
+        error = FT_Load_Glyph(face, cached->index, FT_LOAD_NO_HINTING);
     if (error)
         return error;
 
