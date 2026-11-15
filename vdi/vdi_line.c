@@ -1458,6 +1458,11 @@ void linea_fill(void)
 }
 
 
+#if CONF_WITH_VDI_FASTDRAW
+static void polyline_single(Vwk * vwk, const Point * point, WORD color);
+#endif
+
+
 /*
  * vdi_v_pline - wrapper for polyline/wideline
  */
@@ -1476,6 +1481,11 @@ void vdi_v_pline(Vwk * vwk)
 #endif
     {
         if (vwk->line_width == 1) {
+#if CONF_WITH_VDI_FASTDRAW
+            if (count == 2)
+                polyline_single(vwk, point, vwk->line_color);
+            else
+#endif
             polyline(vwk, point, count, vwk->line_color);
             if ((vwk->line_beg | vwk->line_end) & ARROWED)
                 arrow(vwk, point, count);
@@ -1518,7 +1528,30 @@ static WORD clip_code(Vwk * vwk, WORD x, WORD y)
  * returns FALSE iff the line lies outside the clipping rectangle
  * otherwise, updates the contents of the Line structure & returns TRUE
  */
+#if CONF_WITH_VDI_FASTDRAW
+/* both end points of the line are inside the clipping rectangle: nothing to clip */
+static __inline__ BOOL line_inside_clip(const Vwk * vwk, const Line * line)
+{
+    const WORD xmn = vwk->xmn_clip, xmx = vwk->xmx_clip;
+    const WORD ymn = vwk->ymn_clip, ymx = vwk->ymx_clip;
+
+    return line->x1 >= xmn && line->x1 <= xmx && line->x2 >= xmn && line->x2 <= xmx &&
+           line->y1 >= ymn && line->y1 <= ymx && line->y2 >= ymn && line->y2 <= ymx;
+}
+
+static BOOL clip_line_general(Vwk * vwk, Line * line);
+
 BOOL clip_line(Vwk * vwk, Line * line)
+{
+    if (line_inside_clip(vwk, line))
+        return TRUE;
+    return clip_line_general(vwk, line);
+}
+
+static BOOL clip_line_general(Vwk * vwk, Line * line)
+#else
+BOOL clip_line(Vwk * vwk, Line * line)
+#endif
 {
     WORD deltax, deltay, x1y1_clip_flag, x2y2_clip_flag, line_clip_flag;
     WORD *x, *y;
@@ -1556,6 +1589,37 @@ BOOL clip_line(Vwk * vwk, Line * line)
 }
 
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * polyline_single - polyline() of one segment
+ *
+ * the same steps for two points, without the loop and the registers it needs
+ */
+static void polyline_single(Vwk * vwk, const Point * point, WORD color)
+{
+    Line line;
+
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    /* the line background shows only in the gaps of a style: a solid line has none */
+    if (TRUECOLOR_MODE && LN_MASK != 0xffff)
+        vdi_bg_line = vdi_bg_index(vwk, VDI_COL_LINE);
+    else
+        vdi_bg_line = 0;
+#endif
+    LSTLIN = TRUE;
+    line.x1 = point[0].x;
+    line.y1 = point[0].y;
+    line.x2 = point[1].x;
+    line.y2 = point[1].y;
+
+    if (vwk->clip && !line_inside_clip(vwk, &line) && !clip_line_general(vwk, &line))
+        return;
+
+    abline(&line, vwk->wrt_mode, color);
+}
+#endif
+
+
 /*
  * polyline - draw a poly-line
  *
@@ -1568,7 +1632,15 @@ void polyline(Vwk * vwk, Point * point, int count, WORD color)
     Line line;
 
 #if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+#if CONF_WITH_VDI_FASTDRAW
+    /* the line background shows only in the gaps of a style: a solid line has none */
+    if (TRUECOLOR_MODE && LN_MASK != 0xffff)
+        vdi_bg_line = vdi_bg_index(vwk, VDI_COL_LINE);
+    else
+        vdi_bg_line = 0;
+#else
     vdi_bg_line = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_LINE) : 0;
+#endif
 #endif
     for (i = count-1, LSTLIN = FALSE; i > 0; i--) {
         if (i == 1)
@@ -1579,9 +1651,15 @@ void polyline(Vwk * vwk, Point * point, int count, WORD color)
         line.x2 = point->x;
         line.y2 = point->y;
 
-        if (vwk->clip)
+        if (vwk->clip) {
+#if CONF_WITH_VDI_FASTDRAW
+            if (!line_inside_clip(vwk, &line) && !clip_line_general(vwk, &line))
+                continue;
+#else
             if (!clip_line(vwk, &line))
                 continue;
+#endif
+        }
 
         abline(&line, vwk->wrt_mode, color);
     }
