@@ -27,10 +27,15 @@
  * When the system has no arena to give, a small request gets a block of
  * its own, like a large one.
  *
+ * Close to the bottom of the font stack of vdi_outline.c, nothing is given
+ * (outline_stack_low(), see VDI_FT_STACK_GUARD in vdi_ft2.h): the glyph
+ * being loaded is nested too deep, and fails as for want of memory.  The
+ * check is here, as every host's vdi_ft_alloc() comes here.
+ *
  * This file is compiled with 16-bit int, so every size is a ULONG.  It is
- * not reentrant, and need not be: ftmem_os_alloc() and ftmem_os_free() can
- * sleep (see vdi_sleep.h), but every caller is on the font stack of
- * vdi_outline.c, which one call uses at a time.
+ * not reentrant, and need not be: every caller is on the font stack, which
+ * one call uses at a time.  ftmem_os_alloc() and ftmem_os_free() are made
+ * there too, so they must not sleep (see vdi_ftos.h).
  */
 
 #include "portab.h"
@@ -210,7 +215,7 @@ void *ftmem_alloc(ULONG size)
     ULONG need;
     Chunk *c;
 
-    if (size > MAX_REQUEST)
+    if ((size > MAX_REQUEST) || outline_stack_low())
         return NULL;
     if (size > LARGE_SIZE)
         return own_block(size);

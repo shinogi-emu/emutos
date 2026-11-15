@@ -59,6 +59,11 @@
  * its pixels are kept blocks (vdi_kept.h), so they stay valid even if the
  * program that owned them ends meanwhile.
  *
+ * The outline font engine's OS calls are made on its font stack (see
+ * vdi_ftos.h): those that can sleep switch to the caller's stack under
+ * MiNT or MagiC; its memory calls (Mxalloc() and Mfree()) do not, and are
+ * taken not to sleep, as they do not under FreeMiNT or MagiC.
+ *
  * Known limits: the waits of request-mode input (Bconin() in v_choice,
  * v_string, vrq_locator) and of the escapes' Bconout() are not bracketed;
  * they are in calls that act on the screen and the text console, which the

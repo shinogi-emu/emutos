@@ -1407,6 +1407,9 @@ void vdi_vqt_attributes(Vwk * vwk)
     WORD *pointer;
     const Fonthead *fnt_ptr;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_size_pending(vwk);
+#endif
     pointer = INTOUT;
     fnt_ptr = vwk->cur_font;
 
@@ -1435,8 +1438,14 @@ void vdi_vqt_extent(Vwk * vwk)
 {
     WORD height, width;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* the width first: measuring sizes a face kept while the engine was busy */
+    width = calc_width(vwk, CONTRL[3], INTIN);
+    height = calc_height(vwk);
+#else
     height = calc_height(vwk);
     width = calc_width(vwk, CONTRL[3], INTIN);
+#endif
 #if CONF_WITH_VDI_OUTLINE_FONTS
     if (measured_in_system_font)        /* and so is its height */
     {
@@ -1586,6 +1595,9 @@ void vdi_vqt_fontinfo(Vwk * vwk)
     WORD *pointer;
     const Fonthead *fnt_ptr;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_size_pending(vwk);
+#endif
     fnt_ptr = vwk->cur_font;
 
     pointer = INTOUT;

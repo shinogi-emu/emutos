@@ -207,6 +207,46 @@ static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
     }
 }
 
+#ifdef VDI_TEST_SLOW_READ
+/*
+ * Test builds only: with DEF="-DVDI_TEST_SLOW_READ=ms", each font file read
+ * under MiNT or MagiC is followed by a sleep of that many milliseconds, as
+ * from a slow disk, so that calls of two programs meet in the font engine
+ * (the FONTBUSY test of fVDI's tests).  Add -DVDI_TEST_SLOW_AFTER=n to
+ * leave the first n reads alone (the scan of the fonts folder at boot).
+ */
+#ifndef VDI_TEST_SLOW_AFTER
+# define VDI_TEST_SLOW_AFTER 0
+#endif
+
+static void test_slow_read(void)
+{
+    static LONG reads;          /* test builds only: two calls can count at once */
+    register LONG ret __asm__("d0");
+    VdiSleepState sw;
+    void *sp;
+
+    if ((++reads <= VDI_TEST_SLOW_AFTER) || !vdi_other_gemdos())
+        return;
+
+    sp = os_stack();
+    vdi_sleep_begin(&sw);
+    __asm__ volatile                /* Fselect(ms, NULL, NULL, NULL) */
+    (ON_OS_STACK(2)
+     "clr.l   -(%%sp)\n\t"
+     "clr.l   -(%%sp)\n\t"
+     "clr.l   -(%%sp)\n\t"
+     "move.w  %1,-(%%sp)\n\t"
+     "move.w  #0x11d,-(%%sp)\n\t"
+     "trap    #1\n\t"
+     "lea     16(%%sp),%%sp"
+     OFF_OS_STACK
+    : "=r"(ret) : "r"((WORD)VDI_TEST_SLOW_READ), "d"(sp) : GEMDOS_CLOBBERS);
+    (void)ret;
+    vdi_sleep_end(&sw);
+}
+#endif
+
 #define os_setdta(dta)              gemdos_wl(0x1a, (LONG)(dta))
 #define os_getdta()                 ((void *)gemdos_w(0x2f))
 #define os_open(name, mode)         gemdos_wlw(0x3d, (LONG)(name), mode)
@@ -250,6 +290,11 @@ LONG vdi_yield(void)
 /*
  * the system blocks of the allocator (vdi_ftmem.c), which carves the
  * engine's small blocks from them
+ *
+ * These are asked for on the font stack, through vdi_kept.c's Mxalloc()
+ * and Mfree() traps, which do not switch to the caller's stack as the
+ * file calls above do: they must not sleep, and they do not under
+ * FreeMiNT or MagiC (see vdi_ftos.h).
  */
 void *ftmem_os_alloc(ULONG size)
 {
@@ -267,15 +312,11 @@ void ftmem_os_free(void *block)
 
 
 /*
- * The engine's memory.  Close to the bottom of the font stack, nothing is
- * given (see VDI_FT_STACK_GUARD in vdi_ft2.h): the glyph being loaded is
- * nested too deep, and fails as for want of memory.
+ * The engine's memory, from vdi_ftmem.c, which also refuses it close to
+ * the bottom of the font stack (see VDI_FT_STACK_GUARD in vdi_ft2.h)
  */
 void *vdi_ft_alloc(ULONG size)
 {
-    if (outline_stack_low())
-        return NULL;
-
     return ftmem_alloc(size);
 }
 
@@ -288,9 +329,6 @@ void vdi_ft_free(void *block)
 
 void *vdi_ft_realloc(void *block, ULONG size)
 {
-    if (outline_stack_low())
-        return NULL;                    /* the old block stays */
-
     return ftmem_realloc(block, size);
 }
 
@@ -320,6 +358,9 @@ void *vdi_font_file_load(const char *path, ULONG *size)
         {
             if (os_read(fh, length, data) == length)
             {
+#ifdef VDI_TEST_SLOW_READ
+                test_slow_read();
+#endif
                 if (size)
                     *size = length;
             }

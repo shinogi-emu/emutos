@@ -52,6 +52,7 @@
 #include "biosdefs.h"
 #include "vdi_ft2.h"
 #include "vdi_ftos.h"
+#include "vdi_ftmem.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 
@@ -100,14 +101,20 @@ static VdiOutlineFont unsized;
  * faces was measured to use 18.5 KB of it, and a CFF glyph built of two
  * others (seac) about 35 KB.
  *
- * FreeType does not bound such nesting, so vdi_ft_alloc() gives nothing
- * to a call that comes within VDI_FT_STACK_GUARD bytes of the bottom (see
- * vdi_ft2.h and outline_stack_low()).  Should a call still go past the
- * bottom, it overwrites the canary below it, which is checked after every
- * call: the engine is then turned off for good, as nothing it holds can
- * be trusted.  The flags are kept above the stack, out of an overflow's
- * reach, and the canary and a scratch buffer keep what lies below the
- * stack (the allocator's state) at a distance.
+ * FreeType does not bound such nesting, so the allocator (vdi_ftmem.c)
+ * gives nothing to a call that comes within VDI_FT_STACK_GUARD bytes of the
+ * bottom (see vdi_ft2.h and outline_stack_low()).  Should a call still go
+ * past the bottom, it overwrites the canary below it, which is checked
+ * after every call: the engine is then turned off for good, as nothing it
+ * holds can be trusted.  The flags are kept above the stack, out of an
+ * overflow's reach, and the canary and a scratch buffer keep whatever the
+ * linker puts below the stack (other variables of the VDI) at a distance.
+ *
+ * The top of the stack is on a multiple of 16 bytes (stack_top()), and the
+ * functions on the way from switch_stack() to the engine take LONGs and
+ * pointers, or words in pairs: a lone WORD argument would leave the stack
+ * pointer at 2 mod 4, and every long that the engine pushes misaligned,
+ * which costs a 68020 or later.
  *
  * The engine is not reentrant, and the font stack is used by one call at a
  * time.  Under EmuTOS's own GEMDOS nothing can come in while a call is on
@@ -147,7 +154,7 @@ static struct {
     BOOL busy;                  /* a call is on the stack */
     BOOL off;                   /* it went past the bottom: the engine is not called again */
     BOOL given_up;              /* a wait gave up, and the stack has not been free since */
-    WORD waiting;               /* calls waiting for the stack */
+    BOOL wanted;                /* a call is waiting for the stack */
     LONG files_found;           /* by the scans, to tell a busy stack that gets on */
 } font_stack;
 
@@ -576,7 +583,7 @@ static LONG listed_point(VdiOutlineFont *face, LONG point)
 /*
  * size the current outline face in points; FALSE if it cannot be used
  */
-static BOOL set_point(Vwk *vwk, WORD point)
+static BOOL set_point(Vwk *vwk, LONG point)
 {
     VdiOutlineFont *face = current_face(vwk), *f;
     LONG pt;
@@ -688,7 +695,7 @@ static BOOL set_size(Vwk *vwk, LONG width)
  * this sizes it at the height, scales the em by what that gave, and then
  * steps a pixel at a time.  Each size tried stays with the engine.
  */
-static BOOL set_height(Vwk *vwk, WORD height)
+static BOOL set_height(Vwk *vwk, LONG height)
 {
     VdiOutlineFont *face = current_face(vwk), *f, *g;
     LONG want = height, em;
@@ -784,7 +791,7 @@ static LONG effects_of(const Vwk *vwk)
  * vqt_extent(), v_gtext(): the width of a string, effects included;
  * negative if the engine cannot measure it
  */
-static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
+static LONG text_width(Vwk *vwk, LONG count, const WORD *str)
 {
     VdiOutlineFont *f = sized_font(vwk);
     LONG width;
@@ -801,7 +808,7 @@ static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
 
 
 /* vqt_width(): the advance of a character; negative if the engine cannot tell */
-static LONG char_width(Vwk *vwk, WORD ch)
+static LONG char_width(Vwk *vwk, LONG ch)
 {
     VdiOutlineFont *f = sized_font(vwk);
     LONG advance[4];
@@ -904,7 +911,7 @@ static void blit(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LO
  * turn a bitmap counterclockwise by 90, 180 or 270 degrees, into a new
  * one to give back to vdi_ft_free(); NULL if there is no memory
  */
-static UWORD *turn(const VdiOutlineBitmap *bm, WORD angle, LONG *new_wdwidth)
+static UWORD *turn(const VdiOutlineBitmap *bm, LONG angle, LONG *new_wdwidth)
 {
     LONG w = bm->width, h = bm->height, nw, nh, nwd, x, y;
     UWORD *out;
@@ -976,7 +983,7 @@ static UWORD *turn(const VdiOutlineBitmap *bm, WORD angle, LONG *new_wdwidth)
  * Returns -1, having drawn nothing, if the engine cannot render the
  * string or there is no memory to turn it.
  */
-static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD count,
+static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, LONG count,
                      LONG x, LONG y, LONG u0, LONG v0)
 {
     VdiOutlineBitmap bm;
@@ -1034,7 +1041,7 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
  *
  * Returns FALSE, having drawn nothing, if the engine cannot draw it.
  */
-static BOOL draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified,
+static BOOL draw_text(Vwk *vwk, LONG count, const WORD *str, LONG width, JUSTINFO *justified,
                       LONG x, LONG y)
 {
     VdiOutlineFont *f = sized_font(vwk);
@@ -1236,7 +1243,6 @@ static BOOL wait_for_stack(const BOOL *done)
     if (font_stack.given_up)
         return FALSE;
 
-    font_stack.waiting++;
     start = hz_200;
     found = font_stack.files_found;
     while (font_stack.busy)
@@ -1251,6 +1257,7 @@ static BOOL wait_for_stack(const BOOL *done)
             got_it = FALSE;
             break;
         }
+        font_stack.wanted = TRUE;   /* set each time: a waiter can be killed in vdi_yield() */
         if ((hz_200 - start > (LONG)BUSY_WAIT) || font_stack.off || !vdi_yield())
         {
             font_stack.given_up = TRUE;
@@ -1258,8 +1265,6 @@ static BOOL wait_for_stack(const BOOL *done)
             break;
         }
     }
-    font_stack.waiting--;
-
     return got_it;
 }
 
@@ -1300,8 +1305,11 @@ static WORD on_stack(LONG (*fn)(void *), void *arg, LONG *result, const BOOL *do
     }
     font_stack.busy = FALSE;
     font_stack.given_up = FALSE;
-    if (font_stack.waiting)
+    if (font_stack.wanted)
+    {
+        font_stack.wanted = FALSE;
         vdi_yield();                /* let a call that waits have it now */
+    }
 
     if (result)
         *result = ret;
@@ -1549,6 +1557,24 @@ WORD outline_set_height(Vwk *vwk, WORD height)
     c.vwk = vwk;
     c.value = height;
     return size_face(vwk, set_height_call, &c, PENDING_HEIGHT, height);
+}
+
+
+static LONG size_pending_call(void *p)
+{
+    sized_font(p);
+    return 0;
+}
+
+
+/*
+ * vqt_fontinfo(), vqt_attributes(): a face kept while the engine was busy
+ * (keep_pending()) is sized now, if the engine can, for its metrics
+ */
+void outline_size_pending(Vwk *vwk)
+{
+    if ((vwk->cur_font == &vwk->outline_head) && (vwk->outline_font == &unsized))
+        outline_on_stack(size_pending_call, vwk, NULL);
 }
 
 
