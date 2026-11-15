@@ -1929,6 +1929,59 @@ static void draw_line16(const Line *line, WORD wrt_mode, UWORD color)
 
     linemask = LN_MASK;
 
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * a solid line (every bit of the line style set): the style cannot
+     * change as it rotates, so there is nothing to test per pixel, and the
+     * mode is chosen once.  Erase mode draws nothing.
+     */
+    if (linemask == 0xffff) {
+        const WORD one = (dx >= dy) ? 1 : yinc;     /* step without a turn */
+        const WORD both = yinc + 1;                 /* step with a turn */
+        WORD n, ep1, ep2;
+
+        if (dx >= dy) {
+            n = dx;
+            ep1 = 2*dy;
+            ep2 = 2*dx;
+        } else {
+            n = dy;
+            ep1 = 2*dx;
+            ep2 = 2*dy;
+        }
+        eps = -n;
+        switch (wrt_mode) {
+        case WM_REPLACE:
+        case WM_TRANS:
+            for (loopcnt = n; loopcnt >= 0; loopcnt--) {
+                *addr = fgcol;
+                eps += ep1;
+                if (eps >= 0) {
+                    eps -= ep2;
+                    addr += both;
+                } else
+                    addr += one;
+            }
+            break;
+        case WM_XOR:
+            for (loopcnt = n; loopcnt >= 0; loopcnt--) {
+                *addr = ~*addr;
+                eps += ep1;
+                if (eps >= 0) {
+                    eps -= ep2;
+                    addr += both;
+                } else
+                    addr += one;
+            }
+            break;
+        case WM_ERASE:          /* draws only where the style is clear: nowhere */
+        default:                /* as stock, an unknown mode draws nothing */
+            break;
+        }
+        return;
+    }
+#endif
+
     if (dx >= dy) {
         e1 = 2*dy;
         eps = -dx;
@@ -2125,7 +2178,7 @@ static BOOL lp_usable(WORD wrt_mode)
         case WM_REPLACE:    ca = 0xffff; cs = 0;      oa = 0;      os = 0xffff; break; \
         case WM_TRANS:      ca = 0;      cs = 0xffff; oa = 0;      os = 0xffff; break; \
         case WM_XOR:        ca = 0;      cs = 0;      oa = 0;      os = 0xffff; break; \
-        default:            ca = 0xffff; cs = 0xffff; oa = 0xffff; os = 0xffff; break; \
+        case WM_ERASE:      ca = 0xffff; cs = 0xffff; oa = 0xffff; os = 0xffff; break; \
         } \
     } while (0)
 
