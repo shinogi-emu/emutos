@@ -1551,10 +1551,12 @@ al_dr1: move.w  (a0)+,d0                // right column
         dbra    d4,al_dl
         rts
 
-al_up:  move.w  d4,d0                   // start at the last row
-        mulu    S_NXLN(a6),d0
+al_up:  move.w  S_YMAX(a6),d0           // start at the last row of each form, as
+        sub.w   S_YMIN(a6),d0           // r2l_b2t does (the heights agree after
+        mulu    S_NXLN(a6),d0           // clipping, not for an unclipped vro_cpyfm)
         adda.l  d0,a2
-        move.w  d4,d0
+        move.w  D_YMAX(a6),d0
+        sub.w   D_YMIN(a6),d0
         mulu    D_NXLN(a6),d0
         adda.l  d0,a3
 
