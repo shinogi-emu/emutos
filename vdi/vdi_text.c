@@ -1053,7 +1053,8 @@ void vdi_vst_height(Vwk * vwk)
     if (outline_face_selected(vwk))
     {
         vwk->pts_mode = FALSE;
-        if (outline_set_height(vwk, PTSIN[1]))
+        /* busy: the face stays, and is sized when it is next used */
+        if (outline_set_height(vwk, PTSIN[1]) != OUTLINE_FAILED)
         {
             setup_width_height(vwk->cur_font);
             return;
@@ -1205,7 +1206,8 @@ void vdi_vst_point(Vwk * vwk)
     if (outline_face_selected(vwk))
     {
         vwk->pts_mode = TRUE;
-        if (outline_set_point(vwk, INTIN[0]))
+        /* busy: the face stays, and is sized when it is next used */
+        if (outline_set_point(vwk, INTIN[0]) != OUTLINE_FAILED)
         {
             setup_width_height(vwk->cur_font);
             INTOUT[0] = vwk->cur_font->point;
@@ -1567,6 +1569,15 @@ void vdi_vqt_name(Vwk * vwk)
         ;
     while (i++ < FONT_NAME_LEN)
         *int_out++ = 0;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* as NVDI: word 33 is 1 for a vector font (gemlib passes it on as name[32]) */
+    if (tmp_font->flags & F_OUTLINE_FONT)
+    {
+        INTOUT[33] = 1;
+        CONTRL[4] = 34;
+    }
+#endif
 }
 
 
@@ -1619,6 +1630,9 @@ void gdp_justified(Vwk * vwk)
     WORD i, direction, delword, delchar;
     WORD *pointer, *str;
     JUSTINFO just;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    const Fonthead *kept_font = NULL;
+#endif
 
     cnt = CONTRL[3] - 2;
 
@@ -1637,6 +1651,18 @@ void gdp_justified(Vwk * vwk)
     }
 
     width = calc_width(vwk, cnt, str);
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /*
+     * measured in the system font, as the engine could not: then it is
+     * spaced and drawn in it too, even if the engine could draw it by now
+     */
+    if (measured_in_system_font)
+    {
+        kept_font = vwk->cur_font;
+        vwk->cur_font = def_font;
+    }
+#endif
 
     max_x = PTSIN[2];
 
@@ -1722,6 +1748,11 @@ void gdp_justified(Vwk * vwk)
     }
 
     output_text(vwk, cnt, str, max_x, &just);
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (kept_font)
+        vwk->cur_font = kept_font;
+#endif
 }
 
 

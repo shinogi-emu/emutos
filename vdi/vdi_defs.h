@@ -305,6 +305,11 @@ struct Vwk_ {
     VwkColors col;              /* see vdi_nvdicol.c */
     VwkBitmap bm;               /* see vdi_bitmap.c */
 #endif
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* last, as vdi_asm.S knows the offsets of the fields above (vdiscreen.h) */
+    WORD outline_pending;       /* a size asked for while the engine was busy, 0 if none */
+    WORD outline_asked;         /* its points or height */
+#endif
 };
 
 /*
@@ -616,23 +621,29 @@ void vdi_vqt_real_extent(Vwk *);    /* 240 sub 4200, in vdi_text.c */
 #if CONF_WITH_VDI_OUTLINE_FONTS
 /* vdi_outline.c: outline fonts on the workstations */
 #define OUTLINE_FIRST_ID    5000    /* the ids of outline faces are above (SpeedoGDOS's rule) */
+/* what outline_on_stack(), outline_scan() and the sizing calls give */
+#define OUTLINE_FAILED      0       /* the engine cannot do it */
+#define OUTLINE_DONE        1
+#define OUTLINE_BUSY        2       /* another program's call keeps the engine busy */
 void outline_init_vwk(Vwk *vwk);
 WORD outline_load_fonts(Vwk *vwk);
-void outline_scan(void);
+WORD outline_scan(void);
 void outline_unload_fonts(Vwk *vwk);
 const Fonthead *outline_find_face(const Vwk *vwk, WORD id);
 const Fonthead *outline_face_number(const Vwk *vwk, WORD n);
 BOOL outline_face_selected(const Vwk *vwk);
-BOOL outline_set_point(Vwk *vwk, WORD point);
-BOOL outline_set_height(Vwk *vwk, WORD height);
+WORD outline_set_point(Vwk *vwk, WORD point);
+WORD outline_set_height(Vwk *vwk, WORD height);
 BOOL outline_font_selected(const Vwk *vwk);
 VdiOutlineFont *outline_current(Vwk *vwk);
 BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width);
 BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width);
 BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
-BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result);
+WORD outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result);
+BOOL outline_stack_low(void);
+void *outline_caller_stack(void);
 /* the NVDI calls (vdi_nvdi.c) */
-BOOL outline_set_arbpt(Vwk *vwk, LONG point);
+WORD outline_set_arbpt(Vwk *vwk, LONG point);
 BOOL outline_set_width(Vwk *vwk, WORD width);
 BOOL outline_set_size(Vwk *vwk, LONG width);
 WORD outline_set_map(Vwk *vwk, WORD map);

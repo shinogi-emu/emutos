@@ -1270,12 +1270,15 @@ static void append_number(char *buf, LONG len, LONG value)
     append(buf, len, digits + n);
 }
 
-/* the family_name + style_name hashcode, as fVDI computes it */
+/*
+ * the family_name + style_name hashcode, as fVDI computes it, or the next
+ * id not taken; 0 if every id is taken
+ */
 static LONG face_id(FT_Face face)
 {
     const char *p;
     UWORD hc = 0;
-    LONG id;
+    LONG id, tries;
     FaceRec *f;
 
     for (p = face->family_name; p && *p; p++)
@@ -1293,7 +1296,7 @@ static LONG face_id(FT_Face face)
         id = 5000;
 
     /* Find out whether there already is such a font ID */
-    for (;;)
+    for (tries = 5001; tries <= 32767; tries++)
     {
         id++;
         if (id > 32767)
@@ -1305,6 +1308,8 @@ static LONG face_id(FT_Face face)
         if (!f)
             return id;
     }
+
+    return 0;
 }
 
 /*
@@ -1443,10 +1448,10 @@ static LONG add_face(FT_Face face, const char *path, LONG index)
     VdiOutlineFont *font;
     TT_OS2 *os2;
     char name[sizeof(font->name)];
-    LONG i;
+    LONG i, id;
 
     /* Best practice conveniently keeps this <= 32 chars */
-    name[0] = 0;
+    ft_memset(name, 0, sizeof(name));   /* all of it is copied, past the NUL too */
     if (!get_name(face, TT_NAME_ID_FULL_NAME, name, sizeof(name)))
     {
         /* as the above function just sets the name from TTF fonts, we still do this */
@@ -1468,6 +1473,10 @@ static LONG add_face(FT_Face face, const char *path, LONG index)
     if (i < 0)
         return i;
 
+    id = face_id(face);
+    if (!id)
+        return -2;                      /* no id left for it */
+
     fr = vdi_ft_alloc(sizeof(FaceRec) + ft_strlen(path));
     if (!fr)
         return -1;
@@ -1476,7 +1485,7 @@ static LONG add_face(FT_Face face, const char *path, LONG index)
     font = &fr->base.font;
     ft_memcpy(font->name, name, sizeof(font->name));
 
-    font->id = face_id(face);
+    font->id = id;
     font->flags = (FT_IS_SCALABLE(face) ? VDI_FT_SCALABLE : 0) |
                   (FT_IS_FIXED_WIDTH(face) ? VDI_FT_MONOSPACE : 0);
     /* Vector fonts have size = 0 */

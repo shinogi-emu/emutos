@@ -35,20 +35,44 @@
  * sleep in a file read while another program's VDI call goes through
  * trap1(), which then returns the first one to the wrong place.  These
  * keep nothing outside the stack.  GEMDOS may change d0-d2 and a0-a2.
+ *
+ * Under MiNT, a process that wakes up with its stack pointer below its own
+ * kernel stack is taken for one that overflowed it, and killed.  So a call
+ * that can sleep is not made on the font stack (see vdi_outline.c), but on
+ * the stack the VDI call came in on, below where that call stands (from
+ * os_stack(), NULL to stay on the stack in use): ON_OS_STACK(n) switches
+ * to the stack in operand n, if it is not 0, and OFF_OS_STACK switches
+ * back, once the arguments are off the stack.
  */
 #define GEMDOS_CLOBBERS "d1", "d2", "a0", "a1", "a2", "cc", "memory"
+
+#define ON_OS_STACK(n)  "move.l  %%sp,%%a0\n\t" \
+                        "tst.l   %" #n "\n\t" \
+                        "jeq     1f\n\t" \
+                        "move.l  %" #n ",%%sp\n\t" \
+                        "1:\n\t" \
+                        "move.l  %%a0,-(%%sp)\n\t"
+#define OFF_OS_STACK    "\n\tmove.l  (%%sp),%%sp"
+
+static void *os_stack(void)
+{
+    return vdi_other_gemdos() ? outline_caller_stack() : NULL;
+}
 
 static LONG gemdos_w(WORD fn)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
+    void *sp = os_stack();
 
     vdi_sleep_begin(&sw);
     __asm__ volatile
-    ("move.w  %1,-(%%sp)\n\t"
+    (ON_OS_STACK(2)
+     "move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "addq.l  #2,%%sp"
-    : "=r"(ret) : "r"(fn) : GEMDOS_CLOBBERS);
+     OFF_OS_STACK
+    : "=r"(ret) : "r"(fn), "d"(sp) : GEMDOS_CLOBBERS);
 
     {
         LONG r = ret;
@@ -62,14 +86,17 @@ static LONG gemdos_ww(WORD fn, WORD a)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
+    void *sp = os_stack();
 
     vdi_sleep_begin(&sw);
     __asm__ volatile
-    ("move.w  %2,-(%%sp)\n\t"
+    (ON_OS_STACK(3)
+     "move.w  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "addq.l  #4,%%sp"
-    : "=r"(ret) : "r"(fn), "r"(a) : GEMDOS_CLOBBERS);
+     OFF_OS_STACK
+    : "=r"(ret) : "r"(fn), "r"(a), "d"(sp) : GEMDOS_CLOBBERS);
 
     {
         LONG r = ret;
@@ -83,14 +110,17 @@ static LONG gemdos_wl(WORD fn, LONG a)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
+    void *sp = os_stack();
 
     vdi_sleep_begin(&sw);
     __asm__ volatile
-    ("move.l  %2,-(%%sp)\n\t"
+    (ON_OS_STACK(3)
+     "move.l  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "addq.l  #6,%%sp"
-    : "=r"(ret) : "r"(fn), "r"(a) : GEMDOS_CLOBBERS);
+     OFF_OS_STACK
+    : "=r"(ret) : "r"(fn), "r"(a), "d"(sp) : GEMDOS_CLOBBERS);
 
     {
         LONG r = ret;
@@ -104,15 +134,18 @@ static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
+    void *sp = os_stack();
 
     vdi_sleep_begin(&sw);
     __asm__ volatile
-    ("move.w  %3,-(%%sp)\n\t"
+    (ON_OS_STACK(4)
+     "move.w  %3,-(%%sp)\n\t"
      "move.l  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "addq.l  #8,%%sp"
-    : "=r"(ret) : "r"(fn), "r"(a), "r"(b) : GEMDOS_CLOBBERS);
+     OFF_OS_STACK
+    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "d"(sp) : GEMDOS_CLOBBERS);
 
     {
         LONG r = ret;
@@ -126,16 +159,19 @@ static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
+    void *sp = os_stack();
 
     vdi_sleep_begin(&sw);
     __asm__ volatile
-    ("move.w  %4,-(%%sp)\n\t"
+    (ON_OS_STACK(5)
+     "move.w  %4,-(%%sp)\n\t"
      "move.w  %3,-(%%sp)\n\t"
      "move.l  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "lea     10(%%sp),%%sp"
-    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c) : GEMDOS_CLOBBERS);
+     OFF_OS_STACK
+    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c), "d"(sp) : GEMDOS_CLOBBERS);
 
     {
         LONG r = ret;
@@ -149,16 +185,19 @@ static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
+    void *sp = os_stack();
 
     vdi_sleep_begin(&sw);
     __asm__ volatile
-    ("move.l  %4,-(%%sp)\n\t"
+    (ON_OS_STACK(5)
+     "move.l  %4,-(%%sp)\n\t"
      "move.l  %3,-(%%sp)\n\t"
      "move.w  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "lea     12(%%sp),%%sp"
-    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c) : GEMDOS_CLOBBERS);
+     OFF_OS_STACK
+    : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c), "d"(sp) : GEMDOS_CLOBBERS);
 
     {
         LONG r = ret;
@@ -198,6 +237,16 @@ LONG vdi_caller_is_system(void)
 }
 
 
+LONG vdi_yield(void)
+{
+    if (!vdi_other_gemdos())
+        return FALSE;                   /* EmuTOS's own GEMDOS: nothing else runs */
+
+    gemdos_w(0xff);                     /* Syield() */
+    return TRUE;
+}
+
+
 /*
  * the system blocks of the allocator (vdi_ftmem.c), which carves the
  * engine's small blocks from them
@@ -217,8 +266,16 @@ void ftmem_os_free(void *block)
 }
 
 
+/*
+ * The engine's memory.  Close to the bottom of the font stack, nothing is
+ * given (see VDI_FT_STACK_GUARD in vdi_ft2.h): the glyph being loaded is
+ * nested too deep, and fails as for want of memory.
+ */
 void *vdi_ft_alloc(ULONG size)
 {
+    if (outline_stack_low())
+        return NULL;
+
     return ftmem_alloc(size);
 }
 
@@ -231,6 +288,9 @@ void vdi_ft_free(void *block)
 
 void *vdi_ft_realloc(void *block, ULONG size)
 {
+    if (outline_stack_low())
+        return NULL;                    /* the old block stays */
+
     return ftmem_realloc(block, size);
 }
 
@@ -388,9 +448,9 @@ LONG vdi_font_dir_scan(const char *dir,
     char path[SCAN_PATH_LEN];
     WORD len;
 
-    len = strlen(dir);
-    if (len >= SCAN_PATH_LEN - 5)
+    if (strlen(dir) >= SCAN_PATH_LEN - 5)   /* checked before it is a WORD */
         return -1;
+    len = strlen(dir);
     strcpy(path, dir);
     if ((len > 0) && (path[len-1] == '\\'))     /* drop a trailing backslash */
         path[--len] = '\0';
