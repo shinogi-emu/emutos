@@ -448,9 +448,9 @@ LONG vdi_font_dir_scan(const char *dir,
     char path[SCAN_PATH_LEN];
     WORD len;
 
-    len = strlen(dir);
-    if (len >= SCAN_PATH_LEN - 5)
+    if (strlen(dir) >= SCAN_PATH_LEN - 5)   /* checked before it is a WORD */
         return -1;
+    len = strlen(dir);
     strcpy(path, dir);
     if ((len > 0) && (path[len-1] == '\\'))     /* drop a trailing backslash */
         path[--len] = '\0';
