@@ -1728,7 +1728,12 @@ void vdi_vqt_real_extent(Vwk * vwk)
 {
     const Fonthead *fnt_ptr;
     LONG width, left, right, top, bottom, u, v, x, y;
-    WORD i, delh, delv;
+    WORD i, delh, delv, d1, d2, outline;
+
+    CONTRL[2] = 0;
+    if (CONTRL[1] < 1)                  /* no position given: nothing is read */
+        return;
+    CONTRL[2] = 4;
 
     width = calc_width(vwk, CONTRL[3], INTIN);
     fnt_ptr = vwk->cur_font;
@@ -1737,12 +1742,37 @@ void vdi_vqt_real_extent(Vwk * vwk)
         fnt_ptr = def_font;
 #endif
 
-    /* the alignment of output_text(): the box starts delh back and delv up */
-    text_alignment(vwk, fnt_ptr, (WORD)width, 0, 0, 0, &delh, &delv);
-    left = -(LONG)delh;
+    /*
+     * the alignment of output_text(): the box starts delh back and delv up;
+     * unrotated it is fVDI's rectangle, rotated it is where output_text()
+     * puts the cells, with its skew and outline offsets
+     */
+    d1 = d2 = outline = 0;
+    if (vwk->chup != 0)
+    {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        if (!outline_font_selected(vwk) || measured_in_system_font)
+#endif
+        {
+            if (vwk->style & F_SKEW)
+            {
+                d1 = fnt_ptr->left_offset;
+                d2 = fnt_ptr->right_offset;
+            }
+            if (vwk->style & F_OUTLINE)
+                outline = OUTLINE_THICKNESS;
+        }
+    }
+    text_alignment(vwk, fnt_ptr, (WORD)width, d1, d2, outline, &delh, &delv);
+    left = -(LONG)delh - outline;
     right = left + width;
     top = -(LONG)delv;
     bottom = top + fnt_ptr->top + fnt_ptr->bottom;
+    if (outline && vwk->chup != 0)      /* output_text() starts the cells */
+    {                                   /* outline early and 2 outlines tall */
+        top -= outline;
+        bottom += outline;
+    }
 
     for (i = 0; i < 4; i++) {
         u = ((i == 0) || (i == 3)) ? left : right;

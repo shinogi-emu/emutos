@@ -137,8 +137,8 @@ void vdi_vr_clip_rects(Vwk *vwk)
 void vdi_vq_ext_devinfo(Vwk *vwk)
 {
     static const char driver_name[] = "EmuTOS VDI";
+    const char *src;
     char *path, *file, *name;
-    UWORD i;
 
     (void)vwk;
     CONTRL[2] = 0;
@@ -157,8 +157,10 @@ void vdi_vq_ext_devinfo(Vwk *vwk)
         file[0] = '\0';
     if (name)
     {
-        for (i = 0; i < sizeof(driver_name); i++)     /* with its NUL: 11 bytes */
-            name[i] = driver_name[i];
+        src = driver_name;
+        do                              /* 11 bytes with the NUL */
+            *name++ = *src;
+        while (*src++);
     }
     INTOUT[0] = 1;
     INTOUT[1] = 1;
