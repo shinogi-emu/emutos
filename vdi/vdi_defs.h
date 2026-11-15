@@ -556,6 +556,11 @@ void vdi_vq_bg_color(Vwk *);        /* 203 */
 void vdi_color_entry(Vwk *);        /* 204 */
 void vdi_vr_clip_rects(Vwk *);      /* 171 */
 
+/* vdi_xfer.c: vr_transfer_bits and the scaled vro_cpyfm and vrt_cpyfm */
+void vdi_vr_transfer_bits(Vwk *);   /* 170 */
+void vdi_raster_scaled(void *raster, void *info, void (*copy)(void *, void *),
+                       BOOL transparent, BOOL clip_on, const VwkClip *clip);
+
 /* vdi_bitmap.c: off-screen bitmaps */
 void vdi_bitmap_open(void);         /* 100 with sub-opcode 1 (20 intin), 2 or 3 */
 void vdi_bitmap_release(Vwk *vwk);  /* free the memory the VDI gave a bitmap */

@@ -156,6 +156,7 @@ static const struct vdi_xjmptab jmptb3[] = {
 #if CONF_WITH_VDI_NVDI_EXT
     /* the NVDI colour calls, in vdi_nvdicol.c; the raster and bitmap calls are added here */
     { 138, VDI_ANY_SUBOP, 0,  0, vdi_v_setrgb },
+    { 170, VDI_ANY_SUBOP, 0,  0, vdi_vr_transfer_bits },    /* in vdi_xfer.c */
     { 171, VDI_ANY_SUBOP, 4,  1, vdi_vr_clip_rects },       /* in vdi_nvdimisc.c */
     /* off-screen bitmaps: 100 and 101 with a sub-opcode are in vdi_control.c and vdi_bitmap.c */
     { 200, VDI_ANY_SUBOP, 0,  1, vdi_vs_fg_color },

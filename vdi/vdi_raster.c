@@ -782,6 +782,9 @@ struct raster_t {
     int clip;
     int multifill;
     int transparent;
+#if CONF_WITH_VDI_NVDI_EXT
+    int vdi_call;       /* a vro_cpyfm or vrt_cpyfm call: bit 15 of the mode scales */
+#endif
 };
 
 /*
@@ -1635,12 +1638,36 @@ static void vrt_cpyfm16(struct blit_frame *info)
 }
 #endif
 
+#if CONF_WITH_VDI_NVDI_EXT
+static void cpy_raster(struct raster_t *raster, struct blit_frame *info);
+
+/* the copy of one row of a scaled copy (see vdi_xfer.c) */
+static void
+scaled_row(void *raster, void *info)
+{
+    cpy_raster((struct raster_t *)raster, (struct blit_frame *)info);
+}
+#endif
+
 /* common functionality for vdi_vro_cpyfm, vdi_vrt_cpyfm, linea_raster */
 static void
 cpy_raster(struct raster_t *raster, struct blit_frame *info)
 {
     WORD mode;
     WORD fg_col, bg_col;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * bit 15 of the mode of a VDI call: scale the source rectangle onto the
+     * destination rectangle, then copy as the other bits say.  Line-A does not.
+     */
+    if (raster->vdi_call && (INTIN[0] & 0x8000))
+    {
+        vdi_raster_scaled(raster, info, scaled_row, raster->transparent,
+                          raster->clip, raster->clipper);
+        return;
+    }
+#endif
 
     arb_corner((Rect*)PTSIN);
     arb_corner((Rect*)(PTSIN+4));
@@ -1787,6 +1814,9 @@ vdi_vro_cpyfm(Vwk * vwk)
     raster.clip = vwk->clip;
     raster.multifill = vwk->multifill;
     raster.transparent = 0;
+#if CONF_WITH_VDI_NVDI_EXT
+    raster.vdi_call = 1;
+#endif
 
     cpy_raster(&raster, &vdi_info);
 }
@@ -1809,6 +1839,9 @@ vdi_vrt_cpyfm(Vwk * vwk)
     raster.clip = vwk->clip;
     raster.multifill = vwk->multifill;
     raster.transparent = 1;
+#if CONF_WITH_VDI_NVDI_EXT
+    raster.vdi_call = 1;
+#endif
 
     cpy_raster(&raster, &vdi_info);
 }
@@ -1822,6 +1855,9 @@ void linea_raster(void)
     raster.clip = 0;
     raster.multifill = MFILL;
     raster.transparent = COPYTRAN;
+#if CONF_WITH_VDI_NVDI_EXT
+    raster.vdi_call = 0;
+#endif
 
     cpy_raster(&raster, &vdi_info);
 }
