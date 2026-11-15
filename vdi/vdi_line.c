@@ -144,7 +144,14 @@ void vdi_vsl_color(Vwk * vwk)
 {
     WORD lc;
 
+#if CONF_WITH_VDI_FASTDRAW
+    /* validate_color_index() without the call */
+    lc = INTIN[0];
+    if ((lc < 0) || (lc >= numcolors))
+        lc = 1;
+#else
     lc = validate_color_index(INTIN[0]);
+#endif
     INTOUT[0] = lc;
     vwk->line_color = MAP_COL[lc];
 #if CONF_WITH_VDI_NVDI_EXT
