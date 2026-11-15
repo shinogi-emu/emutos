@@ -125,29 +125,13 @@
  */
 
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
 /*
- * Local structure for passing justification info
- *
- * note 1: in each of the following pairs of variables, only one variable
- * has a non-zero value:
- *  (wordx,wordy), (rmwordx,rmwordy), (charx,chary), (rmcharx,rmchary)
- *
- * note 2: if rmword is zero, there are no 'remainder pixels' to use up
- * between words; otherwise, rmword = max(rmwordx/rmwordy).  similarly
- * for rmchar/rmcharx/rmchary.
+ * set by calc_width() when the outline font engine could not measure the
+ * text, which was then measured in the system font
  */
-typedef struct
-{
-                        /* word-spacing variables */
-    WORD wordx, wordy;          /* #pixels to add to each space */
-    WORD rmword;                /* remaining #pixels to add over all spaces */
-    WORD rmwordx, rmwordy;      /* add this to use up remainder */
-                        /* character-spacing variables */
-    WORD charx, chary;          /* #pixels to add to each character */
-    WORD rmchar;                /* remaining #pixels to add over all characters */
-    WORD rmcharx, rmchary;      /* add this to use up remainder */
-} JUSTINFO;
-
+static BOOL measured_in_system_font;
+#endif
 
 /* Prototypes for this module */
 static void make_header(Vwk * vwk);
@@ -161,6 +145,11 @@ static WORD calc_height(Vwk *vwk)
 {
     const Fonthead *fnt_ptr = vwk->cur_font;
     WORD height;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_font_selected(vwk))     /* the height of what is drawn */
+        return fnt_ptr->top + fnt_ptr->bottom;
+#endif
 
     height = fnt_ptr->top + fnt_ptr->bottom + 1;    /* handles scaled fonts */
 
@@ -178,6 +167,26 @@ static WORD calc_width(Vwk *vwk, WORD cnt, WORD *str)
     const Fonthead *fnt_ptr = vwk->cur_font;
     WORD table_start = fnt_ptr->first_ade;
     WORD i, chr, width;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    measured_in_system_font = FALSE;
+    if (outline_font_selected(vwk))     /* effects included */
+    {
+        if (outline_text_width(vwk, cnt, str, &width))
+        {
+            /*
+             * set after the engine has been called: it can sleep, and
+             * another program can set it meanwhile
+             */
+            measured_in_system_font = FALSE;
+            return width;
+        }
+        /* the engine cannot measure it now: measure it in the system font */
+        measured_in_system_font = TRUE;     /* (after the call, as above) */
+        fnt_ptr = def_font;
+        table_start = fnt_ptr->first_ade;
+    }
+#endif
 
     if (fnt_ptr->flags & F_MONOSPACE)
     {
@@ -280,6 +289,361 @@ static BOOL ok_for_direct_blit(Vwk *vwk, WORD width, JUSTINFO *justified)
 #endif
 
 /*
+ * the offsets that the text alignment gives: delh back from the point along
+ * the text (what the horizontal alignment takes off, plus the skew
+ * adjustments d1 and d2 of the vertical alignment) and delv up from the
+ * point to the top of the cells; used by output_text() and, with no effects,
+ * by vqt_real_extent()
+ */
+static __inline__ __attribute__((always_inline)) void text_alignment(Vwk *vwk, const Fonthead *fnt_ptr, WORD width,
+                           WORD d1, WORD d2, WORD outline, WORD *pdelh, WORD *pdelv)
+{
+    WORD delh, delv;
+
+    switch(vwk->h_align) {
+    default:                /* normally case 0: left justified */
+        delh = 0;
+        break;
+    case 1:
+        delh = width / 2 - outline;
+        break;
+    case 2:
+        delh = width - (outline * 2);
+        break;
+    }
+
+    switch(vwk->v_align) {
+    default:                /* normally case 0: baseline */
+        delv = fnt_ptr->top;
+        delh += d1;
+        break;
+    case 1:
+        delv = fnt_ptr->top - fnt_ptr->half;
+        delh += (fnt_ptr->half * d2) / fnt_ptr->top;
+        break;
+    case 2:
+        delv = fnt_ptr->top - fnt_ptr->ascent;
+        delh += (fnt_ptr->ascent * d2) / fnt_ptr->top;
+        break;
+    case 3:
+        delv = fnt_ptr->top + fnt_ptr->bottom;
+        break;
+    case 4:
+        delv = fnt_ptr->top + fnt_ptr->descent;
+        delh += (fnt_ptr->descent * d1) / fnt_ptr->bottom;
+        break;
+    case 5:
+        delv = 0;
+        delh += d1 + d2;
+        break;
+    }
+
+    *pdelh = delh;
+    *pdelv = delv;
+}
+
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * a bitmap-font string in one blit
+ *
+ * A string with no effect but underline, no rotation, scaling or
+ * justification, in a font without a horizontal offset table, is the
+ * font's cells side by side.  Instead of one text_blt() for every
+ * character, the cells are gathered into a one-plane form, as wide as the
+ * string, and that goes to text_blt() as one cell, the way the outline
+ * fonts' bitmaps do.  Writing modes act on a pixel at a time and the cells
+ * are contiguous, so the pixels equal those of the per-character loop.
+ *
+ * The form is built in vdishare.main.fill_buffer, which only the polygon
+ * fill and contourfill() use (and they use the whole of vdishare: see
+ * vdiext.h).  A VDI call that is drawing a string makes no OS call that can
+ * sleep (vdi_sleep.h), so no other VDI call runs between the filling of the
+ * buffer and its use by text_blt().  A string wider than the buffer goes in
+ * chunks of whole characters.
+ */
+#define STRBUF_SIZE     (sizeof(vdishare.main.fill_buffer) - 2) /* bytes; 2 are left for a blit that reads one word on */
+
+/* set while text_string() has text_blt() draw its form: vdi_tblit.S takes a wide one-plane form of 1 or 2 planes only then */
+WORD text_form;
+
+#define STR_XLIMIT      16000   /* beyond this the blit's arithmetic and the loop's differ */
+
+#if !defined(__mcoldfire__)
+/* vdi_tblit.S */
+void text_gather8(UBYTE *dst, const UBYTE *base, const WORD *str, LONG stride, LONG fwidth,
+                  LONG count, LONG rows);
+#endif
+
+/*
+ * the index in the font's tables of the character that the per-character
+ * loop draws for code
+ */
+static __inline__ WORD cell_index(const Fonthead *fnt_ptr, WORD code)
+{
+    WORD temp = code;
+
+    /* If the character is out of range for this font make it a ? */
+    if ((temp < fnt_ptr->first_ade) || (temp > fnt_ptr->last_ade))
+        temp = '?';
+    return temp - fnt_ptr->first_ade;
+}
+
+/*
+ * draw one character, as the per-character loop of output_text() does
+ * (DESTX moves on)
+ */
+static void text_char(const Fonthead *fnt_ptr, WORD code)
+{
+    WORD temp = cell_index(fnt_ptr, code);
+
+    SOURCEX = fnt_ptr->off_table[temp];
+    DELX = fnt_ptr->off_table[temp + 1] - SOURCEX;
+    SOURCEY = 0;
+    DELY = fnt_ptr->form_height;
+    FBASE = fnt_ptr->dat_table;
+    FWIDTH = fnt_ptr->form_width;
+    text_blt();
+}
+
+/* how text_gather() has to copy the cells */
+#define GATHER_BITS     0       /* any cells: bits */
+#define GATHER_BYTES    1       /* cells start on a byte and are whole bytes wide */
+#define GATHER_8        2       /* cell c of the string is byte c of a font's row */
+
+/*
+ * TRUE for a font whose cell for code c is the byte c - first_ade of every
+ * row of its form: a monospaced font, as its flags say, of cells of 8
+ * pixels, as the offset table (checked at both ends) says; the codes of
+ * the font are then offsets, and the string need only be checked to lie in
+ * the font (the test direct_screen_blit() makes of its font as well)
+ */
+#if !defined(__mcoldfire__)
+static BOOL font8(const Fonthead *fnt_ptr)
+{
+    UWORD cells = fnt_ptr->last_ade - fnt_ptr->first_ade + 1;
+
+    return (fnt_ptr->flags & F_MONOSPACE) && (fnt_ptr->first_ade <= fnt_ptr->last_ade)
+        && (fnt_ptr->last_ade <= 32767) && (fnt_ptr->off_table[0] == 0)
+        && (fnt_ptr->off_table[1] == 8) && ((ULONG)fnt_ptr->off_table[cells] == (ULONG)cells * 8);
+}
+#endif
+
+/*
+ * how many of the characters fit into the buffer, as cells side by side
+ *
+ *  in:     the characters, the most bits in a row of the buffer
+ *  out:    *pwidth the width of those cells in pixels, *pkind how to copy
+ *          them (GATHER_*)
+ *  returns the number of characters; 0 if the first cannot be used (a cell
+ *          too wide or a bad index or offset table, or for GATHER_8 a code
+ *          outside the font, which only the per-character loop knows what
+ *          to do with)
+ */
+static WORD text_cells(const Fonthead *fnt_ptr, WORD count, const WORD *str, WORD maxbits,
+                       WORD *pwidth, WORD *pkind)
+{
+    WORD n, width, sx, dx, temp;
+    WORD kind = GATHER_BYTES;
+
+#if !defined(__mcoldfire__)
+    if (font8(fnt_ptr))
+    {
+        UWORD range = fnt_ptr->last_ade - fnt_ptr->first_ade;
+        UWORD first = fnt_ptr->first_ade;
+
+        if (count > maxbits / 8)
+            count = maxbits / 8;
+        for (n = 0; n < count; n++)
+        {
+            if ((UWORD)(str[n] - first) > range)
+                break;
+        }
+        *pwidth = n * 8;
+        *pkind = GATHER_8;
+        return n;
+    }
+#endif
+    for (n = 0, width = 0; n < count; n++)
+    {
+        temp = cell_index(fnt_ptr, str[n]);
+        if ((UWORD)temp > fnt_ptr->last_ade - fnt_ptr->first_ade)
+            break;
+        sx = fnt_ptr->off_table[temp];
+        dx = fnt_ptr->off_table[temp + 1] - sx;
+        if ((dx < 0) || (dx > maxbits - width))
+            break;
+        if ((sx | dx) & 7)
+            kind = GATHER_BITS;
+        width += dx;
+    }
+    *pwidth = width;
+    *pkind = kind;
+    return n;
+}
+
+/*
+ * copy width bits from the row at src, starting at bit sx, to the zeroed row
+ * at dst, starting at bit dx; no byte outside those of the two ranges is read
+ */
+static void text_bits(UBYTE *dst, WORD dx, const UBYTE *src, WORD sx, WORD width)
+{
+    WORD bits, shift;
+    UWORD v;
+
+    src += sx >> 3;
+    sx &= 7;
+    dst += dx >> 3;
+    dx &= 7;
+    while (width > 0)
+    {
+        bits = (width > 8) ? 8 : width;
+
+        v = (UWORD)*src << 8;
+        if (sx + bits > 8)
+            v |= src[1];
+        v = ((v << sx) >> 8) & (0xff00 >> bits);        /* bits bits at the top of a byte */
+        dst[0] |= v >> dx;
+        shift = 8 - dx;
+        if (bits > shift)
+            dst[1] |= (v << shift) & 0xff;
+
+        width -= bits;
+        sx += bits;
+        src += sx >> 3;
+        sx &= 7;
+        dx += bits;
+        dst += dx >> 3;
+        dx &= 7;
+    }
+}
+
+/*
+ * gather the cells of n characters into the buffer, stride bytes a row,
+ * width pixels
+ */
+static void text_gather(UBYTE *buf, WORD stride, const Fonthead *fnt_ptr, WORD n, const WORD *str,
+                        WORD width, WORD kind)
+{
+    const UBYTE *form = (const UBYTE *)fnt_ptr->dat_table;
+    WORD fwidth = fnt_ptr->form_width;
+    WORD height = fnt_ptr->form_height;
+    WORD i, row, temp, sx, dx, nbytes;
+    LONG xoff;
+    const UBYTE *src;
+    UBYTE *dst;
+
+    if (kind != GATHER_BITS)
+    {
+        /* whole bytes: the row is a byte longer than the cells if their number is odd */
+        nbytes = (width + 7) >> 3;
+        if (nbytes < stride)
+        {
+            for (row = height, dst = buf + nbytes; row > 0; row--, dst += stride)
+                *dst = 0;
+        }
+#if !defined(__mcoldfire__)
+        if (kind == GATHER_8)
+        {
+            text_gather8(buf, form - fnt_ptr->first_ade, str, stride, fwidth, n, height);
+            return;
+        }
+#endif
+        for (i = 0, xoff = 0; i < n; i++)
+        {
+            temp = cell_index(fnt_ptr, str[i]);
+            sx = fnt_ptr->off_table[temp];
+            dx = fnt_ptr->off_table[temp + 1] - sx;
+            nbytes = dx >> 3;
+            src = form + (sx >> 3);
+            dst = buf + xoff;
+            xoff += nbytes;
+            if (nbytes == 1)
+            {
+                for (row = height; row > 0; row--, src += fwidth, dst += stride)
+                    *dst = *src;
+            }
+            else
+            {
+                for (row = height; row > 0; row--, src += fwidth, dst += stride)
+                    memcpy(dst, src, nbytes);
+            }
+        }
+        return;
+    }
+
+    memset(buf, 0, (LONG)stride * height);
+    for (i = 0, xoff = 0; i < n; i++)
+    {
+        temp = cell_index(fnt_ptr, str[i]);
+        sx = fnt_ptr->off_table[temp];
+        dx = fnt_ptr->off_table[temp + 1] - sx;
+        src = form;
+        dst = buf;
+        for (row = height; row > 0; row--, src += fwidth, dst += stride)
+            text_bits(dst, (WORD)xoff, src, sx, dx);
+        xoff += dx;
+    }
+}
+
+/*
+ * draw the string: DESTX moves to the end of it, as the per-character loop
+ * leaves it
+ */
+static void text_string(const Fonthead *fnt_ptr, WORD count, const WORD *str)
+{
+    UBYTE *buf = (UBYTE *)vdishare.main.fill_buffer;
+    WORD height = fnt_ptr->form_height;
+    WORD stride, maxbits, n, width, kind;
+    LONG x, bits;
+
+    maxbits = 0;
+    if (height > 0)
+    {
+        bits = (LONG)((STRBUF_SIZE / height) & ~1) * 8;
+        maxbits = (bits > 8192) ? 8192 : (WORD)bits;
+    }
+
+    while (count > 0)
+    {
+        n = 0;
+        if (maxbits > 0)
+            n = text_cells(fnt_ptr, count, str, maxbits, &width, &kind);
+
+        /*
+         * stock behaviour for what the form cannot hold; and for text that
+         * starts or ends where the blit's arithmetic is not the same as the
+         * per-character loop's: left of the screen without a clip rectangle
+         * (the screen address wraps differently), or near the limits of a WORD
+         */
+        x = DESTX;
+        if ((n == 0) || (x < -STR_XLIMIT) || (x + width > STR_XLIMIT) || (!CLIP && x < 0))
+        {
+            text_char(fnt_ptr, *str);
+            n = 1;
+        }
+        else
+        {
+            stride = ((width + 15) >> 4) << 1;
+            text_gather(buf, stride, fnt_ptr, n, str, width, kind);
+            FBASE = (const UWORD *)buf;
+            FWIDTH = stride;
+            SOURCEX = 0;
+            SOURCEY = 0;
+            DELX = width;
+            DELY = height;
+            text_form = TRUE;
+            text_blt();
+            text_form = FALSE;
+        }
+        str += n;
+        count -= n;
+    }
+    FBASE = fnt_ptr->dat_table;
+    FWIDTH = fnt_ptr->form_width;
+}
+#endif /* CONF_WITH_VDI_FASTDRAW */
+
+/*
  * output specified text string
  *
  * 'width' is the pre-calculated width of the text on the screen;
@@ -301,6 +665,21 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
 
     if (count <= 0)     /* quick out for unlikely occurrence */
         return;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_font_selected(vwk))
+    {
+        if (!outline_text(vwk, count, str, width, justified))
+        {
+            /* the engine cannot draw it now: draw it in the system font */
+            fnt_ptr = vwk->cur_font;
+            vwk->cur_font = def_font;
+            output_text(vwk, count, str, width, justified);
+            vwk->cur_font = fnt_ptr;
+        }
+        return;
+    }
+#endif
 
     if (width < 0)      /* called from vdi_v_gtext() */
         width = calc_width(vwk, count, str);
@@ -351,43 +730,7 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
      */
     outline = (vwk->style & F_OUTLINE) ? OUTLINE_THICKNESS : 0;
 
-    switch(vwk->h_align) {
-    default:                /* normally case 0: left justified */
-        delh = 0;
-        break;
-    case 1:
-        delh = width / 2 - outline;
-        break;
-    case 2:
-        delh = width - (outline * 2);
-        break;
-    }
-
-    switch(vwk->v_align) {
-    default:                /* normally case 0: baseline */
-        delv = fnt_ptr->top;
-        delh += d1;
-        break;
-    case 1:
-        delv = fnt_ptr->top - fnt_ptr->half;
-        delh += (fnt_ptr->half * d2) / fnt_ptr->top;
-        break;
-    case 2:
-        delv = fnt_ptr->top - fnt_ptr->ascent;
-        delh += (fnt_ptr->ascent * d2) / fnt_ptr->top;
-        break;
-    case 3:
-        delv = fnt_ptr->top + fnt_ptr->bottom;
-        break;
-    case 4:
-        delv = fnt_ptr->top + fnt_ptr->descent;
-        delh += (fnt_ptr->descent * d1) / fnt_ptr->bottom;
-        break;
-    case 5:
-        delv = 0;
-        delh += d1 + d2;
-        break;
-    }
+    text_alignment(vwk, fnt_ptr, width, d1, d2, outline, &delh, &delv);
 
     /*
      * like Atari TOS, we try to ensure that any underline will fall within
@@ -441,6 +784,9 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
     }
 
     TEXTFG = vwk->text_color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    vdi_bg_text = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_TEXT) : 0;
+#endif
     DELY = fnt_ptr->form_height;
 
 #if CONF_WITH_VDI_TEXT_SPEEDUP
@@ -456,7 +802,21 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
 
     XDDA = 32767;       /* init the horizontal dda */
 
-    for (j = 0; j < count; j++) {
+    j = 0;
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * (one character: the loop is quicker than the form; from two on the
+     * form is, at every screen depth)
+     */
+    if ((count > 1) && !(vwk->style & ~F_UNDER) && !vwk->chup && !vwk->scaled && !justified
+        && !(fnt_ptr->flags & F_HORZ_OFF))
+    {
+        text_string(fnt_ptr, count, str);
+        j = count;
+    }
+#endif
+
+    for (; j < count; j++) {
 
         temp = str[j];
 
@@ -584,6 +944,9 @@ void text_init2(Vwk * vwk)
     vwk->v_align = 0;
     vwk->chup = 0;
     vwk->pts_mode = FALSE;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_init_vwk(vwk);
+#endif
 
     font_ring[2] = vwk->loaded_fonts;
     DEV_TAB[10] = vwk->num_fonts;
@@ -685,6 +1048,20 @@ void vdi_vst_height(Vwk * vwk)
     WORD font_id;
     UWORD test_height;
     BOOL found;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_face_selected(vwk))
+    {
+        vwk->pts_mode = FALSE;
+        /* busy: the face stays, and is sized when it is next used */
+        if (outline_set_height(vwk, PTSIN[1]) != OUTLINE_FAILED)
+        {
+            setup_width_height(vwk->cur_font);
+            return;
+        }
+        vwk->cur_font = &fon6x6;    /* the face cannot be used: the system font */
+    }
+#endif
 
     font_id = vwk->cur_font->font_id;
     vwk->pts_mode = FALSE;
@@ -825,6 +1202,21 @@ void vdi_vst_point(Vwk * vwk)
     WORD test_height, h;
     BOOL found;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_face_selected(vwk))
+    {
+        vwk->pts_mode = TRUE;
+        /* busy: the face stays, and is sized when it is next used */
+        if (outline_set_point(vwk, INTIN[0]) != OUTLINE_FAILED)
+        {
+            setup_width_height(vwk->cur_font);
+            INTOUT[0] = vwk->cur_font->point;
+            return;
+        }
+        vwk->cur_font = &fon6x6;    /* the face cannot be used: the system font */
+    }
+#endif
+
     font_id = vwk->cur_font->font_id;
     vwk->pts_mode = TRUE;
 
@@ -958,6 +1350,17 @@ void vdi_vst_font(Vwk * vwk)
         } while (!found && (test_font = test_font->next_font));
     }
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /*
+     * the outline fonts come after those; their ids are 5000 and up, and
+     * asking for one has the fonts folder scanned if nothing did yet
+     */
+    if (!found && (face >= OUTLINE_FIRST_ID)) {
+        outline_scan();
+        found = ((test_font = outline_find_face(vwk, face)) != NULL);
+    }
+#endif
+
     /* If we fell through the loop, we could not find the face. */
     /* Default to the system font.                  */
     if (!found)
@@ -993,6 +1396,9 @@ void vdi_vst_color(Vwk * vwk)
 
     INTOUT[0] = r;
     vwk->text_color = MAP_COL[r];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_TEXT);
+#endif
 }
 
 
@@ -1001,11 +1407,18 @@ void vdi_vqt_attributes(Vwk * vwk)
     WORD *pointer;
     const Fonthead *fnt_ptr;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_size_pending(vwk);
+#endif
     pointer = INTOUT;
     fnt_ptr = vwk->cur_font;
 
     *pointer++ = fnt_ptr->font_id;      /* INTOUT[0] */
+#if CONF_WITH_VDI_NVDI_EXT
+    *pointer++ = VDI_PEN_OF(vwk, VDI_COL_TEXT, vwk->text_color);   /* INTOUT[1] */
+#else
     *pointer++ = REV_MAP_COL[vwk->text_color];     /* INTOUT[1] */
+#endif
     *pointer++ = vwk->chup;        /* INTOUT[2] */
     *pointer++ = vwk->h_align;     /* INTOUT[3] */
     *pointer++ = vwk->v_align;     /* INTOUT[4] */
@@ -1025,8 +1438,24 @@ void vdi_vqt_extent(Vwk * vwk)
 {
     WORD height, width;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* the width first: measuring sizes a face kept while the engine was busy */
+    width = calc_width(vwk, CONTRL[3], INTIN);
+    height = calc_height(vwk);
+#else
     height = calc_height(vwk);
     width = calc_width(vwk, CONTRL[3], INTIN);
+#endif
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (measured_in_system_font)        /* and so is its height */
+    {
+        const Fonthead *fnt_ptr = vwk->cur_font;
+
+        vwk->cur_font = def_font;
+        height = calc_height(vwk);
+        vwk->cur_font = fnt_ptr;
+    }
+#endif
 
     bzero(PTSOUT,8*sizeof(WORD));
     switch (vwk->chup) {
@@ -1073,6 +1502,18 @@ void vdi_vqt_width(Vwk * vwk)
     *(pointer + 4) = 0;
 
     k = INTIN[0];
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (outline_font_selected(vwk) && (k >= fnt_ptr->first_ade) && (k <= fnt_ptr->last_ade))
+    {
+        if (outline_char_width(vwk, k, pointer))
+        {
+            INTOUT[0] = k;
+            flip_y = 1;
+            return;
+        }
+        fnt_ptr = def_font;     /* the engine cannot tell now: the system font */
+    }
+#endif
     if ((k < fnt_ptr->first_ade) || (k > fnt_ptr->last_ade))
         INTOUT[0] = -1;
     else {
@@ -1121,6 +1562,12 @@ void vdi_vqt_name(Vwk * vwk)
         } while (!found && (tmp_font = tmp_font->next_font));
     }
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* the outline fonts come after those */
+    if (!found)
+        found = ((tmp_font = outline_face_number(vwk, element - i)) != NULL);
+#endif
+
     /* The element is out of bounds - default to the system font */
     if (!found)
         tmp_font = &fon6x6;
@@ -1131,6 +1578,15 @@ void vdi_vqt_name(Vwk * vwk)
         ;
     while (i++ < FONT_NAME_LEN)
         *int_out++ = 0;
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* as NVDI: word 33 is 1 for a vector font (gemlib passes it on as name[32]) */
+    if (tmp_font->flags & F_OUTLINE_FONT)
+    {
+        INTOUT[33] = 1;
+        CONTRL[4] = 34;
+    }
+#endif
 }
 
 
@@ -1139,6 +1595,9 @@ void vdi_vqt_fontinfo(Vwk * vwk)
     WORD *pointer;
     const Fonthead *fnt_ptr;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_size_pending(vwk);
+#endif
     fnt_ptr = vwk->cur_font;
 
     pointer = INTOUT;
@@ -1183,6 +1642,9 @@ void gdp_justified(Vwk * vwk)
     WORD i, direction, delword, delchar;
     WORD *pointer, *str;
     JUSTINFO just;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    const Fonthead *kept_font = NULL;
+#endif
 
     cnt = CONTRL[3] - 2;
 
@@ -1201,6 +1663,18 @@ void gdp_justified(Vwk * vwk)
     }
 
     width = calc_width(vwk, cnt, str);
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /*
+     * measured in the system font, as the engine could not: then it is
+     * spaced and drawn in it too, even if the engine could draw it by now
+     */
+    if (measured_in_system_font)
+    {
+        kept_font = vwk->cur_font;
+        vwk->cur_font = def_font;
+    }
+#endif
 
     max_x = PTSIN[2];
 
@@ -1286,6 +1760,11 @@ void gdp_justified(Vwk * vwk)
     }
 
     output_text(vwk, cnt, str, max_x, &just);
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (kept_font)
+        vwk->cur_font = kept_font;
+#endif
 }
 
 
@@ -1301,7 +1780,11 @@ void vdi_vst_load_fonts(Vwk * vwk)
 
     /* You only get one chance to load fonts.  If fonts are linked in, exit  */
     if (vwk->loaded_fonts) {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        INTOUT[0] = outline_load_fonts(vwk);
+#else
         INTOUT[0] = 0;
+#endif
         return;
     }
 
@@ -1310,11 +1793,25 @@ void vdi_vst_load_fonts(Vwk * vwk)
     /* CONTRL[9]     = Offset to buffer 2       */
     /* CONTRL[10-11] = Pointer to first font    */
 
+    /*
+     * Without a GDOS, a program's own call reaches us with no font list
+     * (gemlib passes NULL): there is nothing to link in, and CONTRL[7-9]
+     * do not describe a scratch buffer either, so leave everything alone.
+     */
+    first_font = (Fonthead *) ULONG_AT(&control[10]);
+    if (!first_font || ((LONG)first_font & 1)) {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        INTOUT[0] = outline_load_fonts(vwk);
+#else
+        INTOUT[0] = 0;
+#endif
+        return;
+    }
+
     /* Init the global structures           */
     vwk->scrpt2 = control[9];
     vwk->scrtchp = (WORD *) ULONG_AT(&control[7]);
 
-    first_font = (Fonthead *) ULONG_AT(&control[10]);
     vwk->loaded_fonts = first_font;
 
     /* Find out how many distinct font id numbers have just been linked in. */
@@ -1343,7 +1840,12 @@ void vdi_vst_load_fonts(Vwk * vwk)
 
     /* Update the device table count of faces. */
     vwk->num_fonts += count;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    count += outline_load_fonts(vwk);
+#endif
     INTOUT[0] = count;
+#elif CONF_WITH_VDI_OUTLINE_FONTS
+    INTOUT[0] = outline_load_fonts(vwk);
 #else
     INTOUT[0] = 0;      /* we loaded no new fonts */
 #endif
@@ -1352,6 +1854,9 @@ void vdi_vst_load_fonts(Vwk * vwk)
 
 void vdi_vst_unload_fonts(Vwk * vwk)
 {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    outline_unload_fonts(vwk);
+#endif
 #if CONF_WITH_GDOS
     /* Since we always unload all fonts, this is easy. */
     vwk->loaded_fonts = NULL;           /* No fonts installed */
@@ -1389,3 +1894,267 @@ static UWORD clc_dda(Vwk * vwk, UWORD act, UWORD req)
 
     return divu(((ULONG)req)<<16, act);
 }
+
+
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+static WORD clamp_to_word(LONG value)
+{
+    if (value > 32767L)
+        return 32767;
+    if (value < -32768L)
+        return -32768;
+
+    return (WORD)value;
+}
+#endif
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/*
+ * ===========================================================================
+ * For the NVDI calls (vdi_nvdi.c)
+ * ===========================================================================
+ */
+
+/* the character and cell sizes of the current font, as vst_point() gives them */
+void text_size_out(Vwk *vwk)
+{
+    setup_width_height(vwk->cur_font);
+}
+
+
+/*
+ * the font that vqt_name() lists as number n, counting from 1 (the first
+ * size of its face); NULL if there is none
+ */
+const Fonthead *text_font_number(Vwk *vwk, WORD n)
+{
+    const Fonthead **chain_ptr = font_ring, *f;
+    WORD i = 0, current_id = -1;
+
+    if (n < 1)
+        return NULL;
+
+    while ((f = *chain_ptr++)) {
+        do {
+            if (f->font_id != current_id) {
+                current_id = f->font_id;
+                if (++i == n)
+                    return f;
+            }
+        } while ((f = f->next_font));
+    }
+
+    return outline_face_number(vwk, n - i);
+}
+
+
+/*
+ * the number vqt_name() lists the font with this id as, with the font in
+ * *font; 0 if the workstation has no such font
+ */
+WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font)
+{
+    const Fonthead **chain_ptr = font_ring, *f;
+    WORD i = 0, j, current_id = -1;
+
+    while ((f = *chain_ptr++)) {
+        do {
+            if (f->font_id != current_id) {
+                current_id = f->font_id;
+                i++;
+                if (f->font_id == id) {
+                    *font = f;
+                    return i;
+                }
+            }
+        } while ((f = f->next_font));
+    }
+
+    for (j = 1; (f = outline_face_number(vwk, j)); j++) {
+        if (f->font_id == id) {
+            *font = f;
+            return i + j;
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * v_ftext() (241): what NVDI positions more finely than v_gtext(), here
+ * drawn just as v_gtext() draws it
+ *
+ * With more points than the first, it is v_ftext_offset(): each character
+ * is drawn on its own, moved by its offset from where the one before it
+ * went (the first from the point given), as fVDI places them.  Characters
+ * without an offset are left out.  The horizontal alignment takes the
+ * text from the point to the end of the last character.
+ */
+#define FTEXT_MAX_OFFS  ((2*MAX_VERTICES - SCRATCHBUF_SIZE/(WORD)sizeof(WORD)) / 2)
+static WORD ftext_offs[2*FTEXT_MAX_OFFS];
+static BOOL ftext_offs_busy;
+
+void vdi_v_ftext(Vwk * vwk)
+{
+    WORD count = CONTRL[3], offsets = CONTRL[1] - 1, i, h_align;
+    WORD *off;
+    BOOL owner;
+    LONG x, y, width, sx = 0, sy = 0;
+
+    if ((offsets <= 0) || (count <= 0)) {
+        output_text(vwk, count, INTIN, -1, NULL);
+        return;
+    }
+    if (count > offsets)
+        count = offsets;
+
+    /*
+     * The offsets are kept in a buffer of this call's own: PTSIN is the
+     * VDI's copy of the points, which shares vdishare with other things
+     * (the text scratch buffer, and what another program's VDI call puts
+     * there while this one sleeps in the outline font engine).  If
+     * another call is using the buffer, its owner sleeps in the font
+     * engine and holds the font stack: this call cannot sleep there, and
+     * keeps the offsets in vdishare past the scratch area.  A string too
+     * long for the room is cut short.
+     */
+    if (count > FTEXT_MAX_OFFS)
+        count = FTEXT_MAX_OFFS;
+    owner = !ftext_offs_busy;
+    if (owner) {
+        off = ftext_offs;
+        memcpy(off, PTSIN + 2, count * 2 * sizeof(WORD));
+        ftext_offs_busy = TRUE;
+    } else {
+        off = PTSIN + SCRATCHBUF_SIZE/sizeof(WORD);
+        memmove(off, PTSIN + 2, count * 2 * sizeof(WORD));
+    }
+
+    if (vwk->h_align) {
+        for (i = 0, width = 0; i < count; i++)
+            width += off[2*i];
+        width += calc_width(vwk, 1, &INTIN[count-1]);
+        if (vwk->h_align == 1)
+            width /= 2;
+        switch(vwk->chup) {             /* as output_text() moves for it */
+        default:
+            sx = -width;
+            break;
+        case 900:
+            sy = width;
+            break;
+        case 1800:
+            sx = width;
+            break;
+        case 2700:
+            sy = -width;
+            break;
+        }
+    }
+
+    h_align = vwk->h_align;
+    vwk->h_align = 0;
+    x = PTSIN[0];
+    y = PTSIN[1];
+    for (i = 0; i < count; i++) {
+        x += off[2*i];
+        y += off[2*i+1];
+        PTSIN[0] = clamp_to_word(x + sx);
+        PTSIN[1] = clamp_to_word(y + sy);
+        output_text(vwk, 1, &INTIN[i], -1, NULL);
+    }
+    vwk->h_align = h_align;
+    if (owner)
+        ftext_offs_busy = FALSE;
+}
+
+
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS */
+
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+/*
+ * vqt_real_extent() (240 sub 4200): the box that the string drawn by
+ * v_gtext() at PTSIN[0],PTSIN[1] covers, with the text alignment and
+ * effects, as its corners bottom left, bottom right, top right and top
+ * left along the text, turned with the text when it is rotated
+ *
+ * As in fVDI, the width is vqt_f_extent()'s and the top and bottom lines
+ * are vqt_fontinfo()'s, so the box of italic text holds its slant.
+ */
+void vdi_vqt_real_extent(Vwk * vwk)
+{
+    const Fonthead *fnt_ptr;
+    LONG width, left, right, top, bottom, u, v, x, y;
+    WORD i, delh, delv, d1, d2, outline;
+
+    CONTRL[2] = 0;
+    if (CONTRL[1] < 1)                  /* no position given: nothing is read */
+        return;
+    CONTRL[2] = 4;
+
+    width = calc_width(vwk, CONTRL[3], INTIN);
+    fnt_ptr = vwk->cur_font;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (measured_in_system_font)
+        fnt_ptr = def_font;
+#endif
+
+    /*
+     * the alignment of output_text(): the box starts delh back and delv up;
+     * unrotated it is fVDI's rectangle, rotated it is where output_text()
+     * puts the cells, with its skew and outline offsets
+     */
+    d1 = d2 = outline = 0;
+    if (vwk->chup != 0)
+    {
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        if (!outline_font_selected(vwk) || measured_in_system_font)
+#endif
+        {
+            if (vwk->style & F_SKEW)
+            {
+                d1 = fnt_ptr->left_offset;
+                d2 = fnt_ptr->right_offset;
+            }
+            if (vwk->style & F_OUTLINE)
+                outline = OUTLINE_THICKNESS;
+        }
+    }
+    text_alignment(vwk, fnt_ptr, (WORD)width, d1, d2, outline, &delh, &delv);
+    left = -(LONG)delh - outline;
+    right = left + width;
+    top = -(LONG)delv;
+    bottom = top + fnt_ptr->top + fnt_ptr->bottom;
+    if (outline && vwk->chup != 0)      /* output_text() starts the cells */
+    {                                   /* outline early and 2 outlines tall */
+        top -= outline;
+        bottom += outline;
+    }
+
+    for (i = 0; i < 4; i++) {
+        u = ((i == 0) || (i == 3)) ? left : right;
+        v = (i < 2) ? bottom : top;
+        switch(vwk->chup) {             /* as output_text() turns the text */
+        default:
+            x = u;
+            y = v;
+            break;
+        case 900:
+            x = v;
+            y = -u;
+            break;
+        case 1800:
+            x = -u;
+            y = -v;
+            break;
+        case 2700:
+            x = -v;
+            y = u;
+            break;
+        }
+        PTSOUT[2*i] = clamp_to_word(PTSIN[0] + x);
+        PTSOUT[2*i+1] = clamp_to_word(PTSIN[1] + y);
+    }
+}
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT */

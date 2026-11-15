@@ -144,9 +144,19 @@ void vdi_vsl_color(Vwk * vwk)
 {
     WORD lc;
 
+#if CONF_WITH_VDI_FASTDRAW
+    /* validate_color_index() without the call */
+    lc = INTIN[0];
+    if ((lc < 0) || (lc >= numcolors))
+        lc = 1;
+#else
     lc = validate_color_index(INTIN[0]);
+#endif
     INTOUT[0] = lc;
     vwk->line_color = MAP_COL[lc];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_LINE);
+#endif
 }
 
 
@@ -156,7 +166,11 @@ void vdi_vsl_color(Vwk * vwk)
 void vdi_vql_attributes(Vwk * vwk)
 {
     INTOUT[0] = vwk->line_index + 1;
+#if CONF_WITH_VDI_NVDI_EXT
+    INTOUT[1] = VDI_PEN_OF(vwk, VDI_COL_LINE, vwk->line_color);
+#else
     INTOUT[1] = REV_MAP_COL[vwk->line_color];
+#endif
     INTOUT[2] = vwk->wrt_mode + 1;
 
     PTSOUT[0] = vwk->line_width;
@@ -438,6 +452,269 @@ static void hwblit_rect_common(const VwkAttrib *attr, const Rect *rect)
 
 
 #if CONF_WITH_VDI_16BIT
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * solid_run16 - store n pixels of colour pix, starting at p
+ *
+ * The odd leading pixel is stored alone, so that every following store is
+ * a long word store at a long word address; the body then writes pairs of
+ * pixels as longs, unrolled eight deep (16 pixels a pass).
+ */
+static void solid_run16(UWORD *p, LONG n, UWORD pix)
+{
+    ULONG pair, *q;
+    LONG pairs;
+
+    if (n < 8)                  /* short runs: the setup below costs more than the pixels */
+    {
+        for ( ; n > 0; n--)
+            *p++ = pix;
+        return;
+    }
+
+    if ((LONG)p & 2)
+    {
+        *p++ = pix;
+        n--;
+    }
+
+    pair = ((ULONG)pix << 16) | pix;
+    q = (ULONG *)p;
+
+    for (pairs = n >> 5; pairs > 0; pairs--)
+    {
+        q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
+        q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
+        q[8] = pair; q[9] = pair; q[10] = pair; q[11] = pair;
+        q[12] = pair; q[13] = pair; q[14] = pair; q[15] = pair;
+        q += 16;
+    }
+    if (n & 16)
+    {
+        q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
+        q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
+        q += 8;
+    }
+    for (pairs = (n & 15) >> 1; pairs > 0; pairs--)
+        *q++ = pair;
+
+    if (n & 1)
+        *(UWORD *)q = pix;
+}
+
+/*
+ * not_run16 - complement n pixels, starting at p; as solid_run16(), a pair
+ * of pixels at a time (complementing a long complements both its pixels)
+ */
+static void not_run16(UWORD *p, LONG n)
+{
+    ULONG *q;
+    LONG pairs;
+
+    if (n < 8)                  /* short runs: the setup below costs more than the pixels */
+    {
+        for ( ; n > 0; n--, p++)
+            *p = ~*p;
+        return;
+    }
+
+    if ((LONG)p & 2)
+    {
+        *p = ~*p;
+        p++;
+        n--;
+    }
+
+    q = (ULONG *)p;
+
+    for (pairs = n >> 5; pairs > 0; pairs--)
+    {
+        q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
+        q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
+        q[8] = ~q[8]; q[9] = ~q[9]; q[10] = ~q[10]; q[11] = ~q[11];
+        q[12] = ~q[12]; q[13] = ~q[13]; q[14] = ~q[14]; q[15] = ~q[15];
+        q += 16;
+    }
+    if (n & 16)
+    {
+        q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
+        q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
+        q += 8;
+    }
+    for (pairs = (n & 15) >> 1; pairs > 0; pairs--)
+    {
+        *q = ~*q;
+        q++;
+    }
+
+    if (n & 1)
+    {
+        UWORD *w = (UWORD *)q;
+        *w = ~*w;
+    }
+}
+
+/*
+ * pattern_run16 - replace mode: n pixels, set bits of the pattern word pw
+ * in fgcol, clear bits in bgcol; phase is the pattern bit of the first pixel
+ *
+ * The output repeats every 16 pixels, so one period is built per row, as
+ * eight longs, and stored over and over.  Each pass writes exactly 16
+ * pixels, so the same eight longs serve the whole row.
+ */
+static void pattern_run16(UWORD *p, LONG n, UWORD pw, WORD phase,
+                          UWORD fgcol, UWORD bgcol)
+{
+    ULONG blk[8], *q;
+    LONG k;
+
+    if (n <= 0)
+        return;
+
+    if ((LONG)p & 2)
+    {
+        *p++ = (pw & (0x8000U >> (phase & 15))) ? fgcol : bgcol;
+        phase++;
+        n--;
+    }
+
+    for (k = 0; k < 8; k++)
+    {
+        UWORD hi = (pw & (0x8000U >> ((phase + 2 * k) & 15))) ? fgcol : bgcol;
+        UWORD lo = (pw & (0x8000U >> ((phase + 2 * k + 1) & 15))) ? fgcol : bgcol;
+        blk[k] = ((ULONG)hi << 16) | lo;
+    }
+
+    q = (ULONG *)p;
+    for (k = n >> 4; k > 0; k--)
+    {
+        q[0] = blk[0]; q[1] = blk[1]; q[2] = blk[2]; q[3] = blk[3];
+        q[4] = blk[4]; q[5] = blk[5]; q[6] = blk[6]; q[7] = blk[7];
+        q += 8;
+    }
+
+    n &= 15;
+    k = 0;
+    while (n >= 2)
+    {
+        *q++ = blk[k++];
+        n -= 2;
+    }
+    if (n)
+        *(UWORD *)q = (UWORD)(blk[k] >> 16);
+}
+
+/*
+ * pair masks for sel_run16() and selnot_run16(): index = the two pattern
+ * bits of a pixel pair, the first pixel being the high bit and the high
+ * half of the long (big endian)
+ */
+static const ULONG pairmask16[4] = { 0x00000000UL, 0x0000ffffUL, 0xffff0000UL, 0xffffffffUL };
+
+/* rotate a pattern word left, so that its bit 15 is the pattern bit of the first pixel */
+#define ROTL16(w, n)    ((UWORD)(((ULONG)(w) << (n)) | ((ULONG)(w) >> (16 - (n)))))
+
+/*
+ * sel_run16 - n pixels from p: store fgcol in the pixels whose bit is set
+ * in the pattern word sel (phase is the bit of the first pixel), leave the
+ * others alone
+ *
+ * As pattern_run16(), one 16-pixel period is prepared per row, here as
+ * eight AND and eight OR masks; each long of the row is then updated with
+ * one read, one AND, one OR and one write, whatever the pattern.
+ */
+static void sel_run16(UWORD *p, LONG n, UWORD sel, WORD phase, UWORD fgcol)
+{
+    ULONG keep[8], put[8], *q, pair;
+    UWORD rot;
+    LONG k;
+
+    if (n <= 0)
+        return;
+
+    rot = ROTL16(sel, phase);
+    if ((LONG)p & 2)
+    {
+        if (rot & 0x8000)
+            *p = fgcol;
+        p++;
+        n--;
+        rot = ROTL16(rot, 1);
+    }
+
+    pair = ((ULONG)fgcol << 16) | fgcol;
+    for (k = 0; k < 8; k++)
+    {
+        ULONG m = pairmask16[(rot >> (14 - 2 * k)) & 3];
+        keep[k] = ~m;
+        put[k] = pair & m;
+    }
+
+    q = (ULONG *)p;
+    for (k = n >> 4; k > 0; k--)
+    {
+        q[0] = (q[0] & keep[0]) | put[0];
+        q[1] = (q[1] & keep[1]) | put[1];
+        q[2] = (q[2] & keep[2]) | put[2];
+        q[3] = (q[3] & keep[3]) | put[3];
+        q[4] = (q[4] & keep[4]) | put[4];
+        q[5] = (q[5] & keep[5]) | put[5];
+        q[6] = (q[6] & keep[6]) | put[6];
+        q[7] = (q[7] & keep[7]) | put[7];
+        q += 8;
+    }
+
+    n &= 15;
+    for (k = 0; n >= 2; k++, n -= 2, q++)
+        *q = (*q & keep[k]) | put[k];
+    if (n && (rot & (0x8000U >> (2 * k))))
+        *(UWORD *)q = fgcol;
+}
+
+/*
+ * selnot_run16 - the same, complementing the selected pixels (xor mode)
+ */
+static void selnot_run16(UWORD *p, LONG n, UWORD sel, WORD phase)
+{
+    ULONG flip[8], *q;
+    UWORD rot;
+    LONG k;
+
+    if (n <= 0)
+        return;
+
+    rot = ROTL16(sel, phase);
+    if ((LONG)p & 2)
+    {
+        if (rot & 0x8000)
+            *p = ~*p;
+        p++;
+        n--;
+        rot = ROTL16(rot, 1);
+    }
+
+    for (k = 0; k < 8; k++)
+        flip[k] = pairmask16[(rot >> (14 - 2 * k)) & 3];
+
+    q = (ULONG *)p;
+    for (k = n >> 4; k > 0; k--)
+    {
+        q[0] ^= flip[0]; q[1] ^= flip[1]; q[2] ^= flip[2]; q[3] ^= flip[3];
+        q[4] ^= flip[4]; q[5] ^= flip[5]; q[6] ^= flip[6]; q[7] ^= flip[7];
+        q += 8;
+    }
+
+    n &= 15;
+    for (k = 0; n >= 2; k++, n -= 2, q++)
+        *q ^= flip[k];
+    if (n && (rot & (0x8000U >> (2 * k))))
+    {
+        UWORD *w = (UWORD *)q;
+        *w = ~*w;
+    }
+}
+#endif /* CONF_WITH_VDI_FASTDRAW */
+
 /*
  * swblit_rect_common16 - draw one or more horizontal lines via software, 16-bit mode
  *
@@ -454,11 +731,19 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
     UWORD *addr, *work, *palette;
     UWORD bgcol, fgcol, mask, pattern;
     int x, y, patind;
+#if CONF_WITH_VDI_FASTDRAW
+    const LONG count = (LONG)rect->x2 - rect->x1 + 1;
+    const WORD phase = rect->x1 & 0x000f;   /* before mask and x change */
+#endif
 
     addr = get_start_addr16(rect->x1, rect->y1);
     palette = CUR_WORK->ext->palette;
     fgcol = palette[attr->color];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[attr->bgcolor];
+#else
     bgcol = palette[0];     //FIXME ??
+#endif
 
     switch(attr->wrt_mode) {
     case WM_ERASE:          /* erase (reverse transparent) mode */
@@ -466,11 +751,21 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0x0000) {        /* simple case */
+                solid_run16(work, count, fgcol);
+            } else if (pattern != 0xffff) { /* (0xffff: nothing to draw) */
+                sel_run16(work, count, ~pattern, phase, fgcol);
+            }
+            continue;
+#else
             if (pattern == 0x0000) {        /* simple case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     *work++ = fgcol;
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++, work++) {
                     if (!(pattern & mask)) {
@@ -488,12 +783,22 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0xffff) {        /* common case */
+                not_run16(work, count);
+            } else if (pattern != 0x0000) { /* (0x0000: nothing to draw) */
+                selnot_run16(work, count, pattern, phase);
+            }
+            continue;
+#else
             if (pattern == 0xffff) {        /* common case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     temp = *work;
                     *work++ = ~temp;        /* complement the existing colour */
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++, work++) {
                     if (pattern & mask) {
@@ -510,11 +815,21 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0xffff) {        /* common case */
+                solid_run16(work, count, fgcol);
+            } else if (pattern != 0x0000) { /* (0x0000: nothing to draw) */
+                sel_run16(work, count, pattern, phase, fgcol);
+            }
+            continue;
+#else
             if (pattern == 0xffff) {        /* common case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     *work++ = fgcol;
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++, work++) {
                     if (pattern & mask) {
@@ -530,11 +845,23 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
             work = addr;
             patind = patmsk & y;            /* starting pattern index */
             pattern = attr->patptr[patind];
+#if CONF_WITH_VDI_FASTDRAW
+            if (pattern == 0xffff) {        /* common case */
+                solid_run16(work, count, fgcol);
+            } else if (pattern == 0x0000) { /* every pixel is background */
+                solid_run16(work, count, bgcol);
+            } else {
+                pattern_run16(work, count, pattern, phase, fgcol, bgcol);
+            }
+            continue;
+#else
             if (pattern == 0xffff) {        /* common case */
                 for (x = rect->x1; x <= rect->x2; x++) {
                     *work++ = fgcol;
                 }
-            } else {
+            } else
+#endif
+            {
                 mask = 1U << (15 - (rect->x1 & 0x000f));
                 for (x = rect->x1; x <= rect->x2; x++) {
                     if (pattern & mask) {
@@ -550,6 +877,239 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
     }
 }
 #endif
+
+
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * Solid fills on two, four and eight planes, a column of planes at a time
+ *
+ * The words of the planes of one 16 pixel group are neighbours, so two
+ * planes are handled as one long word, and every plane word of a row and
+ * column is changed as
+ *
+ *      new = (old & keep) ^ set
+ *
+ * with keep and set worked out once per fill for the left end, the middle
+ * and the right end, from the writing mode as the line code does (there m
+ * is the pixels covered, s those the pattern draws: here m is the end
+ * mask and s is pattern & m; the pattern is complemented in erase mode):
+ *
+ *      replace: keep = ~m, set = s    transparent: keep = ~s, set = s
+ *      xor:     keep = ~0, set = s    erase:       keep = ~s', set = s'
+ *
+ * where set is 0 in the planes whose colour bit is clear (except in xor
+ * mode, where the colour does not matter).  The pattern is one word for
+ * every row (patmsk 0, no multifill).  Needs two words in a row and two
+ * rows at least (a single row is not worth the set up), and a long word
+ * aligned screen.
+ */
+
+/*
+ * keep and set longs for the plane pairs of one column type (end mask m);
+ * the first plane of a pair is the high word
+ *
+ * The keep/set values per write mode must agree with LP_SETUP/LP_PAIRS
+ * (the line drawing).  This fill treats an out-of-range mode as replace,
+ * as stock does; lp_usable() rejects such modes for lines.
+ */
+static void fs_masks(WORD wrt_mode, UWORD pat, UWORD m, UWORD color,
+                     WORD np, ULONG *keep, ULONG *set)
+{
+    UWORD s, km;
+    WORD i;
+
+    switch (wrt_mode)
+    {
+    case WM_ERASE:
+        s = ~pat & m;
+        km = s;
+        break;
+    case WM_XOR:
+        s = pat & m;
+        km = 0;
+        color = 0xffff;
+        break;
+    case WM_TRANS:
+        s = pat & m;
+        km = s;
+        break;
+    default:
+        s = pat & m;
+        km = m;
+        break;
+    }
+
+    for (i = 0; i < np; i++, color >>= 2)
+    {
+        UWORD c0 = -(WORD)(color & 1);
+        UWORD c1 = -(WORD)((color >> 1) & 1);
+
+        keep[i] = (((ULONG)(UWORD)~km) << 16) | (UWORD)~km;
+        set[i] = ((ULONG)(s & c0) << 16) | (UWORD)(s & c1);
+    }
+}
+
+/* one long word per pair of planes */
+#define FS_EACH(stmt) \
+    do { \
+        { const WORD i = 0; stmt; } \
+        if (np >= 2) { const WORD i = 1; stmt; } \
+        if (np >= 4) { { const WORD i = 2; stmt; } { const WORD i = 3; stmt; } } \
+    } while (0)
+
+/*
+ * The per write mode handling here must agree with fs_masks() and with
+ * LP_SETUP/LP_PAIRS (lines); out-of-range modes are replace, as stock.
+ */
+static inline __attribute__((always_inline))
+void fs_rows(WORD wrt_mode, UWORD *addr, WORD rows, WORD centre,
+             const ULONG *kl, const ULONG *sl, const ULONG *kc, const ULONG *sc,
+             const ULONG *kr, const ULONG *sr, const WORD np)
+{
+    const LONG rowbytes = v_lin_wr;
+    WORD n;
+
+    do
+    {
+        ULONG_ALIAS *l = (ULONG_ALIAS *)addr;
+
+        FS_EACH(l[i] = (l[i] & kl[i]) ^ sl[i]);
+        l += np;
+
+        if (wrt_mode == WM_XOR)
+        {
+            for (n = centre; n > 0; n--, l += np)
+                FS_EACH(l[i] ^= sc[i]);
+        }
+        else if (wrt_mode == WM_TRANS || wrt_mode == WM_ERASE)
+        {
+            for (n = centre; n > 0; n--, l += np)
+                FS_EACH(l[i] = (l[i] & kc[i]) ^ sc[i]);
+        }
+        else
+        {
+            for (n = centre; n > 0; n--, l += np)
+                FS_EACH(l[i] = sc[i]);
+        }
+
+        FS_EACH(l[i] = (l[i] & kr[i]) ^ sr[i]);
+
+        addr = (UWORD *)((UBYTE *)addr + rowbytes);
+    } while (--rows > 0);
+}
+
+/* can swblit_rect_common_solid() draw this? */
+static inline __attribute__((always_inline)) BOOL fs_usable(const VwkAttrib *attr, const UWORD *addr, WORD width, WORD height)
+{
+    WORD vp = v_planes;
+
+    return (vp == 2 || vp == 4 || vp == 8)
+        && attr->patmsk == 0 && !attr->multifill
+        && width >= 2 && height >= 2
+        && ((((LONG)addr) | (LONG)v_lin_wr) & 3) == 0;
+}
+
+static __attribute__((noinline)) void swblit_rect_common_solid(const VwkAttrib *attr, const Rect *rect,
+                                                    UWORD *addr, WORD width,
+                                                    UWORD leftmask, UWORD rightmask)
+{
+    const WORD wrt_mode = attr->wrt_mode;
+    const UWORD pat = attr->patptr[0];
+    const WORD np = v_planes >> 1;
+    const WORD rows = rect->y2 - rect->y1 + 1;
+    const WORD centre = width - 2;
+    ULONG kl[4], sl[4], kc[4], sc[4], kr[4], sr[4];
+
+    fs_masks(wrt_mode, pat, leftmask, attr->color, np, kl, sl);
+    fs_masks(wrt_mode, pat, 0xffff, attr->color, np, kc, sc);
+    fs_masks(wrt_mode, pat, rightmask, attr->color, np, kr, sr);
+
+    if (np == 1)
+        fs_rows(wrt_mode, addr, rows, centre, kl, sl, kc, sc, kr, sr, 1);
+    else if (np == 2)
+        fs_rows(wrt_mode, addr, rows, centre, kl, sl, kc, sc, kr, sr, 2);
+    else
+        fs_rows(wrt_mode, addr, rows, centre, kl, sl, kc, sc, kr, sr, 4);
+}
+
+/*
+ * Replace mode with a one plane pattern of up to 16 rows (a patterned
+ * fill): the same long word stores, with the pattern row of every scan
+ * line taken into the plane pairs as it comes.  The end masks keep the
+ * pixels outside the rectangle, as in swblit_rect_common_solid().
+ */
+static inline __attribute__((always_inline))
+void fs_pat_rows(UWORD *addr, WORD y, WORD rows, WORD centre,
+                 const VwkAttrib *attr, const ULONG *cm,
+                 ULONG lm, ULONG rm, const WORD np)
+{
+    const LONG rowbytes = v_lin_wr;
+    const UWORD patmsk = attr->patmsk;
+    const UWORD *patptr = attr->patptr;
+    WORD n;
+
+    do
+    {
+        const UWORD pat = patptr[patmsk & y];
+        const ULONG pair = ((ULONG)pat << 16) | pat;
+        ULONG sc[4];
+        ULONG_ALIAS *l = (ULONG_ALIAS *)addr;
+
+        FS_EACH(sc[i] = pair & cm[i]);
+        FS_EACH(l[i] = (l[i] & ~lm) | (sc[i] & lm));
+        l += np;
+        for (n = centre; n > 0; n--, l += np)
+            FS_EACH(l[i] = sc[i]);
+        FS_EACH(l[i] = (l[i] & ~rm) | (sc[i] & rm));
+
+        addr = (UWORD *)((UBYTE *)addr + rowbytes);
+        y++;
+    } while (--rows > 0);
+}
+
+/* can swblit_rect_common_pat() draw this? */
+static inline __attribute__((always_inline)) BOOL fs_pat_usable(const VwkAttrib *attr, const UWORD *addr, WORD width, WORD height)
+{
+    WORD vp = v_planes;
+    WORD mode = attr->wrt_mode;
+
+    return (vp == 2 || vp == 4 || vp == 8)
+        && mode != WM_ERASE && mode != WM_XOR && mode != WM_TRANS      /* replace, as stock */
+        && !attr->multifill
+        && width >= 2 && height >= 2
+        && ((((LONG)addr) | (LONG)v_lin_wr) & 3) == 0;
+}
+
+static __attribute__((noinline)) void swblit_rect_common_pat(const VwkAttrib *attr, const Rect *rect,
+                                                  UWORD *addr, WORD width,
+                                                  UWORD leftmask, UWORD rightmask)
+{
+    const WORD np = v_planes >> 1;
+    const WORD rows = rect->y2 - rect->y1 + 1;
+    const WORD centre = width - 2;
+    const ULONG lm = ((ULONG)leftmask << 16) | leftmask;
+    const ULONG rm = ((ULONG)rightmask << 16) | rightmask;
+    ULONG cm[4];
+    UWORD color = attr->color;
+    WORD i;
+
+    /* a plane takes the pattern if its bit of the colour is set, else zeros */
+    for (i = 0; i < np; i++, color >>= 2)
+    {
+        UWORD c0 = -(WORD)(color & 1);
+        UWORD c1 = -(WORD)((color >> 1) & 1);
+
+        cm[i] = ((ULONG)c0 << 16) | c1;
+    }
+
+    if (np == 1)
+        fs_pat_rows(addr, rect->y1, rows, centre, attr, cm, lm, rm, 1);
+    else if (np == 2)
+        fs_pat_rows(addr, rect->y1, rows, centre, attr, cm, lm, rm, 2);
+    else
+        fs_pat_rows(addr, rect->y1, rows, centre, attr, cm, lm, rm, 4);
+}
+#endif /* CONF_WITH_VDI_FASTDRAW */
 
 
 /*
@@ -582,6 +1142,17 @@ static void OPTIMIZE_SMALL swblit_rect_common(const VwkAttrib *attr, const Rect 
 
     /* set up masks, width, screen address pointer */
     draw_rect_setup(&b, attr, rect);
+
+#if CONF_WITH_VDI_FASTDRAW
+    if (fs_usable(attr, b.addr, b.width, rect->y2 - rect->y1 + 1)) {
+        swblit_rect_common_solid(attr, rect, b.addr, b.width, b.leftmask, b.rightmask);
+        return;
+    }
+    if (fs_pat_usable(attr, b.addr, b.width, rect->y2 - rect->y1 + 1)) {
+        swblit_rect_common_pat(attr, rect, b.addr, b.width, b.leftmask, b.rightmask);
+        return;
+    }
+#endif
 
     centre = b.width - 2 - 1;   /* -1 because of the way we construct the innermost loops */
 
@@ -825,6 +1396,9 @@ void Vwk2Attrib(const Vwk *vwk, VwkAttrib *attr, const UWORD color)
     attr->patptr = vwk->patptr;
     attr->wrt_mode = vwk->wrt_mode;
     attr->color = color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    attr->bgcolor = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_FILL) : 0;
+#endif
 }
 
 
@@ -894,6 +1468,9 @@ static void lineA2Attrib(VwkAttrib *attr)
     }
     attr->wrt_mode = WRT_MODE;
     attr->color = linea_color();
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    attr->bgcolor = 0;
+#endif
 }
 
 
@@ -994,6 +1571,11 @@ void linea_fill(void)
 }
 
 
+#if CONF_WITH_VDI_FASTDRAW
+static void polyline_single(Vwk * vwk, const Point * point, WORD color);
+#endif
+
+
 /*
  * vdi_v_pline - wrapper for polyline/wideline
  */
@@ -1012,6 +1594,11 @@ void vdi_v_pline(Vwk * vwk)
 #endif
     {
         if (vwk->line_width == 1) {
+#if CONF_WITH_VDI_FASTDRAW
+            if (count == 2)
+                polyline_single(vwk, point, vwk->line_color);
+            else
+#endif
             polyline(vwk, point, count, vwk->line_color);
             if ((vwk->line_beg | vwk->line_end) & ARROWED)
                 arrow(vwk, point, count);
@@ -1054,7 +1641,30 @@ static WORD clip_code(Vwk * vwk, WORD x, WORD y)
  * returns FALSE iff the line lies outside the clipping rectangle
  * otherwise, updates the contents of the Line structure & returns TRUE
  */
+#if CONF_WITH_VDI_FASTDRAW
+/* both end points of the line are inside the clipping rectangle: nothing to clip */
+static __inline__ BOOL line_inside_clip(const Vwk * vwk, const Line * line)
+{
+    const WORD xmn = vwk->xmn_clip, xmx = vwk->xmx_clip;
+    const WORD ymn = vwk->ymn_clip, ymx = vwk->ymx_clip;
+
+    return line->x1 >= xmn && line->x1 <= xmx && line->x2 >= xmn && line->x2 <= xmx &&
+           line->y1 >= ymn && line->y1 <= ymx && line->y2 >= ymn && line->y2 <= ymx;
+}
+
+static BOOL clip_line_general(Vwk * vwk, Line * line);
+
 BOOL clip_line(Vwk * vwk, Line * line)
+{
+    if (line_inside_clip(vwk, line))
+        return TRUE;
+    return clip_line_general(vwk, line);
+}
+
+static BOOL clip_line_general(Vwk * vwk, Line * line)
+#else
+BOOL clip_line(Vwk * vwk, Line * line)
+#endif
 {
     WORD deltax, deltay, x1y1_clip_flag, x2y2_clip_flag, line_clip_flag;
     WORD *x, *y;
@@ -1092,6 +1702,37 @@ BOOL clip_line(Vwk * vwk, Line * line)
 }
 
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * polyline_single - polyline() of one segment
+ *
+ * the same steps for two points, without the loop and the registers it needs
+ */
+static void polyline_single(Vwk * vwk, const Point * point, WORD color)
+{
+    Line line;
+
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    /* the line background shows only in the gaps of a style: a solid line has none */
+    if (TRUECOLOR_MODE && LN_MASK != 0xffff)
+        vdi_bg_line = vdi_bg_index(vwk, VDI_COL_LINE);
+    else
+        vdi_bg_line = 0;
+#endif
+    LSTLIN = TRUE;
+    line.x1 = point[0].x;
+    line.y1 = point[0].y;
+    line.x2 = point[1].x;
+    line.y2 = point[1].y;
+
+    if (vwk->clip && !line_inside_clip(vwk, &line) && !clip_line_general(vwk, &line))
+        return;
+
+    abline(&line, vwk->wrt_mode, color);
+}
+#endif
+
+
 /*
  * polyline - draw a poly-line
  *
@@ -1103,6 +1744,17 @@ void polyline(Vwk * vwk, Point * point, int count, WORD color)
     int i;
     Line line;
 
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+#if CONF_WITH_VDI_FASTDRAW
+    /* the line background shows only in the gaps of a style: a solid line has none */
+    if (TRUECOLOR_MODE && LN_MASK != 0xffff)
+        vdi_bg_line = vdi_bg_index(vwk, VDI_COL_LINE);
+    else
+        vdi_bg_line = 0;
+#else
+    vdi_bg_line = TRUECOLOR_MODE ? vdi_bg_index(vwk, VDI_COL_LINE) : 0;
+#endif
+#endif
     for (i = count-1, LSTLIN = FALSE; i > 0; i--) {
         if (i == 1)
             LSTLIN = TRUE;
@@ -1112,9 +1764,15 @@ void polyline(Vwk * vwk, Point * point, int count, WORD color)
         line.x2 = point->x;
         line.y2 = point->y;
 
-        if (vwk->clip)
+        if (vwk->clip) {
+#if CONF_WITH_VDI_FASTDRAW
+            if (!line_inside_clip(vwk, &line) && !clip_line_general(vwk, &line))
+                continue;
+#else
             if (!clip_line(vwk, &line))
                 continue;
+#endif
+        }
 
         abline(&line, vwk->wrt_mode, color);
     }
@@ -1640,9 +2298,66 @@ static void draw_line16(const Line *line, WORD wrt_mode, UWORD color)
     addr = get_start_addr16(line->x1, line->y1);    /* init address counter */
     palette = CUR_WORK->ext->palette;
     fgcol = palette[color];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_line];
+#else
     bgcol = palette[0];
+#endif
 
     linemask = LN_MASK;
+
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * a solid line (every bit of the line style set): the style cannot
+     * change as it rotates, so there is nothing to test per pixel, and the
+     * mode is chosen once.  Erase mode draws nothing.
+     */
+    if (linemask == 0xffff) {
+        const WORD one = (dx >= dy) ? 1 : yinc;     /* step without a turn */
+        const WORD both = yinc + 1;                 /* step with a turn */
+        WORD n, ep1, ep2;
+
+        if (dx >= dy) {
+            n = dx;
+            ep1 = 2*dy;
+            ep2 = 2*dx;
+        } else {
+            n = dy;
+            ep1 = 2*dx;
+            ep2 = 2*dy;
+        }
+        eps = -n;
+        switch (wrt_mode) {
+        case WM_REPLACE:
+        case WM_TRANS:
+            for (loopcnt = n; loopcnt >= 0; loopcnt--) {
+                *addr = fgcol;
+                eps += ep1;
+                if (eps >= 0) {
+                    eps -= ep2;
+                    addr += both;
+                } else
+                    addr += one;
+            }
+            break;
+        case WM_XOR:
+            for (loopcnt = n; loopcnt >= 0; loopcnt--) {
+                *addr = ~*addr;
+                eps += ep1;
+                if (eps >= 0) {
+                    eps -= ep2;
+                    addr += both;
+                } else
+                    addr += one;
+            }
+            break;
+        case WM_ERASE:          /* draws only where the style is clear: nowhere */
+        default:                /* as stock, an unknown mode draws nothing */
+            break;
+        }
+        return;
+    }
+#endif
 
     if (dx >= dy) {
         e1 = 2*dy;
@@ -1771,6 +2486,257 @@ static void draw_line16(const Line *line, WORD wrt_mode, UWORD color)
 #endif
 
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * Lines on four and eight planes, all planes in one pass
+ *
+ * The old code walks the line once per plane.  This one walks it once and
+ * gathers the pixels that fall in one word of one row into two masks: m,
+ * every pixel there, and s, the pixels the line style draws.  Then every
+ * plane word of that row and word is changed as
+ *
+ *      new = (old & keep) ^ (on & cm[plane])
+ *
+ * where cm[plane] is all ones if the plane's bit of the colour is set (in
+ * xor mode always: the colour does not matter there).  keep and on follow
+ * from the writing mode:
+ *
+ *      replace: keep = ~m, on = s      transparent: keep = ~s, on = s
+ *      xor:     keep = ~0, on = s      erase:       keep = ~(m^s), on = m^s
+ *
+ * which is what the single plane loops do pixel by pixel.  The line style
+ * rotates once per pixel as before, so LN_MASK ends up where it did.
+ *
+ * The words of the planes of one 16 pixel group are neighbours, so two
+ * planes are handled as one long word.  The screen is long word aligned for
+ * that (checked once per line); else the old loops draw.
+ */
+#define LP_REP(x)   ((((ULONG)(UWORD)(x)) << 16) | (UWORD)(x))
+
+static inline __attribute__((always_inline))
+void lp_flush(UWORD *a, ULONG keep, ULONG on, const ULONG *cml, const WORD kind)
+{
+    ULONG_ALIAS *l = (ULONG_ALIAS *)a;
+
+    l[0] = (l[0] & keep) ^ (on & cml[0]);
+    l[1] = (l[1] & keep) ^ (on & cml[1]);
+    if (kind == 8) {
+        l[2] = (l[2] & keep) ^ (on & cml[2]);
+        l[3] = (l[3] & keep) ^ (on & cml[3]);
+    }
+}
+
+/* the same, for the places that run once per line: not copied into every loop */
+static __attribute__((noinline))
+void lp_flush_once(UWORD *a, ULONG keep, ULONG on, const ULONG *cml, WORD kind)
+{
+    lp_flush(a, keep, on, cml, kind);
+}
+
+/* can draw_line_planes() / vertical_line_planes() draw this? */
+static BOOL lp_usable(WORD wrt_mode)
+{
+    return (v_planes == 4 || v_planes == 8)
+        && (UWORD)wrt_mode <= WM_ERASE
+        && ((((LONG)v_bas_ad) | (LONG)v_lin_wr) & 3) == 0;
+}
+
+/*
+ * The per write mode values here must agree with fs_masks()/fs_rows()
+ * (the planar solid fill); that treats out-of-range modes as replace, as
+ * stock, which lp_usable() rejects for lines.
+ *
+ * set up the colour masks (cmu) and, from the writing mode, ca/cs: the
+ * pixels cleared are (m & ca) ^ (s & cs), oa/os: the pixels set are
+ * (m & oa) ^ (s & os)
+ */
+#define LP_SETUP(color_, wrt_mode_) \
+    do { \
+        WORD k_; \
+        for (k_ = 0; k_ < kind; k_++) \
+            cmu.w[k_] = (UWORD)-(WORD)(((wrt_mode_) == WM_XOR) | (((color_) >> k_) & 1)); \
+        switch (wrt_mode_) { \
+        case WM_REPLACE:    ca = 0xffff; cs = 0;      oa = 0;      os = 0xffff; break; \
+        case WM_TRANS:      ca = 0;      cs = 0xffff; oa = 0;      os = 0xffff; break; \
+        case WM_XOR:        ca = 0;      cs = 0;      oa = 0;      os = 0xffff; break; \
+        case WM_ERASE:      ca = 0xffff; cs = 0xffff; oa = 0xffff; os = 0xffff; break; \
+        } \
+    } while (0)
+
+/* what one pixel at bit does: keep/on with the style bit set (1) and clear (0) */
+#define LP_PAIRS(bit_) \
+    do { \
+        ULONG b_ = LP_REP(bit_); \
+        keep1 = ~(b_ & ccl); \
+        on1 = b_ & ool; \
+        keep0 = ~(b_ & cal); \
+        on0 = b_ & oal; \
+    } while (0)
+
+#define LP_CONSTS \
+    do { \
+        ccl = LP_REP(ca ^ cs); \
+        ool = LP_REP(oa ^ os); \
+        cal = LP_REP(ca); \
+        oal = LP_REP(oa); \
+    } while (0)
+
+static inline __attribute__((always_inline))
+void draw_line_body(const Line *line, WORD wrt_mode, UWORD color, const WORD kind)
+{
+    UWORD *addr;
+    WORD dx;                    /* width of rectangle around line */
+    WORD dy;                    /* height of rectangle around line */
+    WORD yinc;                  /* in/decrease for each y step */
+    const WORD xinc = kind;     /* positive increase for each x step, planes WORDS */
+    WORD  eps;                  /* epsilon */
+    WORD  e1;                   /* epsilon 1 */
+    WORD  e2;                   /* epsilon 2 */
+    WORD  loopcnt;
+    UWORD bit, m, s;
+    UWORD ca, cs, oa, os;
+    union { UWORD w[8]; ULONG l[4]; } cmu;
+    UWORD linemask = LN_MASK;   /* linestyle bits */
+
+    dx = line->x2 - line->x1;
+    dy = line->y2 - line->y1;
+
+    if (dy < 0) {
+        dy = -dy;                       /* make dy absolute */
+        yinc = (LONG) -1 * v_lin_wr / 2; /* sub one line of words */
+    } else {
+        yinc = (LONG) v_lin_wr / 2;     /* add one line of words */
+    }
+
+    addr = get_start_addr(line->x1, line->y1);  /* init address counter */
+    bit = 0x8000 >> (line->x1&0xf);             /* initial bit position in WORD */
+
+    LP_SETUP(color, wrt_mode);
+
+    if (dx >= dy) {
+        e1 = 2*dy;
+        eps = -dx;
+        e2 = 2*dx;
+        m = s = 0;
+
+        if (linemask == 0xffff) {
+            /* a solid line: every pixel is drawn, s is m */
+            const UWORD cc = ca ^ cs;
+            const UWORD oo = oa ^ os;
+
+            for (loopcnt = dx; loopcnt >= 0; loopcnt--) {
+                m |= bit;
+                rorw1(bit);
+                eps += e1;
+                if (eps >= 0 || (bit&0x8000)) {
+                    lp_flush(addr, LP_REP(~(m & cc)), LP_REP(m & oo), cmu.l, kind);
+                    m = 0;
+                    if (bit&0x8000)
+                        addr += xinc;
+                    if (eps >= 0) {
+                        eps -= e2;
+                        addr += yinc;   /* increment y */
+                    }
+                }
+            }
+            if (m)
+                lp_flush_once(addr, LP_REP(~(m & cc)), LP_REP(m & oo), cmu.l, kind);
+        } else {
+            for (loopcnt = dx; loopcnt >= 0; loopcnt--) {
+                rolw1(linemask);        /* get next bit of line style */
+                m |= bit;
+                if (linemask&0x0001)
+                    s |= bit;
+                rorw1(bit);
+                eps += e1;
+                if (eps >= 0 || (bit&0x8000)) {
+                    lp_flush(addr, LP_REP(~((m & ca) ^ (s & cs))),
+                             LP_REP((m & oa) ^ (s & os)), cmu.l, kind);
+                    m = s = 0;
+                    if (bit&0x8000)
+                        addr += xinc;
+                    if (eps >= 0) {
+                        eps -= e2;
+                        addr += yinc;   /* increment y */
+                    }
+                }
+            }
+            if (m)
+                lp_flush_once(addr, LP_REP(~((m & ca) ^ (s & cs))),
+                              LP_REP((m & oa) ^ (s & os)), cmu.l, kind);
+        }
+    } else {
+        /* every row has one pixel; what it does depends on the style bit only */
+        ULONG ccl, ool, cal, oal;
+        ULONG keep1, on1, keep0, on0;
+
+        e1 = 2*dx;
+        eps = -dy;
+        e2 = 2*dy;
+
+        LP_CONSTS;
+        LP_PAIRS(bit);
+        if (linemask == 0xffff) {
+            if (wrt_mode != WM_ERASE) {         /* erase draws nothing */
+                for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+                    lp_flush(addr, keep1, on1, cmu.l, kind);
+                    addr += yinc;
+                    eps += e1;
+                    if (eps >= 0) {
+                        eps -= e2;
+                        rorw1(bit);
+                        if (bit&0x8000)
+                            addr += xinc;
+                        LP_PAIRS(bit);
+                    }
+                }
+            }
+        } else {
+            /* a pixel the style does not draw does nothing, but in replace and erase mode */
+            const BOOL skip1 = (wrt_mode == WM_ERASE);
+            const BOOL skip0 = (wrt_mode == WM_TRANS || wrt_mode == WM_XOR);
+            ULONG keep, on;
+            BOOL skip;
+
+            for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+                rolw1(linemask);        /* get next bit of line style */
+                if (linemask&0x0001) {
+                    keep = keep1;
+                    on = on1;
+                    skip = skip1;
+                } else {
+                    keep = keep0;
+                    on = on0;
+                    skip = skip0;
+                }
+                if (!skip)
+                    lp_flush(addr, keep, on, cmu.l, kind);
+                addr += yinc;
+                eps += e1;
+                if (eps >= 0) {
+                    eps -= e2;
+                    rorw1(bit);
+                    if (bit&0x8000)
+                        addr += xinc;
+                    LP_PAIRS(bit);
+                }
+            }
+        }
+    }
+    LN_MASK = linemask;
+}
+
+static void draw_line_planes4(const Line *line, WORD wrt_mode, UWORD color)
+{
+    draw_line_body(line, wrt_mode, color, 4);
+}
+
+static void draw_line_planes8(const Line *line, WORD wrt_mode, UWORD color)
+{
+    draw_line_body(line, wrt_mode, color, 8);
+}
+#endif
+
 /*
  * draw_line - draw a line (general purpose)
  *
@@ -1808,6 +2774,17 @@ static void draw_line(const Line *line, WORD wrt_mode, UWORD color)
     UWORD msk;
     int plane;
     UWORD linemask = LN_MASK;   /* linestyle bits */
+
+#if CONF_WITH_VDI_FASTDRAW
+    /* four or eight planes: one pass over the line, not one per plane */
+    if (lp_usable(wrt_mode)) {
+        if (v_planes == 8)
+            draw_line_planes8(line, wrt_mode, color);
+        else
+            draw_line_planes4(line, wrt_mode, color);
+        return;
+    }
+#endif
 
     dx = line->x2 - line->x1;
     dy = line->y2 - line->y1;
@@ -2101,9 +3078,57 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
     addr = get_start_addr16(line->x1, line->y1);    /* init address counter */
     palette = CUR_WORK->ext->palette;
     fgcol = palette[color];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_line];
+#else
     bgcol = palette[0];     //FIXME ??
+#endif
 
     linemask = LN_MASK;
+
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * a solid line (every bit of the line style set): the style cannot
+     * change as it rotates, so there is nothing to test per pixel
+     */
+    if (linemask == 0xffff) {
+        LONG n = (LONG)dy + 1;
+        LONG stride = (LONG)yinc * 2;   /* in bytes, may be negative */
+        UBYTE *a = (UBYTE *)addr;
+        LONG s2 = stride * 2, s3 = stride * 3, s4 = stride * 4;
+
+        switch(wrt_mode) {
+        case WM_ERASE:      /* reverse transparent: draws where the bit is clear */
+            break;
+        case WM_XOR:
+            for (; n > 0; n--) {
+                *(UWORD *)a = ~*(UWORD *)a;
+                a += stride;
+            }
+            break;
+        case WM_TRANS:      /* transparent and replace both store the foreground */
+        case WM_REPLACE:
+            for (; n >= 8; n -= 8) {
+                *(UWORD *)a = fgcol;
+                *(UWORD *)(a + stride) = fgcol;
+                *(UWORD *)(a + s2) = fgcol;
+                *(UWORD *)(a + s3) = fgcol;
+                a += s4;
+                *(UWORD *)a = fgcol;
+                *(UWORD *)(a + stride) = fgcol;
+                *(UWORD *)(a + s2) = fgcol;
+                *(UWORD *)(a + s3) = fgcol;
+                a += s4;
+            }
+            for (; n > 0; n--) {
+                *(UWORD *)a = fgcol;
+                a += stride;
+            }
+            break;
+        }
+        return;                         /* LN_MASK stays 0xffff */
+    }
+#endif
 
     switch(wrt_mode) {
     case WM_ERASE:          /* reverse transparent */
@@ -2145,6 +3170,76 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
 }
 #endif
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * a vertical line on four or eight planes: every plane word of a row in one
+ * step, see draw_line_body()
+ */
+static inline __attribute__((always_inline))
+void vertical_line_body(const Line *line, WORD wrt_mode, UWORD color, const WORD kind)
+{
+    UWORD *addr;
+    WORD dy;                    /* length of line */
+    WORD yinc;                  /* in/decrease for each y step */
+    WORD loopcnt;
+    UWORD ca, cs, oa, os;
+    ULONG ccl, ool, cal, oal;
+    ULONG keep1, on1, keep0, on0;
+    union { UWORD w[8]; ULONG l[4]; } cmu;
+    UWORD linemask = LN_MASK;
+
+    /* calculate increase value for y to add to actual address */
+    dy = line->y2 - line->y1;
+    yinc = v_lin_wr / 2;        /* one line of words */
+
+    if (dy < 0) {
+        dy = -dy;               /* make dy absolute */
+        yinc = -yinc;           /* sub one line of words */
+    }
+
+    addr = get_start_addr(line->x1, line->y1);  /* init address counter */
+
+    LP_SETUP(color, wrt_mode);
+    LP_CONSTS;
+    LP_PAIRS(0x8000 >> (line->x1&0xf));
+
+    if (linemask == 0xffff) {
+        if (wrt_mode != WM_ERASE) {             /* erase draws nothing */
+            for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+                lp_flush(addr, keep1, on1, cmu.l, kind);
+                addr += yinc;
+            }
+        }
+    } else {
+        const BOOL skip1 = (wrt_mode == WM_ERASE);
+        const BOOL skip0 = (wrt_mode == WM_TRANS || wrt_mode == WM_XOR);
+
+        for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+            rolw1(linemask);            /* get next bit of line style */
+            if (linemask&0x0001) {
+                if (!skip1)
+                    lp_flush(addr, keep1, on1, cmu.l, kind);
+            } else {
+                if (!skip0)
+                    lp_flush(addr, keep0, on0, cmu.l, kind);
+            }
+            addr += yinc;
+        }
+    }
+    LN_MASK = linemask;
+}
+
+static void vertical_line_planes4(const Line *line, WORD wrt_mode, UWORD color)
+{
+    vertical_line_body(line, wrt_mode, color, 4);
+}
+
+static void vertical_line_planes8(const Line *line, WORD wrt_mode, UWORD color)
+{
+    vertical_line_body(line, wrt_mode, color, 8);
+}
+#endif
+
 /*
  * vertical_line - draw a vertical line
  *
@@ -2158,6 +3253,16 @@ static void vertical_line(const Line *line, WORD wrt_mode, UWORD color)
     UWORD bit, bitcomp;
     WORD plane, loopcnt;
     UWORD linemask = LN_MASK;
+
+#if CONF_WITH_VDI_FASTDRAW
+    if (lp_usable(wrt_mode)) {
+        if (v_planes == 8)
+            vertical_line_planes8(line, wrt_mode, color);
+        else
+            vertical_line_planes4(line, wrt_mode, color);
+        return;
+    }
+#endif
 
     /* calculate increase value for y to add to actual address */
     dy = line->y2 - line->y1;
@@ -2240,6 +3345,37 @@ static void vertical_line(const Line *line, WORD wrt_mode, UWORD color)
         }
     }
     LN_MASK = linemask;
+}
+#endif
+
+
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+/*
+ * solid_hline16 - a solid horizontal line on 16 bits as one run of pixels
+ *
+ * A style of all ones puts the foreground colour in every pixel, or
+ * inverts it: what swblit_rect_common16() does with the row, without the
+ * set-up of a rectangle.  Returns FALSE, having drawn nothing, for any
+ * other style or mode.  (A function of its own so that abline() keeps the
+ * registers it had.)
+ */
+static __attribute__((noinline)) BOOL solid_hline16(UWORD x1, UWORD y1, UWORD x2, UWORD linemask,
+                                         WORD wrt_mode, UWORD color)
+{
+    const WORD left = x1, right = x2, row = y1;     /* as the Rect holds them */
+    UWORD *addr;
+    LONG count;
+
+    if (linemask != 0xffff || wrt_mode == WM_ERASE)
+        return FALSE;
+
+    addr = get_start_addr16(left, row);
+    count = (LONG)right - left + 1;
+    if (wrt_mode == WM_XOR)
+        not_run16(addr, count);
+    else
+        solid_run16(addr, count, CUR_WORK->ext->palette[color]);
+    return TRUE;
 }
 #endif
 
@@ -2332,12 +3468,20 @@ void abline(const Line *line, const WORD wrt_mode, UWORD color)
         VwkAttrib attr;
         Rect rect;
 
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+        if (TRUECOLOR_MODE && solid_hline16(x1, y1, x2, linemask, wrt_mode, color))
+            return;
+#endif
+
         attr.clip = 0;
         attr.multifill = 0;
         attr.patmsk = 0;
         attr.patptr = &linemask;
         attr.wrt_mode = wrt_mode;
         attr.color = color;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+        attr.bgcolor = vdi_bg_line;
+#endif
         rect.x1 = x1;
         rect.y1 = y1;
         rect.x2 = x2;

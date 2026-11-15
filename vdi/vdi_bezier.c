@@ -588,6 +588,18 @@ v_bez_control(Vwk * vwk)
 }
 
 
+#endif /* HAVE_BEZIER */
+
+
+#if HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT
+/*
+ * v_bez_qual is also built, with HAVE_BEZIER 0, so that the NVDI call stores
+ * the quality and reports what it came to; nothing draws a Bezier then.
+ */
+#ifndef MIN_QUAL
+#define MIN_QUAL 0
+#endif
+
 /*
  * v_bez_qual -  set bezier quality
  *
@@ -599,12 +611,11 @@ v_bez_control(Vwk * vwk)
  *
  * note: bez_qual > 7 will cause overflow in gen_segs()
  */
-#define MIN_QUAL 0
 static const WORD pcarr[] = {0, 10, 23, 39, 55, 71, 86, 100};
 void
 v_bez_qual(Vwk * vwk)
 {
-    int q = INTIN[2];
+    WORD q = INTIN[2];
     if ( q >= 95 )
         q = 7;
     else if ( q<5 )
@@ -617,4 +628,4 @@ v_bez_qual(Vwk * vwk)
     CONTRL[4] = 1;
 }
 
-#endif
+#endif /* HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT */

@@ -14,8 +14,20 @@
 #include "fonthdr.h"
 #include "aesext.h"
 #include "vdiext.h"
+#if CONF_WITH_VDI_OUTLINE_FONTS
+#include "vdi_ft2.h"
+#endif
+#if CONF_WITH_VDI_NVDI_EXT
+#include "vdi_nvdiext.h"
+#endif
+#include "vdiscreen.h"
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+#include "vdi_sleep.h"
+#endif
 
 #define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
+/* the quality of Beziers is kept (v_bez_qual) when they are drawn or when NVDI calls are */
+#define WITH_BEZ_QUAL (HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT)
 
 /*
  * The 16-bit VDI needs the 256-entry palette tables regardless of which
@@ -23,7 +35,7 @@
  */
 #define EXTENDED_PALETTE (CONF_WITH_VIDEL || CONF_WITH_TT_SHIFTER || CONF_WITH_VDI_16BIT)
 
-#define TRUECOLOR_MODE  (v_planes > 8)
+#define TRUECOLOR_MODE  (v_planes > VS_MAX_INDEXED_PLANES)
 
 
 #if CONF_WITH_VIDEL
@@ -95,8 +107,20 @@
 #define ROUND       2
 
 /* aliases for different table positions */
+#if CONF_WITH_VDI_NVDI_EXT
+/*
+ * while a call draws in an off-screen bitmap (vdi_screen_swapped), the
+ * size of the bitmap; DEV_TAB[0] and [1] stay those of the screen, as
+ * the mouse interrupt clips the pointer to them
+ */
+extern WORD vdi_bm_xres, vdi_bm_yres;
+extern WORD vdi_bm_caller_clip;     /* the clipping flag the caller set on the bitmap */
+#define xres        (vdi_screen_swapped ? vdi_bm_xres : DEV_TAB[0])
+#define yres        (vdi_screen_swapped ? vdi_bm_yres : DEV_TAB[1])
+#else
 #define xres        DEV_TAB[0]
 #define yres        DEV_TAB[1]
+#endif
 #define xsize       DEV_TAB[3]
 #define ysize       DEV_TAB[4]
 #define numcolors   DEV_TAB[13]
@@ -140,6 +164,9 @@ typedef struct {
     const UWORD *patptr;        /* Current pattern pointer */
     WORD wrt_mode;              /* Current writing mode    */
     UWORD color;                /* fill color */
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    UWORD bgcolor;              /* 16-bit palette index of the replace-mode background */
+#endif
 } VwkAttrib;
 
 
@@ -156,10 +183,51 @@ typedef struct {
 
 #if CONF_WITH_VDI_16BIT
 /* virtual workstation extension, used for VDI Trucolor (16-bit) support */
+#if CONF_WITH_VDI_NVDI_EXT
+/*
+ * pens 256 and up are not VDI pens: they hold the colours that were set by
+ * RGB value, a foreground and a background for each of the text, fill, line
+ * and marker colours
+ */
+#define VDI_PAL_RGB(kind, bg)   (256 + 2 * (kind) + (bg))
+#define VWKEXT_PALETTE  (256 + 8)
+#else
+#define VWKEXT_PALETTE  256
+#endif
+
 typedef struct {
-    UWORD palette[256];         /* pseudo-palette with pixel value RRRRRGGGGG0BBBBB */
+    UWORD palette[VWKEXT_PALETTE];  /* pseudo-palette with pixel value RRRRRGGGGG0BBBBB */
     WORD req_col[256][3];       /* requested colour */
 } VwkExt;
+#endif
+
+#if CONF_WITH_VDI_NVDI_EXT
+/* the kinds of colour of vs_fg_color() and friends */
+#define VDI_COL_TEXT    0
+#define VDI_COL_FILL    1
+#define VDI_COL_LINE    2
+#define VDI_COL_MARKER  3
+#define VDI_COL_RASTER  4
+#define VDI_COL_KINDS   5
+
+/* the colours of the NVDI calls, part of every workstation (see vdi_nvdicol.c) */
+typedef struct {
+    COLOR_RGB req[VDI_COL_KINDS][2];    /* [kind][0 foreground, 1 background]: the colour as asked for */
+    WORD pen[VDI_COL_KINDS][2];         /* the VDI pen: of a background and of the raster
+                                           colours, as set; of an RGB colour, the nearest */
+    UWORD rgbmask;                      /* bit 2*kind+bg: set by RGB value (16-bit screens) */
+    COLOR_RGB extra[4];                 /* highlight, minimum, maximum and weight colours */
+} VwkColors;
+
+/* the bitmap of an off-screen bitmap workstation (see vdi_bitmap.c) */
+typedef struct {
+    UBYTE *addr;                /* the pixels; NULL: a workstation of the screen */
+    void *mem;                  /* the block the VDI allocated for them (to free); NULL: the caller's */
+    WORD width;                 /* in pixels, a multiple of 16 */
+    WORD height;
+    UWORD wbytes;               /* bytes per line */
+    WORD pixw, pixh;            /* the size of a pixel in microns */
+} VwkBitmap;
 #endif
 
 /* Structure to hold data for a virtual workstation */
@@ -219,8 +287,28 @@ struct Vwk_ {
     VwkExt *ext;                /* 16 bit colour management */
 #endif
     /* newly added */
-#if HAVE_BEZIER
+#if WITH_BEZ_QUAL
     WORD bez_qual;              /* actual quality for bezier curves */
+#endif
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* see vdi_outline.c */
+    Fonthead outline_head;      /* the selected outline font, as cur_font */
+    VdiOutlineFont *outline_face;   /* its face; NULL if none was selected */
+    VdiOutlineFont *outline_font;   /* that face at the selected size */
+    WORD outline_count;         /* outline faces added by vst_load_fonts() */
+    WORD outline_em;            /* the size of the em in pixels, at that size */
+    WORD outline_width;         /* the character width set (vst_width), 0 if natural */
+    WORD outline_map;           /* character set of the text (vst_charmap), VDI_FT_MAP_* */
+    WORD outline_skew;          /* vst_skew(), tenths of a degree */
+#endif
+#if CONF_WITH_VDI_NVDI_EXT
+    VwkColors col;              /* see vdi_nvdicol.c */
+    VwkBitmap bm;               /* see vdi_bitmap.c */
+#endif
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* last, as vdi_asm.S knows the offsets of the fields above (vdiscreen.h) */
+    WORD outline_pending;       /* a size asked for while the engine was busy, 0 if none */
+    WORD outline_asked;         /* its points or height */
 #endif
 };
 
@@ -242,6 +330,30 @@ typedef struct {
     WORD x1,y1;
     WORD x2,y2;
 } Line;
+
+
+/*
+ * Structure for passing justification info (vdi_text.c)
+ *
+ * note 1: in each of the following pairs of variables, only one variable
+ * has a non-zero value:
+ *  (wordx,wordy), (rmwordx,rmwordy), (charx,chary), (rmcharx,rmchary)
+ *
+ * note 2: if rmword is zero, there are no 'remainder pixels' to use up
+ * between words; otherwise, rmword = max(rmwordx/rmwordy).  similarly
+ * for rmchar/rmcharx/rmchary.
+ */
+typedef struct
+{
+                        /* word-spacing variables */
+    WORD wordx, wordy;          /* #pixels to add to each space */
+    WORD rmword;                /* remaining #pixels to add over all spaces */
+    WORD rmwordx, rmwordy;      /* add this to use up remainder */
+                        /* character-spacing variables */
+    WORD charx, chary;          /* #pixels to add to each character */
+    WORD rmchar;                /* remaining #pixels to add over all characters */
+    WORD rmcharx, rmchary;      /* add this to use up remainder */
+} JUSTINFO;
 
 
 /*
@@ -304,7 +416,19 @@ void arb_line(Line *line);
 
 
 /* C Support routines */
+#define FIRST_VDI_HANDLE    1   /* the physical workstation; _screen in vdi_asm.S assumes it */
 Vwk *get_vwk_by_handle(WORD);
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+/*
+ * closing a workstation while a program sleeps in an OS call (see
+ * vdi_sleep.h): the block is kept until no program sleeps
+ */
+void vdi_release_vwk(Vwk *vwk);     /* free a closed workstation, now or later */
+void vdi_reap_vwk(void);            /* free those that waited: at the start of a call that opens or closes */
+#endif
+#if CONF_WITH_VDI_FASTDRAW
+extern Vwk *vwk_ptr[];          /* the same, by index: handle 0 is unused */
+#endif
 UWORD *get_start_addr(const WORD x, const WORD y);
 void set_LN_MASK(Vwk *vwk);
 void st_fl_ptr(Vwk *);
@@ -431,13 +555,160 @@ void vdi_vqt_fontinfo(Vwk *);       /* 131 */
 void vdi_vex_wheelv(Vwk *);         /* 134 */
 #endif
 
+#if CONF_WITH_VDI_NVDI_EXT
+/* vdi_col.c: pens and their requested colours */
+void vdi_pen_request(Vwk *vwk, WORD pen, WORD *rgb);
+WORD vdi_nearest_pen_in(Vwk *vwk, const COLOR_RGB *c);
+
+/* vdi_nvdicol.c: the NVDI colour calls */
+void vdi_color_init(Vwk *vwk);
+ULONG vdi_px_format(void);
+ULONG vdi_rgb_to_value(const COLOR_RGB *c);
+WORD vdi_nearest_pen(const COLOR_RGB *c);
+void vdi_pen_rgb(Vwk *vwk, WORD pen, COLOR_RGB *c);
+void vdi_v_setrgb(Vwk *);           /* 138 */
+void vdi_vs_fg_color(Vwk *);        /* 200 */
+void vdi_vs_bg_color(Vwk *);        /* 201 */
+void vdi_vq_fg_color(Vwk *);        /* 202 */
+void vdi_vq_bg_color(Vwk *);        /* 203 */
+void vdi_color_entry(Vwk *);        /* 204 */
+void vdi_vr_clip_rects(Vwk *);      /* 171 */
+void vdi_vq_ext_devinfo(Vwk *);     /* 248 sub 4242 */
+
+/* vdi_xfer.c: vr_transfer_bits and the scaled vro_cpyfm and vrt_cpyfm */
+void vdi_vr_transfer_bits(Vwk *);   /* 170 */
+void vdi_raster_scaled(void *raster, void *info, void (*copy)(void *, void *),
+                       BOOL transparent, BOOL clip_on, const VwkClip *clip);
+
+/* vdi_bitmap.c: off-screen bitmaps */
+void vdi_bitmap_open(void);         /* 100 with sub-opcode 1 (20 intin), 2 or 3 */
+void vdi_bitmap_release(Vwk *vwk);  /* free the memory the VDI gave a bitmap */
+BOOL vdi_bitmap_swap_in(Vwk *vwk);  /* draw in the bitmap of vwk (screen globals) */
+void vdi_bitmap_sleep_begin(VdiSleepState *state);  /* see vdi_sleep.h */
+void vdi_bitmap_sleep_end(VdiSleepState *state);
+void vdi_bitmap_swap_out(WORD opcode);  /* back to the screen (after the call of opcode) */
+BOOL vdi_acts_on_screen(WORD opcode);   /* opcodes that ignore the swap */
+void vdi_vs_x_color(Vwk *);         /* 207 */
+void vdi_vq_x_color(Vwk *);         /* 209 */
+
+/*
+ * the VDI pen of a colour field of the workstation (text_color and
+ * friends): an RGB colour on a 16-bit screen keeps a pseudo-pen above 255
+ * there, and the pen for the attribute inquiries is kept beside it
+ */
+#define VDI_FG_BY_PEN(vwk, kind) ((vwk)->col.rgbmask &= (UWORD)~(1U << (2 * (kind))))
+#define VDI_PEN_OF(vwk, kind, color) \
+    ((UWORD)(color) > 255 ? (vwk)->col.pen[kind][0] : REV_MAP_COL[color])
+
+#if CONF_WITH_VDI_16BIT
+/*
+ * the 16-bit palette index of the background of text and of lines, set
+ * while a call draws with them; 0 (pen 0) otherwise, as for line-A
+ */
+extern UWORD vdi_bg_text, vdi_bg_line;
+UWORD vdi_bg_index(const Vwk *vwk, WORD kind);
+#endif
+#endif
+
 #if CONF_WITH_VDI_TEXT_SPEEDUP
 void direct_screen_blit(WORD count, WORD *str);
 #endif
 
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+void vdi_vqt_real_extent(Vwk *);    /* 240 sub 4200, in vdi_text.c */
+#endif
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/* vdi_outline.c: outline fonts on the workstations */
+#define OUTLINE_FIRST_ID    5000    /* the ids of outline faces are above (SpeedoGDOS's rule) */
+/* what outline_on_stack(), outline_scan() and the sizing calls give */
+#define OUTLINE_FAILED      0       /* the engine cannot do it */
+#define OUTLINE_DONE        1
+#define OUTLINE_BUSY        2       /* another program's call keeps the engine busy */
+void outline_init_vwk(Vwk *vwk);
+WORD outline_load_fonts(Vwk *vwk);
+WORD outline_scan(void);
+void outline_unload_fonts(Vwk *vwk);
+const Fonthead *outline_find_face(const Vwk *vwk, WORD id);
+const Fonthead *outline_face_number(const Vwk *vwk, WORD n);
+BOOL outline_face_selected(const Vwk *vwk);
+WORD outline_set_point(Vwk *vwk, WORD point);
+WORD outline_set_height(Vwk *vwk, WORD height);
+void outline_size_pending(Vwk *vwk);
+BOOL outline_font_selected(const Vwk *vwk);
+VdiOutlineFont *outline_current(Vwk *vwk);
+BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width);
+BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width);
+BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
+WORD outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result);
+void *outline_caller_stack(void);
+/* the NVDI calls (vdi_nvdi.c) */
+WORD outline_set_arbpt(Vwk *vwk, LONG point);
+BOOL outline_set_width(Vwk *vwk, WORD width);
+BOOL outline_set_size(Vwk *vwk, LONG width);
+WORD outline_set_map(Vwk *vwk, WORD map);
+WORD outline_set_skew(Vwk *vwk, WORD skew);
+WORD outline_char_index(Vwk *vwk, UWORD ch, WORD from_map, WORD to_map);
+WORD outline_get_outline(Vwk *vwk, UWORD ch, WORD *xy, BYTE *flags, WORD max_points);
+VdiOutlineFont *outline_face_of(const Fonthead *head);
+BOOL outline_xfntinfo(VdiOutlineFont *face, WORD flags, VdiXfntInfo *info);
+BOOL outline_fontheader(Vwk *vwk, VdiFontHeader *fhdr);
+BOOL outline_fonts_present(void);
+LONG outline_rescan(char **dirs, LONG count);
+const char *outline_font_dir(void);
+
+/* vdi_text.c, for the NVDI calls */
+void text_size_out(Vwk *vwk);
+const Fonthead *text_font_number(Vwk *vwk, WORD n);
+WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font);
+void vdi_v_ftext(Vwk *);            /* 241 */
+
+/* vdi_nvdi.c: the NVDI and SpeedoGDOS text calls, the GDOS answer, the NVDI cookie */
+void nvdi_add_cookie(void);
+void vdi_vqt_char_index(Vwk *);     /* 190 */
+void vdi_vqt_xfntinfo(Vwk *);       /* 229 */
+void vdi_vqt_name_and_id(Vwk *);    /* 230 sub 100 */
+void vdi_vst_width(Vwk *);          /* 231 */
+void vdi_vqt_fontheader(Vwk *);     /* 232 */
+void vdi_vqt_kerns(Vwk *);          /* 234, 235 */
+void vdi_vst_charmap(Vwk *);        /* 236 */
+void vdi_vst_kern(Vwk *);           /* 237 */
+void vdi_v_getoutline(Vwk *);       /* 243 */
+void vdi_vst_arbpt(Vwk *);          /* 246 */
+void vdi_vqt_advance(Vwk *);        /* 247 */
+void vdi_vst_setsize(Vwk *);        /* 252 */
+void vdi_vst_skew(Vwk *);           /* 253 */
+#endif
+
+#if WITH_BEZ_QUAL
+void v_bez_qual(Vwk *);
+#endif
+
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+/*
+ * 16-bit expands (monochrome source to colour pixels), two pixels a store:
+ * a pair of source bits selects one entry of each table (see expand_tab16())
+ */
+struct expand16 {
+    ULONG a[4];         /* AND masks, pair of pixels (masked modes) */
+    ULONG x[4];         /* XOR values, or the pair of pixels to store */
+    WORD masked;        /* 0: store x[], else new = (old & a[]) ^ x[] */
+    WORD mod;           /* masked: the table entry of the pixels that change */
+    UWORD inv;          /* masked: XOR for the source bits (erase draws the clear ones) */
+    WORD kind;          /* the key this table was built for: kind+1, */
+    UWORD fg, bg;       /* and colours */
+};
+#define EXP16_REPLACE   0
+#define EXP16_TRANS     1
+#define EXP16_XOR       2
+#define EXP16_ERASE     3
+const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg);
+void expand_rows16(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
+                   LONG sstep, LONG dstep, const struct expand16 *e);
+#endif
+
 #if HAVE_BEZIER
 /* not in original TOS */
-void v_bez_qual(Vwk *);
 void v_bez_control(Vwk *);
 void v_bez(Vwk *vwk, Point *points, int count);
 void v_bez_fill(Vwk *vwk, Point *points, int count);

@@ -48,7 +48,11 @@ typedef struct {
 typedef union {
     struct vsmain {
         WORD local_ptsin[2*MAX_VERTICES];   /* used by GSX_ENTRY() - must be at offset 0 */
-        WORD fill_buffer[MAX_VERTICES];     /* used by clc_flit() */
+        WORD fill_buffer[MAX_VERTICES];     /* used by clc_flit() and, as the one-plane
+                                             * form of a bitmap-font string, by
+                                             * output_text() (see text_string() in
+                                             * vdi_text.c): never at the same time, as
+                                             * neither is live across an OS call */
     } main;
     SEGMENT queue[QSIZE];       /* storage for contourfill() seed points  */
     WORD deftxbuf[SCRATCHBUF_SIZE/sizeof(WORD)];    /* text scratch buffer */
@@ -62,6 +66,14 @@ extern struct _mcs *mcs_ptr;    /* ptr to mouse cursor save area in use */
 
 /* functions used by VDI & lineA */
 void update_rez_dependent(void);
+
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/* vdi_nvdi.c: what vq_vgdos() answers; another trap #2 front end can ask too */
+LONG vdi_gdos_version(void);
+
+/* vdi_nvdi.c: TRUE if this NVDI cookie value is the one the VDI added */
+BOOL vdi_own_nvdi_cookie(ULONG value);
+#endif
 
 #endif /* ASM_SOURCE */
 

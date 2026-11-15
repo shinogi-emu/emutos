@@ -11,6 +11,7 @@
 
 #include "asmdefs.h"
 #include "vdiext.h"
+#include "vdiscreen.h"
 
         .extern _local_pb
         .extern _CONTRL
@@ -40,6 +41,10 @@ _vditrap:
 no_vdi:
         cmp.w   #0xffff,d0              // query for jsr:able address?
         jeq     query
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        cmp.w   #0xfffe,d0              // vq_gdos()?
+        jeq     gdos_query
+#endif
 
 /*
  * Just like Atari TOS, we leave d0 unchanged, indicating the absence of
@@ -51,6 +56,81 @@ query:
         move.l  #_GSX_ENTRY,d0          // Return address of VDI dispatcher
         rte
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/*
+ * With outline fonts, d0 = -2 gets the answer of a vector font GDOS (see
+ * vdi_trap_gdos_version() in vdi_nvdi.c).  The C function may change
+ * d0-d1/a0-a1.
+ */
+gdos_query:
+#ifdef __mcoldfire__
+        lea     -12(sp),sp
+        movem.l d1/a0-a1,(sp)
+#else
+        movem.l d1/a0-a1,-(sp)
+#endif
+        jsr     _vdi_trap_gdos_version
+#ifdef __mcoldfire__
+        movem.l (sp),d1/a0-a1
+        lea     12(sp),sp
+#else
+        movem.l (sp)+,d1/a0-a1
+#endif
+        rte
+
+/*
+ * NVDI 5's font vectors, which the NVDI cookie of vdi_nvdi.c publishes.
+ * Their arguments come in registers, and every register but d0 is kept:
+ *
+ *   scan_fonts    d0.w = number of folders, d1 = flags, a0 = char *folders[];
+ *                 d0 = number of fonts added
+ *   get_font_dir  d0.w = folder number from 1, a0 = buffer;
+ *                 d0 = 0 if there is no such folder
+ */
+        .globl  _nvdi_scan_fonts_entry
+_nvdi_scan_fonts_entry:
+#ifdef __mcoldfire__
+        lea     -56(sp),sp
+        movem.l d1-d7/a0-a6,(sp)
+#else
+        movem.l d1-d7/a0-a6,-(sp)
+#endif
+        ext.l   d0
+        move.l  a0,-(sp)
+        move.l  d1,-(sp)
+        move.l  d0,-(sp)
+        jsr     _nvdi_scan_fonts
+        lea     12(sp),sp
+#ifdef __mcoldfire__
+        movem.l (sp),d1-d7/a0-a6
+        lea     56(sp),sp
+#else
+        movem.l (sp)+,d1-d7/a0-a6
+#endif
+        rts
+
+        .globl  _nvdi_get_font_dir_entry
+_nvdi_get_font_dir_entry:
+#ifdef __mcoldfire__
+        lea     -56(sp),sp
+        movem.l d1-d7/a0-a6,(sp)
+#else
+        movem.l d1-d7/a0-a6,-(sp)
+#endif
+        ext.l   d0
+        move.l  a0,-(sp)
+        move.l  d0,-(sp)
+        jsr     _nvdi_get_font_dir
+        addq.l  #8,sp
+#ifdef __mcoldfire__
+        movem.l (sp),d1-d7/a0-a6
+        lea     56(sp),sp
+#else
+        movem.l (sp)+,d1-d7/a0-a6
+#endif
+        rts
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS */
+
 /*
  * _GSX_ENTRY - front end of the GIOS for the screen driver
  */
@@ -61,6 +141,80 @@ query:
         .text
 
         .globl  _GSX_ENTRY
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * The registers the C code of the VDI leaves alone (d2-d7, a2-a6) are
+ * not saved here: the compiler keeps them, and every assembler routine
+ * the VDI calls does (see fast_bit_blt, normal_blit; the user vectors run
+ * only from the interrupt paths of vdi_mouse.c and vdi_misc.c, which save
+ * what they use).  Only what C may change, and this routine uses, is
+ * kept for the caller.
+ */
+_GSX_ENTRY:
+#ifdef __mcoldfire__
+        lea     -16(sp),sp
+        movem.l d1/a0-a2,(sp)           //Save the registers this routine changes
+#else
+        movem.l d1/a0-a2,-(sp)          //Save the registers this routine changes
+#endif
+
+/* Make a local copy of the array pointers in the user's parameter block. */
+
+        movea.l d1,a1           // get address of user's parameter block
+        lea     _local_pb, a0    // get address of local storage area
+        movea.l (a1)+,a2        // get address of user's CONTRL array
+        move.l  a2,(a0)+        // save address of user's CONTRL array
+        move.l  (a1)+,(a0)+     // save address of user's INTIN  array
+        move.l  #lcl_ptsin,(a0)+ // save address of local PTSIN array
+        move.l  (a1)+,d1        // get address of user's PTSIN array
+        move.l  (a1)+,(a0)+     // save address of user's INTOUT array
+        move.l  (a1),(a0)       // save address of user's PTSOUT array
+
+/* Save a copy of the user's CONTRL[1] element on the stack, in case we change it. */
+#ifdef __mcoldfire__
+        moveq   #0,d0
+#endif
+        move.w  2(a2),d0        // get number of PTSIN entries from CONTRL[1]
+
+/* Validate the number of entries in user's PTSIN array. */
+        move.w  d0,-(sp)        // save number of PTSIN entries from CONTRL[1]
+        jeq     no_ptsin        // for number of vertices = 0
+        cmpi.w  #MAX_VERTICES,d0  // # of user vertices > # of allowable vertices?
+        jle     ptsin_ok        // for user vertices =< # of allowable vertices
+        move.w  #MAX_VERTICES,d0  // user vertices > # of allowable vertices
+        move.w  d0,2(a2)        // put max # of vertices in user's CONTRL[1]
+ptsin_ok:
+        movea.l d1,a0           // user's PTSIN array
+        lea     lcl_ptsin,a1    // shared area used for local copy of PTSIN array
+        subq.l  #1,d0           // adjust coordinate count for loop
+save_ptsin:
+        move.l  (a0)+,(a1)+     // save x,y coordinate pair
+#ifdef __mcoldfire__
+        subq.l  #1,d0
+        jpl     save_ptsin      // point to next x,y coordinate pair
+#else
+        dbra    d0,save_ptsin   // point to next x,y coordinate pair
+#endif
+
+no_ptsin:
+/* Call screen which contains all the C routines for the SCREEN DRIVER. */
+        jsr     _screen
+
+/* Restore user's CONTRL[1] element from the stack. */
+        movea.l _CONTRL,a0      // get address of user's CONTRL array
+        move.w  (sp)+,2(a0)     // original # of PTSIN entries to CONTRL[1]
+
+#ifdef __mcoldfire__
+        movem.l (sp), d1/a0-a2  // restore the caller's registers
+        lea     16(sp), sp
+#else
+        movem.l (sp)+, d1/a0-a2 // restore the caller's registers
+#endif
+        moveq   #0,d0
+        move.w  _flip_y,d0      // set d0 to indicate magnitude/coordinate
+
+        rts
+#else
 _GSX_ENTRY:
 #ifdef __mcoldfire__
         lea     -56(sp),sp
@@ -125,6 +279,133 @@ no_ptsin:
         move.w  _flip_y,d0      // set d0 to indicate magnitude/coordinate
 
         rts
+#endif /* CONF_WITH_VDI_FASTDRAW */
+
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+/*
+ * _screen - Screen driver entry point
+ *
+ * The calls of the first two tables on a workstation that draws on the
+ * screen take the same steps as _screen_general() (screen_general() in
+ * vdi_main.c), in the same order, without the code the compiler makes
+ * of them.  Every other call (the opening calls, the NVDI calls of the
+ * third table, a handle without a workstation, and the workstation of an
+ * off-screen bitmap) jumps to _screen_general, which returns to the
+ * caller of _screen.  The registers a C function keeps are kept: a2,
+ * the only one used besides d0, d1, a0 and a1, is saved before it is
+ * loaded, after the last jump to _screen_general.  The offsets and
+ * constants are those of vdiscreen.h, which vdi_main.c checks against
+ * the structures.
+ *
+ *      a0  CONTRL          d0  the handle, then the opcode
+ *      a1  the workstation d1  the index into a table
+ *      a2  the table row
+ */
+        .globl  _screen
+        .extern _screen_general
+        .extern _vwk_ptr
+        .extern _jmptb1
+        .extern _jmptb2
+        .extern _v_planes
+        .extern _CUR_WORK
+        .extern _vdi_bg_text
+        .extern _vdi_bg_line
+        .extern _def_font
+        .extern _CUR_FONT
+        .extern _WRT_MODE
+        .extern _CLIP
+        .extern _XMINCL
+        .extern _YMINCL
+        .extern _XMAXCL
+        .extern _YMAXCL
+
+_screen:
+        movea.l _CONTRL,a0
+        move.w  VS_CONTRL_HANDLE(a0),d0         // the handle
+        subq.w  #1,d0
+        cmp.w   #NUM_VDI_HANDLES-1,d0
+        jhi     _screen_general                 // none: 0 or too large
+        ext.l   d0
+        lsl.l   #VS_VWKPTR_SHIFT,d0
+        lea     _vwk_ptr+(1<<VS_VWKPTR_SHIFT),a1        // vwk_ptr[1]
+        movea.l (a1,d0.l),a1                    // the workstation
+        cmpa.w  #0,a1
+        jeq     _screen_general
+#if CONF_WITH_VDI_NVDI_EXT
+        tst.l   VS_VWK_BM_ADDR(a1)              // an off-screen bitmap: general
+        jne     _screen_general
+#endif
+        move.w  VS_CONTRL_OP(a0),d0             // the opcode
+        move.w  d0,d1
+        subq.w  #VS_OP_CLSWK,d1                 // the first table, not the open call
+        cmp.w   #VS_OP_TAB1_LAST-VS_OP_CLSWK,d1
+        jhi     scr_tab2
+        lsl.w   #VS_ROW_SHIFT,d1
+        move.l  a2,-(sp)                        // the caller's a2, back at scr_done
+        lea     _jmptb1+(1<<VS_ROW_SHIFT),a2
+        jra     scr_row
+scr_tab2:
+        sub.w   #VS_OP_CLSVWK-VS_OP_CLSWK,d1    // the second table, not the open call
+        cmp.w   #VS_OP_TAB2_LAST-VS_OP_CLSVWK,d1
+        jhi     _screen_general
+        lsl.w   #VS_ROW_SHIFT,d1
+        move.l  a2,-(sp)                        // the caller's a2, back at scr_done
+        lea     _jmptb2+(1<<VS_ROW_SHIFT),a2
+scr_row:
+        adda.w  d1,a2
+        move.l  d0,-(sp)                        // the opcode
+        move.w  VS_ROW_NPTSOUT(a2),VS_CONTRL_NPTSOUT(a0)
+        move.w  VS_ROW_NINTOUT(a2),VS_CONTRL_NINTOUT(a0)
+        clr.w   _flip_y
+        cmp.w   #VS_FIS_USER,VS_VWK_FILL_STYLE(a1)      // multifill just for user
+        jeq     scr_multi
+        clr.w   VS_VWK_MULTIFILL(a1)
+scr_multi:
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+        cmp.w   #VS_MAX_INDEXED_PLANES,_v_planes
+        jls     scr_notrue
+        move.l  a1,_CUR_WORK
+scr_notrue:
+#endif
+        move.l  a1,-(sp)                        // kept for after the call
+        move.l  a1,-(sp)                        // the argument
+        movea.l VS_ROW_OP(a2),a2
+        jsr     (a2)
+        addq.l  #4,sp
+        movea.l (sp)+,a1
+        move.l  (sp)+,d0
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+        clr.w   _vdi_bg_text
+        clr.w   _vdi_bg_line
+#endif
+        cmp.w   #VS_OP_CLSWK,d0                 // closing a workstation: nothing to show
+        jeq     scr_done
+        cmp.w   #VS_OP_CLSVWK,d0
+        jeq     scr_done
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        move.l  VS_VWK_CUR_FONT(a1),d0
+        lea     VS_VWK_OUTLINE_HEAD(a1),a0
+        cmp.l   a0,d0
+        jne     scr_font
+        tst.l   VS_VWK_OUTLINE_FONT(a1)
+        jeq     scr_font
+        move.l  _def_font,d0
+scr_font:
+        move.l  d0,_CUR_FONT
+#else
+        move.l  VS_VWK_CUR_FONT(a1),_CUR_FONT
+#endif
+        move.w  VS_VWK_WRT_MODE(a1),_WRT_MODE
+        move.w  VS_VWK_CLIP(a1),_CLIP
+        move.w  VS_VWK_XMN_CLIP(a1),_XMINCL
+        move.w  VS_VWK_YMN_CLIP(a1),_YMINCL
+        move.w  VS_VWK_XMX_CLIP(a1),_XMAXCL
+        move.w  VS_VWK_YMX_CLIP(a1),_YMAXCL
+        move.l  a1,_CUR_WORK
+scr_done:
+        movea.l (sp)+,a2                        // the caller's a2
+        rts
+#endif /* CONF_WITH_VDI_FASTDRAW && !__mcoldfire__ */
 
 #define F_SAVRDY        0               // save buffer status flag: 0:empty  1:full
 #define F_SAVWID        1               // saved line width        0:word   1:longword

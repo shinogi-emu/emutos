@@ -13,6 +13,9 @@
         .globl  _fast_bit_blt
 
         .extern _PTSIN
+#if CONF_WITH_VDI_FASTDRAW
+        .extern _mcpu
+#endif
 
 // The following defines are offsets inside fringe code fragments
 // As a result this file cannot be converted to ColdFire using PortAsm.
@@ -552,7 +555,7 @@ f2op_04:
         and.w   d0,(a1)
         jra     f2_rtn
 
-mode_05:                        // dummy label. Never called!!!!
+mode_05:                        // dummy label. Never called: next_plane skips op 5
 
         and.w   d7,d0           // S and P                                       4
 mode_06:
@@ -798,6 +801,14 @@ _fast_bit_blt:
 
         lea     FRAME_LEN(a0),a6        // emulate link opcode
 
+#if CONF_WITH_VDI_FASTDRAW
+        tst.w   S_NXPL(a6)
+        jne     fbb_std                 // only a one-plane source expands
+        jbsr    expand_cols             // d0.w: 0 if it drew the whole blit
+        tst.w   d0
+        jeq     fbb_done
+fbb_std:
+#endif
         move.w  S_XMIN(a6),d0           // clipped Xmin source
         move.w  D_XMIN(a6),d2           // clipped Xmin destination
         move.w  S_XMAX(a6),d4           // clipped Xmax source
@@ -809,6 +820,9 @@ _fast_bit_blt:
 
         jbsr    bit_blt
 
+#if CONF_WITH_VDI_FASTDRAW
+fbb_done:
+#endif
         movem.l (sp)+,d2-d7/a2-a6
         rts
 
@@ -858,7 +872,11 @@ bit_blt:
         add.w   d6,d7                   // three or more words apiece ...
 
         cmpi.w  #4,d7
+#if CONF_WITH_VDI_FASTDRAW
+        jcc     aligned_blt             // do the special word aligned blt
+#else
         jcc     word_blt                // do the special word aligned blt
+#endif
 
 std_blt:
 //  in:
@@ -1083,7 +1101,10 @@ next_plane:
         swap    d5
         move.w  INNER_CT(a6),d5         // d5(15:00) <- inner loop counter
 
-        move.l  #0x8421,d1              // logic ops 15,10,5, and 0 are special cases ($8421=%1000010000100001)
+        cmp.w   #5,d0                   // logic op 5 (D' <- D) leaves the destination
+        jeq     np_cont                 // alone: there is no fragment for it, skip the plane
+
+        move.l  #0x8421,d1              // logic ops 15,10, and 0 are special cases ($8421=%1000010000100001)
         btst    d0,d1                   // where operation is performed directly upon
         jne     unary_blt               // the destination independent of the source
 
@@ -1404,3 +1425,964 @@ sc_mp_enter:
 sc_plane:
         dbra    d4,sc_mp_enter
         rts
+
+#if CONF_WITH_VDI_FASTDRAW
+
+//
+// aligned_blt - a replace-mode copy whose source and destination sit at the
+//               same place in a word, between forms of the same interleaved
+//               planes (what word_blt does a plane at a time)
+//
+// The planes of a row are interleaved, so the words between the two end
+// columns, in every plane, are one run of memory: it is moved as long words
+// (at even addresses, which every 68000 accepts), and only the two end
+// columns are masked.  The rows, and the words of a row, go in the direction
+// word_blt would pick (source address below the destination address: bottom
+// up and right to left), so an overlapping copy reads before it writes.
+// Forms whose layout is not the plain interleaved one go to word_blt.
+//
+//  in:
+//      d4.w    words in source -1
+//      d6.w    words in destination -1  (d4 = d6, both >= 2: checked before)
+//
+        .even
+aligned_blt:
+        move.w  S_NXWD(a6),d0
+        cmp.w   D_NXWD(a6),d0
+        jne     word_blt                // both forms have the same word step
+        move.w  PLANE_CT(a6),d1
+        add.w   d1,d1
+        cmp.w   d0,d1
+        jne     word_blt                // the step is the plane count
+        cmpi.w  #2,S_NXPL(a6)
+        jne     word_blt                // the planes follow each other
+        cmpi.w  #2,D_NXPL(a6)
+        jne     word_blt
+        cmp.w   d4,d6
+        jne     word_blt                // as many words in the source
+        tst.w   B_HT(a6)
+        jle     word_blt
+
+        move.w  S_XMIN(a6),d0
+        move.w  S_YMIN(a6),d1
+        jbsr    s_xy2addr               // a0 -> first source word
+        move.w  D_XMIN(a6),d0
+        move.w  D_YMIN(a6),d1
+        jbsr    d_xy2addr               // a1 -> first destination word
+
+        moveq   #0,d0
+        move.w  S_NXLN(a6),d0
+        move.l  d0,a4                   // a4 <- source line step
+        moveq   #0,d0
+        move.w  D_NXLN(a6),d0
+        move.l  d0,a5                   // a5 <- destination line step
+
+        addq.w  #1,d6                   // columns
+        moveq   #0,d7
+        move.w  d6,d7
+        mulu    D_NXWD(a6),d7           // d7 <- bytes in a row of the copy
+
+        moveq   #0,d3
+        move.w  D_NXWD(a6),d3
+        add.l   d3,d3                   // the two end columns
+        neg.l   d3
+        add.l   d7,d3                   // d3 <- bytes between them
+
+        jbsr    get_fringe              // d6.w left mask, d6(31:16) right mask
+        move.l  d6,d5
+        swap    d5                      // d5.w <- right mask
+
+//   the words between the end columns: odd word, and long words, the latter
+//   as passes of 8 entered part way: entry offset in SRC_WR, passes-1 in
+//   INNER_CT (-1: none)
+
+        move.l  d3,d0
+        lsr.l   #2,d0                   // d0.w <- long words
+        andi.w  #2,d3
+        move.w  d3,DST_WR(a6)           // 2: a word more
+        move.w  d0,d1
+        neg.w   d1
+        andi.w  #7,d1
+        add.w   d1,d1
+        move.w  d1,SRC_WR(a6)
+        subq.w  #1,d0                   // none: -1
+        jmi     al_set
+        lsr.w   #3,d0
+al_set:
+        move.w  d0,INNER_CT(a6)
+
+        move.w  PLANE_CT(a6),d2
+        subq.w  #1,d2                   // d2 <- planes -1
+        move.w  B_HT(a6),d4
+        subq.w  #1,d4                   // d4 <- rows -1
+        move.l  a0,a2                   // a2, a3: first word of the row
+        move.l  a1,a3
+
+        cmp.l   a1,a0
+        jcs     al_up                   // source below the destination: bottom up
+
+al_down:
+        move.l  a2,a0
+        move.l  a3,a1
+        move.w  d2,d1
+al_dl:  move.w  (a0)+,d0                // left column
+        move.w  (a1),d3
+        eor.w   d3,d0
+        and.w   d6,d0
+        eor.w   d0,(a1)+
+        dbra    d1,al_dl
+
+        move.w  INNER_CT(a6),d0
+        jmi     al_dw
+        move.w  SRC_WR(a6),d1
+        jmp     al_df(pc,d1.w)
+al_df:  move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        dbra    d0,al_df
+al_dw:  tst.w   DST_WR(a6)
+        jeq     al_dr
+        move.w  (a0)+,(a1)+
+
+al_dr:  move.w  d2,d1
+al_dr1: move.w  (a0)+,d0                // right column
+        move.w  (a1),d3
+        eor.w   d3,d0
+        and.w   d5,d0
+        eor.w   d0,(a1)+
+        dbra    d1,al_dr1
+
+        adda.l  a4,a2
+        adda.l  a5,a3
+        move.l  a2,a0
+        move.l  a3,a1
+        move.w  d2,d1
+        dbra    d4,al_dl
+        rts
+
+al_up:  move.w  S_YMAX(a6),d0           // start at the last row of each form, as
+        sub.w   S_YMIN(a6),d0           // r2l_b2t does (the heights agree after
+        mulu    S_NXLN(a6),d0           // clipping, not for an unclipped vro_cpyfm)
+        adda.l  d0,a2
+        move.w  D_YMAX(a6),d0
+        sub.w   D_YMIN(a6),d0
+        mulu    D_NXLN(a6),d0
+        adda.l  d0,a3
+
+al_ur:  move.l  a2,a0
+        adda.l  d7,a0                   // after the row
+        move.l  a3,a1
+        adda.l  d7,a1
+        move.w  d2,d1
+al_ur1: move.w  -(a0),d0                // right column
+        move.w  -(a1),d3
+        eor.w   d3,d0
+        and.w   d5,d0
+        eor.w   d0,(a1)
+        dbra    d1,al_ur1
+
+        tst.w   DST_WR(a6)
+        jeq     al_um
+        move.w  -(a0),-(a1)
+al_um:  move.w  INNER_CT(a6),d0
+        jmi     al_ul
+        move.w  SRC_WR(a6),d1
+        jmp     al_ub(pc,d1.w)
+al_ub:  move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        dbra    d0,al_ub
+
+al_ul:  move.w  d2,d1
+al_ul1: move.w  -(a0),d0                // left column
+        move.w  -(a1),d3
+        eor.w   d3,d0
+        and.w   d6,d0
+        eor.w   d0,(a1)
+        dbra    d1,al_ul1
+
+        suba.l  a4,a2
+        suba.l  a5,a3
+        dbra    d4,al_ur
+        rts
+
+//
+// colblt - expand one plane of source bits into 1 to 8 interleaved
+//          planes, a column of planes at a time
+//
+// Used for a monochrome source expanded with a foreground and a background
+// colour (vrt_cpyfm, expand_cols below) and for a plain glyph (text_cols in
+// vdi_tblit.S): one plane of source words, a destination whose planes are
+// interleaved word by word, and for every destination plane a logic
+// operation that depends only on the source bit and the plane's own bit.
+//
+// For each row the 16 source bits of a destination column are built once.
+// Plane p's new word is
+//
+//      new = (old & ((S & ka) ^ kx)) ^ ((S & sa) ^ sx)
+//
+// where ka, kx, sa, sx are 0 or all ones, fixed for the whole call by the
+// plane's operation (cb_opw: any of the 16 logic operations, op 5 leaves
+// the plane alone).  Two planes are one long word.  The columns at the two
+// ends of a row are masked; no source word outside the rectangle is read.
+// Long words are accessed at even addresses only.  Rows are done in the
+// order given by the steps; source and destination must not overlap.
+//
+//  in:
+//      a0.l    first source word of the first row (leftmost word)
+//      a1.l    first destination word of the first row (plane 0, leftmost column)
+//      d0.w    source x mod 16 of the first pixel
+//      d1.w    destination x mod 16 of the first pixel
+//      d2.w    width in pixels (>= 1)
+//      a6.l    block of CB_SIZE bytes, word aligned, with these fields set (the
+//              others are this routine's).  The destination planes must be
+//              exactly interleaved: a column is 2 * planes bytes, plane p's
+//              word at 2 * p in it:
+//                CB_SSTEP.l  bytes from a source row to the next
+//                CB_DSTEP.l  bytes from a destination row to the next
+//                CB_ROWS.w   rows - 1  (>= 0); counted down to -1, so a caller
+//                            that reuses the block must set it again
+//                CB_PAIRS.w  planes/2 - 1  (2, 4, 6 or 8 planes); -1 for
+//                            one plane: the same call, with one operation
+//                            (CB_OPS[0]) and words in place of the pairs
+//                            (a column is then one word; no CB_MODE)
+//                CB_OPS      one byte per plane: its logic operation 0-15
+//                CB_MODE     0, or 1-4 for text in one of the VDI's four
+//                            writing modes (replace, transparent, XOR,
+//                            reverse transparent) with a background of
+//                            zero: the whole columns between the ends are
+//                            then done by a loop that knows the mode, which
+//                            takes CB_F instead of CB_OPS: one long word per
+//                            pair of planes, all ones for each plane whose
+//                            foreground bit is 1 (the high word for the
+//                            first plane).  CB_OPS must be set as well
+//                            (the end columns use it).
+//  out:
+//      the block's other fields, all registers except sp are lost
+//
+#include "vdicolblt.h"
+
+        .globl  colblt
+        .even
+colblt:
+        move.w  d0,d3
+        sub.w   d1,d3                   // d3 <- source offset - destination offset
+        moveq   #0,d4
+        tst.w   d3
+        jpl     cb_g1
+        moveq   #-1,d4                  // the source starts later in its word:
+        addi.w  #16,d3                  // the first window is [nothing][word 0]
+cb_g1:  move.w  d3,CB_SHIFT(a6)
+        move.w  d4,CB_KNEG(a6)
+        add.w   d2,d0
+        subq.w  #1,d0
+        lsr.w   #4,d0                   // d0 <- source words - 1
+        move.w  #-1,d5
+        lsr.w   d1,d5                   // d5 <- left mask
+        add.w   d2,d1
+        subq.w  #1,d1                   // d1 <- destination x mod 16 + width - 1
+        move.w  d1,d6
+        lsr.w   #4,d6                   // d6 <- destination words - 1
+        andi.w  #15,d1
+        moveq   #15,d7
+        sub.w   d1,d7
+        moveq   #-1,d3
+        lsl.w   d7,d3                   // d3 <- right mask
+        add.w   d6,d4                   // d4 <- destination words - 1 + (0, -1)
+        clr.w   CB_LAST(a6)
+        cmp.w   d4,d0
+        jgt     cb_g2
+        move.w  #1,CB_LAST(a6)          // source words <= that: no word to add last
+cb_g2:  tst.w   d6
+        jne     cb_g3
+        and.w   d3,d5                   // one column: both masks
+cb_g3:  move.w  d5,CB_LM(a6)
+        move.w  d5,CB_LM+2(a6)
+        not.w   d5
+        move.w  d5,CB_NLM(a6)
+        move.w  d5,CB_NLM+2(a6)
+        move.w  d3,CB_RM(a6)
+        move.w  d3,CB_RM+2(a6)
+        not.w   d3
+        move.w  d3,CB_NRM(a6)
+        move.w  d3,CB_NRM+2(a6)
+        move.w  d6,CB_COLS(a6)
+        subq.w  #2,d6
+        move.w  d6,CB_MID(a6)
+        tst.w   CB_PAIRS(a6)
+        jmi     cb_1pl                  // one plane (CB_PAIRS is -1)
+
+//   the constants: for each pair of planes, ka, kx, sa, sx, the first
+//   plane in the high word of each
+
+        lea     CB_OPS(a6),a3
+        lea     CB_K(a6),a2
+        lea     cb_opw,a4
+        move.w  CB_PAIRS(a6),d6
+cb_k1:  moveq   #0,d0
+        move.b  (a3)+,d0
+        lsl.w   #3,d0
+        moveq   #0,d1
+        move.b  (a3)+,d1
+        lsl.w   #3,d1
+        moveq   #3,d3
+cb_k2:  move.w  0(a4,d0.w),(a2)+
+        move.w  0(a4,d1.w),(a2)+
+        addq.w  #2,d0
+        addq.w  #2,d1
+        dbra    d3,cb_k2
+        dbra    d6,cb_k1
+
+//   rows
+
+        move.l  a0,a3                   // a3, a4: first word of the row
+        move.l  a1,a4
+        moveq   #0,d7
+        move.w  CB_SHIFT(a6),d7
+        move.w  CB_PAIRS(a6),d5
+cb_row:
+        move.l  a3,a0
+        move.l  a4,a1
+        moveq   #0,d0
+        tst.w   CB_KNEG(a6)
+        jne     cb_r1
+        move.w  (a0)+,d0                // the window's first word
+cb_r1:  tst.w   CB_COLS(a6)
+        jeq     cb_one
+
+        swap    d0                      // first column
+        move.w  (a0)+,d0
+        lea     CB_LM(a6),a5
+        jbsr    cb_colm
+        move.w  CB_MID(a6),d4
+        jmi     cb_last
+        move.w  CB_MODE(a6),d6
+        jne     cb_spec
+
+cb_mid: swap    d0                      // whole columns
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1                   // d1 <- the 16 source bits, twice
+        lea     CB_K(a6),a2
+        move.w  d5,d6
+cb_mp:  move.l  (a2)+,d2
+        and.l   d1,d2
+        move.l  (a2)+,d3
+        eor.l   d3,d2                   // d2 <- (S & ka) ^ kx
+        and.l   (a1),d2                 // old & that
+        move.l  (a2)+,d3
+        and.l   d1,d3
+        eor.l   d3,d2
+        move.l  (a2)+,d3
+        eor.l   d3,d2                   // ^ ((S & sa) ^ sx)
+        move.l  d2,(a1)+
+        dbra    d6,cb_mp
+        dbra    d4,cb_mid
+        jra     cb_last
+
+//   whole columns of text in a writing mode: d6 the mode, d4 the columns - 1;
+//   the source bits of a column are built as above
+
+cb_spec:
+        tst.w   d5
+        jeq     cb_spec1                // one pair: constants in a register
+        subq.w  #2,d6
+        jlt     cb_srep
+        jeq     cb_str
+        subq.w  #1,d6
+        jeq     cb_sxor
+        jra     cb_srv
+
+//   the same for two planes only: F in d6, no loop over the pairs
+cb_spec1:
+        subq.w  #2,d6
+        jlt     cb_s1rep
+        jeq     cb_s1tr
+        subq.w  #1,d6
+        jeq     cb_s1xor
+
+cb_s1rv:                                // reverse transparent
+        move.l  CB_F(a6),d6
+cb_s1rv1:
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        move.l  d1,d2
+        or.l    d6,d2
+        and.l   d2,(a1)
+        not.l   d1
+        and.l   d6,d1
+        or.l    d1,(a1)+
+        dbra    d4,cb_s1rv1
+        jra     cb_last
+
+cb_s1rep:                               // replace
+        move.l  CB_F(a6),d6
+cb_s1r1:
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        and.l   d6,d1
+        move.l  d1,(a1)+
+        dbra    d4,cb_s1r1
+        jra     cb_last
+
+cb_s1tr:                                // transparent
+        move.l  CB_F(a6),d6
+cb_s1t1:
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        move.l  d1,d2
+        and.l   d6,d2
+        or.l    d2,(a1)
+        not.l   d1
+        or.l    d6,d1
+        and.l   d1,(a1)+
+        dbra    d4,cb_s1t1
+        jra     cb_last
+
+cb_s1xor:                               // XOR
+cb_s1x1:
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        eor.l   d1,(a1)+
+        dbra    d4,cb_s1x1
+        jra     cb_last
+
+//   reverse transparent: new = (old & (S | F)) | (~S & F), per plane
+cb_srv: swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        move.l  d1,d5
+        not.l   d5
+        lea     CB_F(a6),a2
+        move.w  CB_PAIRS(a6),d6
+cb_srv1:
+        move.l  d1,d2
+        or.l    (a2),d2
+        and.l   d2,(a1)
+        move.l  d5,d3
+        and.l   (a2)+,d3
+        or.l    d3,(a1)+
+        dbra    d6,cb_srv1
+        dbra    d4,cb_srv
+        move.w  CB_PAIRS(a6),d5         // d5 held ~S
+        jra     cb_last
+
+//   replace: new = S & F
+cb_srep:
+cb_sr:  swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        lea     CB_F(a6),a2
+        move.w  d5,d6
+cb_sr1: move.l  d1,d2
+        and.l   (a2)+,d2
+        move.l  d2,(a1)+
+        dbra    d6,cb_sr1
+        dbra    d4,cb_sr
+        jra     cb_last
+
+//   transparent: new = (old | (S & F)) & (~S | F)
+cb_str: swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        move.l  d1,d5
+        not.l   d5
+        lea     CB_F(a6),a2
+        move.w  CB_PAIRS(a6),d6
+cb_str1:
+        move.l  d1,d2
+        and.l   (a2),d2
+        or.l    d2,(a1)
+        move.l  d5,d3
+        or.l    (a2)+,d3
+        and.l   d3,(a1)+
+        dbra    d6,cb_str1
+        dbra    d4,cb_str
+        move.w  CB_PAIRS(a6),d5         // d5 held ~S
+        jra     cb_last
+
+//   XOR: every plane takes S
+cb_sxor:
+cb_sx:  swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1
+        move.w  d5,d6
+cb_sx1: eor.l   d1,(a1)+
+        dbra    d6,cb_sx1
+        dbra    d4,cb_sx
+        jra     cb_last
+
+cb_last:
+        swap    d0                      // last column
+        tst.w   CB_LAST(a6)
+        jeq     cb_l1
+        clr.w   d0
+        jra     cb_l2
+cb_l1:  move.w  (a0)+,d0
+cb_l2:  lea     CB_RM(a6),a5
+        jbsr    cb_colm
+        jra     cb_next
+
+cb_one: swap    d0                      // one column
+        tst.w   CB_LAST(a6)
+        jeq     cb_o1
+        clr.w   d0
+        jra     cb_o2
+cb_o1:  move.w  (a0)+,d0
+cb_o2:  lea     CB_LM(a6),a5
+        jbsr    cb_colm
+
+cb_next:
+        adda.l  CB_SSTEP(a6),a3
+        adda.l  CB_DSTEP(a6),a4
+        subq.w  #1,CB_ROWS(a6)
+        jpl     cb_row
+        rts
+
+//   one plane: the rows as above, with one word to a column; ka, kx, sa, sx
+//   of the operation are at CB_K, and for the commonest operations the whole
+//   columns between the ends have a loop of their own (a2 holds its address)
+
+cb_1pl:
+        lea     cb_opw,a2
+        moveq   #0,d0
+        move.b  CB_OPS(a6),d0           // d0 <- the operation
+        andi.w  #15,d0
+        move.w  d0,d1
+        lsl.w   #3,d1
+        move.w  0(a2,d1.w),CB_K(a6)
+        move.w  2(a2,d1.w),CB_K+2(a6)
+        move.w  4(a2,d1.w),CB_K+4(a6)
+        move.w  6(a2,d1.w),CB_K+6(a6)
+        lsl.w   #2,d0
+        lea     cb_oloops,a2
+        move.l  0(a2,d0.w),a2
+        move.l  a0,a3                   // a3, a4: first word of the row
+        move.l  a1,a4
+        moveq   #0,d7
+        move.w  CB_SHIFT(a6),d7
+cb_o_row:
+        move.l  a3,a0
+        move.l  a4,a1
+        moveq   #0,d0
+        tst.w   CB_KNEG(a6)
+        jne     cb_o_r1
+        move.w  (a0)+,d0                // the window's first word
+cb_o_r1:
+        tst.w   CB_COLS(a6)
+        jeq     cb_o_one
+
+        swap    d0                      // first column
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        lea     CB_LM(a6),a5
+        jbsr    cb_colm1
+        move.w  CB_MID(a6),d4
+        jmi     cb_o_last
+        jmp     (a2)                    // the whole columns, back at cb_o_last
+
+cb_o_last:
+        swap    d0                      // last column
+        tst.w   CB_LAST(a6)
+        jeq     cb_o_l1
+        clr.w   d0
+        jra     cb_o_l2
+cb_o_l1:
+        move.w  (a0)+,d0
+cb_o_l2:
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        lea     CB_RM(a6),a5
+        jbsr    cb_colm1
+        jra     cb_o_next
+
+cb_o_one:
+        swap    d0                      // one column
+        tst.w   CB_LAST(a6)
+        jeq     cb_o_o1
+        clr.w   d0
+        jra     cb_o_o2
+cb_o_o1:
+        move.w  (a0)+,d0
+cb_o_o2:
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        lea     CB_LM(a6),a5
+        jbsr    cb_colm1
+
+cb_o_next:
+        adda.l  CB_SSTEP(a6),a3
+        adda.l  CB_DSTEP(a6),a4
+        subq.w  #1,CB_ROWS(a6)
+        jpl     cb_o_row
+        rts
+
+//   whole columns, d4 the count - 1, d0 the window, d7 the shift
+
+cb_m_gen:                               // any operation, by the formula
+        move.w  CB_K+2(a6),d5
+        move.w  CB_K+6(a6),d6
+cb_mg1: swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        move.w  d1,d2
+        and.w   CB_K(a6),d2
+        eor.w   d5,d2
+        and.w   (a1),d2
+        move.w  d1,d3
+        and.w   CB_K+4(a6),d3
+        eor.w   d6,d3
+        eor.w   d3,d2
+        move.w  d2,(a1)+
+        dbra    d4,cb_mg1
+        jra     cb_o_last
+
+cb_m_0:                                 // D' <- 0
+        clr.w   (a1)+
+        dbra    d4,cb_m_0
+        jra     cb_o_last
+
+cb_m_5:                                 // D' <- D
+        addq.w  #1,d4
+        add.w   d4,d4
+        adda.w  d4,a1
+        jra     cb_o_last
+
+cb_m_1:                                 // D' <- S and D
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        and.w   d1,(a1)+
+        dbra    d4,cb_m_1
+        jra     cb_o_last
+
+cb_m_3:                                 // D' <- S
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        move.w  d1,(a1)+
+        dbra    d4,cb_m_3
+        jra     cb_o_last
+
+cb_m_4:                                 // D' <- [not S] and D
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        not.w   d1
+        and.w   d1,(a1)+
+        dbra    d4,cb_m_4
+        jra     cb_o_last
+
+cb_m_6:                                 // D' <- S xor D
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        eor.w   d1,(a1)+
+        dbra    d4,cb_m_6
+        jra     cb_o_last
+
+cb_m_7:                                 // D' <- S or D
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        or.w    d1,(a1)+
+        dbra    d4,cb_m_7
+        jra     cb_o_last
+
+cb_m_13:                                // D' <- [not S] or D
+        swap    d0
+        move.w  (a0)+,d0
+        move.l  d0,d1
+        lsl.l   d7,d1
+        swap    d1
+        not.w   d1
+        or.w    d1,(a1)+
+        dbra    d4,cb_m_13
+        jra     cb_o_last
+
+//   one column of one plane with a mask: d1.w the source bits, a1 the word,
+//   a5 -> mask; d2, d3, d5, d6 are lost
+
+cb_colm1:
+        move.w  CB_K+2(a6),d5
+        move.w  CB_K+6(a6),d6
+        move.w  d1,d2
+        and.w   CB_K(a6),d2
+        eor.w   d5,d2
+        and.w   (a1),d2                 // old & ((S & ka) ^ kx)
+        move.w  d1,d3
+        and.w   CB_K+4(a6),d3
+        eor.w   d6,d3
+        eor.w   d3,d2                   // d2 <- what the operation makes of it
+        move.w  (a1),d3
+        eor.w   d3,d2
+        and.w   (a5),d2                 // only the bits inside the mask change
+        eor.w   d2,d3
+        move.w  d3,(a1)+
+        rts
+
+//   one column with a mask: d0 window, d7 shift, d5 pairs - 1, a1 column,
+//   a5 -> mask, complement; d1-d4, d6 and a2 are lost
+
+cb_colm:
+        move.l  d0,d1
+        lsl.l   d7,d1
+        move.l  d1,d2
+        swap    d2
+        move.w  d2,d1                   // d1 <- the 16 source bits, twice
+        lea     CB_K(a6),a2
+        move.w  d5,d6
+cb_cp:  move.l  (a2)+,d2
+        and.l   d1,d2
+        move.l  (a2)+,d3
+        eor.l   d3,d2
+        or.l    4(a5),d2                // the bits outside the mask stay
+        and.l   (a1),d2
+        move.l  (a2)+,d3
+        and.l   d1,d3
+        move.l  (a2)+,d4
+        eor.l   d4,d3
+        and.l   (a5),d3                 // only the bits inside the mask change
+        eor.l   d3,d2
+        move.l  d2,(a1)+
+        dbra    d6,cb_cp
+        rts
+
+//   ka, kx, sa, sx for each logic operation, as words (all zero or all ones)
+
+        SECTION_RODATA
+        .even
+cb_opw:
+        .dc.w   0x0000,0x0000,0x0000,0x0000    // 0: D' <- 0
+        .dc.w   0xFFFF,0x0000,0x0000,0x0000    // 1: D' <- S and D
+        .dc.w   0xFFFF,0x0000,0xFFFF,0x0000    // 2: D' <- S and [not D]
+        .dc.w   0x0000,0x0000,0xFFFF,0x0000    // 3: D' <- S
+        .dc.w   0xFFFF,0xFFFF,0x0000,0x0000    // 4: D' <- [not S] and D
+        .dc.w   0x0000,0xFFFF,0x0000,0x0000    // 5: D' <- D
+        .dc.w   0x0000,0xFFFF,0xFFFF,0x0000    // 6: D' <- S xor D
+        .dc.w   0xFFFF,0xFFFF,0xFFFF,0x0000    // 7: D' <- S or D
+        .dc.w   0xFFFF,0xFFFF,0xFFFF,0xFFFF    // 8: D' <- [not S] and [not D]
+        .dc.w   0x0000,0xFFFF,0xFFFF,0xFFFF    // 9: D' <- [not S] xor D
+        .dc.w   0x0000,0xFFFF,0x0000,0xFFFF    // 10: D' <- not D
+        .dc.w   0xFFFF,0xFFFF,0x0000,0xFFFF    // 11: D' <- S or [not D]
+        .dc.w   0x0000,0x0000,0xFFFF,0xFFFF    // 12: D' <- not S
+        .dc.w   0xFFFF,0x0000,0xFFFF,0xFFFF    // 13: D' <- [not S] or D
+        .dc.w   0xFFFF,0x0000,0x0000,0xFFFF    // 14: D' <- [not S] or [not D]
+        .dc.w   0x0000,0x0000,0x0000,0xFFFF    // 15: D' <- 1
+
+//   the loop for the whole columns of one plane, by operation
+
+cb_oloops:
+        .dc.l   cb_m_0,cb_m_1,cb_m_gen,cb_m_3,cb_m_4,cb_m_5,cb_m_6,cb_m_7
+        .dc.l   cb_m_gen,cb_m_gen,cb_m_gen,cb_m_gen,cb_m_gen,cb_m_13,cb_m_gen,cb_m_gen
+
+        .text
+
+//
+// expand_cols - a one-plane source expanded into two to eight planes
+//
+// What fast_bit_blt gets for vrt_cpyfm.  Takes the whole blit when the
+// destination is a plain interleaved form of 4 to 8 planes, the
+// source one plane of consecutive words, no pattern, the same width and
+// height on both sides, and source and destination do not overlap;
+// anything else is left to bit_blt.
+//
+//  in:
+//      a6.l    frame
+//  out:
+//      d0.w    0: drawn; else nothing has been changed (a6 kept)
+//
+        .even
+expand_cols:
+        cmpi.l  #20,_mcpu
+        jlt     ec_no                   // 68000/68010: the plane loops are as quick
+        tst.l   P_ADDR(a6)
+        jne     ec_no
+        move.w  PLANE_CT(a6),d1
+        subq.w  #4,d1
+        cmpi.w  #4,d1
+        jhi     ec_no                   // not 4 to 8 planes: at 1 and 2 the
+        btst    #0,d1                   // plane loops of bit_blt are quicker
+        jne     ec_no                   // odd
+        move.w  PLANE_CT(a6),d1
+        add.w   d1,d1
+        cmp.w   D_NXWD(a6),d1
+        jne     ec_no                   // planes not interleaved word by word
+        cmpi.w  #2,D_NXPL(a6)
+        jne     ec_no
+        cmpi.w  #2,S_NXWD(a6)
+        jne     ec_no
+        move.w  B_HT(a6),d6
+        jle     ec_no
+        subq.w  #1,d6                   // d6 <- rows - 1
+        move.w  S_XMAX(a6),d4
+        sub.w   S_XMIN(a6),d4           // d4 <- width - 1
+        jlt     ec_no
+        move.w  D_XMAX(a6),d5
+        sub.w   D_XMIN(a6),d5
+        cmp.w   d4,d5
+        jne     ec_no
+        move.w  S_YMAX(a6),d5
+        sub.w   S_YMIN(a6),d5
+        cmp.w   d6,d5
+        jne     ec_no
+        move.w  D_YMAX(a6),d5
+        sub.w   D_YMIN(a6),d5
+        cmp.w   d6,d5
+        jne     ec_no
+
+        lea     -CB_SIZE(sp),sp
+        move.l  sp,a5                   // a5 -> block
+
+//   the logic operation of each plane
+
+        move.w  FG_COL(a6),d2
+        move.w  BG_COL(a6),d3
+        lea     CB_OPS(a5),a2
+        move.w  PLANE_CT(a6),d7
+        subq.w  #1,d7
+ec_op:  moveq   #0,d0
+        lsr.w   #1,d2
+        addx.w  d0,d0
+        lsr.w   #1,d3
+        addx.w  d0,d0
+        move.b  OP_TAB(a6,d0.w),d0
+        cmpi.b  #15,d0
+        jhi     ec_un                   // not an operation
+        move.b  d0,(a2)+
+        dbra    d7,ec_op
+
+        move.w  S_XMIN(a6),d0
+        move.w  S_YMIN(a6),d1
+        jbsr    s_xy2addr               // a0 -> first source word
+        move.w  D_XMIN(a6),d0
+        move.w  D_YMIN(a6),d1
+        jbsr    d_xy2addr               // a1 -> first destination word
+
+        moveq   #0,d0
+        move.w  S_NXLN(a6),d0
+        move.l  d0,CB_SSTEP(a5)
+        move.l  d0,d1                   // d1 <- source line step
+        moveq   #0,d0
+        move.w  D_NXLN(a6),d0
+        move.l  d0,CB_DSTEP(a5)
+        move.l  d0,d2                   // d2 <- destination line step
+
+//   no overlap: the source starts after the destination ends or the other
+//   way round (the bytes between a block's first and last word)
+
+        moveq   #0,d0
+        move.w  d6,d0
+        mulu    d0,d1                   // d1 <- source rows before the last
+        mulu    d0,d2
+        move.w  S_XMIN(a6),d0
+        andi.w  #15,d0
+        add.w   d4,d0
+        lsr.w   #4,d0
+        addq.w  #1,d0
+        add.w   d0,d0                   // d0 <- source row bytes
+        andi.l  #0xFFFF,d0
+        add.l   a0,d0
+        add.l   d1,d0                   // d0 -> after the source block
+        move.w  D_XMIN(a6),d1
+        andi.w  #15,d1
+        add.w   d4,d1
+        lsr.w   #4,d1
+        addq.w  #1,d1
+        mulu    D_NXWD(a6),d1
+        add.l   a1,d1
+        add.l   d2,d1                   // d1 -> after the destination block
+        cmp.l   d1,a0
+        jcc     ec_ok                   // source starts at or after the destination's end
+        cmp.l   d0,a1
+        jcs     ec_ov                   // destination starts before the source's end: overlap
+ec_ok:
+        move.w  d6,CB_ROWS(a5)
+        clr.w   CB_MODE(a5)
+        move.w  PLANE_CT(a6),d0
+        lsr.w   #1,d0
+        subq.w  #1,d0
+        move.w  d0,CB_PAIRS(a5)
+        move.w  S_XMIN(a6),d0
+        andi.w  #15,d0
+        move.w  D_XMIN(a6),d1
+        andi.w  #15,d1
+        move.w  d4,d2
+        addq.w  #1,d2                   // d2 <- width
+        move.l  a5,a6
+        jbsr    colblt
+        lea     CB_SIZE(sp),sp
+        moveq   #0,d0
+        rts
+
+ec_ov:
+ec_un:  lea     CB_SIZE(sp),sp
+ec_no:  moveq   #1,d0
+        rts
+
+#endif

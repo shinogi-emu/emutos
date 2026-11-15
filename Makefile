@@ -363,6 +363,49 @@ else
 vdi_src += vdi_blit.S vdi_tblit.S
 endif
 
+#
+# outline fonts (see CONF_WITH_VDI_OUTLINE_FONTS in include/config.h)
+#
+# FreeType and the outline font engine need 32-bit int, so they are built
+# without -mshort (see the rules near obj/%.o below).  vdi_ftos.c, which
+# implements the services they call, vdi_ftmem.c, its memory allocator,
+# vdi_outline.c, which puts the fonts on the workstations, and vdi_nvdi.c,
+# the NVDI and SpeedoGDOS text calls, are built like the rest of the VDI.
+#
+
+# The flag is evaluated here, while the Makefile is read, to know which files
+# to build.  The prg target only adds -DTARGET_PRG to its own recipe, so
+# it has to be added by hand.
+VDI_OUTLINE_FONTS := $(shell echo CONF_WITH_VDI_OUTLINE_FONTS | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
+
+# the NVDI colour, raster and bitmap calls (see CONF_WITH_VDI_NVDI_EXT in
+# include/config.h), evaluated the same way
+VDI_NVDI_EXT := $(shell echo CONF_WITH_VDI_NVDI_EXT | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
+
+# OS glue of the allocation that outlives the caller; another host may supply it
+ifneq (,$(filter 1,$(VDI_OUTLINE_FONTS) $(VDI_NVDI_EXT)))
+vdi_src += vdi_kept.c
+endif
+
+ifeq (1,$(VDI_NVDI_EXT))
+vdi_src += vdi_nvdimath.c vdi_nvdicol.c vdi_nvdimisc.c vdi_bitmap.c vdi_xfer.c vdi_xfercore.c
+endif
+
+ifeq (1,$(VDI_OUTLINE_FONTS))
+vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
+endif
+
+# FreeType sources, relative to freetype/src
+FT_SOURCES = base/ftbase.c base/ftinit.c base/ftbbox.c base/ftbitmap.c \
+             base/ftdebug.c base/ftglyph.c base/ftmm.c base/ftstroke.c \
+             base/ftsynth.c \
+             sfnt/sfnt.c truetype/truetype.c cff/cff.c psaux/psaux.c \
+             pshinter/pshinter.c psnames/psnames.c smooth/smooth.c \
+             raster/raster.c autofit/autofit.c
+
+FT_OBJ = $(foreach f,$(FT_SOURCES),obj/ft_$(subst /,_,$(basename $(f))).o)
+VDI_FT_OBJ = $(FT_OBJ) obj/vdi_ft2.o obj/vdi_ftmap.o obj/vdi_ftlibc.o
+
 # The source below must be the last VDI one
 vdi_src += endvdi.S
 
@@ -488,6 +531,9 @@ SRC = $(foreach d,$(dirs),$(addprefix $(d)/,$($(d)_src))) $(end_src)
 
 CORE_OBJ = $(foreach d,$(core_dirs),$(patsubst %.c,obj/%.o,$(patsubst %.S,obj/%.o,$($(d)_src)))) $(FONTOBJ_COMMON) obj/libfont.a obj/version.o
 OPTIONAL_OBJ = $(foreach d,$(optional_dirs),$(patsubst %.c,obj/%.o,$(patsubst %.S,obj/%.o,$($(d)_src))))
+ifeq (1,$(VDI_OUTLINE_FONTS))
+OPTIONAL_OBJ := $(patsubst obj/endvdi.o,$(VDI_FT_OBJ) obj/endvdi.o,$(OPTIONAL_OBJ))
+endif
 END_OBJ = $(patsubst %,obj/%.o,$(basename $(notdir $(end_src))))
 OBJECTS = $(CORE_OBJ) $(OPTIONAL_OBJ) $(END_OBJ)
 
@@ -509,6 +555,9 @@ TOCLEAN += *.img *.map
 
 emutos.img: $(OBJECTS) obj/emutospp.ld
 	$(LD) $(CORE_OBJ) $(LIBS) $(OPTIONAL_OBJ) $(LIBS) $(END_OBJ) $(LDFLAGS) -Wl,-Map=emutos.map -o emutos.img
+ifeq (1,$(VDI_OUTLINE_FONTS))
+	NM=$(TOOLCHAIN_PREFIX)nm bash tools/check-ft-abi.sh obj || { rm -f $@; exit 1; }
+endif
 	@if [ $$(($$(awk '/^\.data /{print $$3}' emutos.map))) -gt 0 ]; then \
 	  echo "### Warning: The DATA segment is not empty."; \
 	  echo "### Please examine emutos.map and use \"const\" where appropriate."; \
@@ -1288,6 +1337,46 @@ obj/%.o : %.c
 
 obj/%.o : %.S
 	$(CC) $(SFILE_FLAGS) -c $< -o $@
+
+#
+# FreeType and the outline font engine
+#
+# These are compiled with 32-bit int, unlike everything else.  They only
+# meet the rest of EmuTOS through vdi/vdi_ft2.h and vdi/vdi_ftos.h, and
+# bring their own C library functions (vdi/vdi_ftlibc.c).  The library
+# symbols are renamed in the objects (vdi/vdi_ftlibc.syms), so that nothing
+# here links to the 16-bit int functions of the same name.
+# tools/check-ft-abi.sh checks the result, after each link of emutos.img.
+# The TrueType bytecode interpreter stops after 50000 instructions a run
+# (FreeType's default is a million), so that a font whose glyph programs
+# loop cannot freeze a slow machine for long.
+#
+
+FT_CFLAGS = $(TOOLCHAIN_CFLAGS) $(CPUFLAGS) $(OPTFLAGS) $(OTHERFLAGS) \
+            -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
+            -Ifreetype/config -Ifreetype/include -Ivdi $(INC) \
+            -DFT2_BUILD_LIBRARY \
+            -DTT_CONFIG_OPTION_MAX_RUNNABLE_OPCODES=50000L \
+            '-DFT_CONFIG_OPTIONS_H=<ftoption.h>' \
+            '-DFT_CONFIG_MODULES_H=<ftmodule.h>' \
+            '-DFT_CONFIG_STANDARD_LIBRARY_H=<vdi_ftstdlib.h>'
+
+FT_CONFIG_H = freetype/config/ftoption.h freetype/config/ftmodule.h \
+              freetype/config/vdi_ftstdlib.h
+
+TOCLEAN += obj/ft_*.o
+
+define FT_OBJ_RULE
+obj/ft_$(subst /,_,$(basename $(1))).o: freetype/src/$(1) $(FT_CONFIG_H)
+	$$(CC) $$(FT_CFLAGS) -c $$< -o $$@
+	$$(OBJCOPY) --redefine-syms=vdi/vdi_ftlibc.syms $$@
+endef
+$(foreach f,$(FT_SOURCES),$(eval $(call FT_OBJ_RULE,$(f))))
+
+# the engine's own files are held to the warnings of the rest of EmuTOS
+obj/vdi_ft2.o obj/vdi_ftmap.o obj/vdi_ftlibc.o: obj/%.o: vdi/%.c vdi/vdi_ft2.h vdi/vdi_ftos.h vdi/vdi_ftmap.h $(FT_CONFIG_H)
+	$(CC) $(FT_CFLAGS) $(WARNFLAGS) -c $< -o $@
+	$(OBJCOPY) --redefine-syms=vdi/vdi_ftlibc.syms $@
 
 #
 # version string

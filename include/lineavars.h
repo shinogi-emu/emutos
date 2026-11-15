@@ -59,6 +59,15 @@ extern UWORD BYTES_LIN;         /* width of line in bytes */
 
 extern WORD DEV_TAB[];          /* intout array for open workstation */
 
+#if CONF_WITH_VDI_NVDI_EXT
+/*
+ * non-zero while a VDI call draws in an off-screen bitmap: the screen
+ * variables above (v_bas_ad, v_lin_wr, BYTES_LIN, V_REZ_HZ, V_REZ_VT)
+ * describe the bitmap then, and an interrupt must not use them
+ */
+extern UBYTE vdi_screen_swapped;
+#endif
+
 extern WORD MOUSE_BT;           /* mouse button state */
 
 /* Line-drawing related variables */

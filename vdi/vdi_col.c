@@ -14,6 +14,9 @@
 #include "has.h"
 #include "xbiosbind.h"
 #include "lineavars.h"
+#if CONF_WITH_VDI_NVDI_EXT
+#include "vdi_nvdimath.h"
+#endif
 
 #if EXTENDED_PALETTE
 #define MAXCOLOURS  256
@@ -769,11 +772,28 @@ void init_colors(void)
     /* now initialise the hardware */
     for (i = 0; i < numcolors; i++)
     {
+#if CONF_WITH_VDI_NVDI_EXT
+        /*
+         * set_color() may change the values it is given (monochrome screens
+         * make pen 1 white): give it a copy, so that the colour requested
+         * for the pen stays the one of the table
+         */
+        WORD rgb[3];
+
+        if (i < 16)
+            memcpy(rgb, REQ_COL[i], sizeof(rgb));
+#if EXTENDED_PALETTE
+        else
+            memcpy(rgb, req_col2[i-16], sizeof(rgb));
+#endif
+        set_color(i, rgb);
+#else
         if (i < 16)
             set_color(i, REQ_COL[i]);
 #if EXTENDED_PALETTE
         else
             set_color(i, req_col2[i-16]);
+#endif
 #endif
     }
 
@@ -840,9 +860,13 @@ static void vq_color16(Vwk *vwk)
 
     if (INTIN[1] == 0)  /* return last-requested value */
     {
+#if CONF_WITH_VDI_NVDI_EXT
+        vdi_pen_request(vwk, colnum, &INTOUT[1]);
+#else
         INTOUT[1] = ext->req_col[colnum][0];
         INTOUT[2] = ext->req_col[colnum][1];
         INTOUT[3] = ext->req_col[colnum][2];
+#endif
         return;
     }
 
@@ -894,6 +918,9 @@ void vdi_vq_color(Vwk *vwk)
 
     if (INTIN[1] == 0)  /* return last-requested value */
     {
+#if CONF_WITH_VDI_NVDI_EXT
+        vdi_pen_request(vwk, INTIN[0], &INTOUT[1]);
+#else
         if (colnum < 16)
         {
             INTOUT[1] = REQ_COL[colnum][0];
@@ -907,6 +934,7 @@ void vdi_vq_color(Vwk *vwk)
             INTOUT[2] = req_col2[colnum-16][1];
             INTOUT[3] = req_col2[colnum-16][2];
         }
+#endif
 #endif
         return;
     }
@@ -952,3 +980,107 @@ void vdi_vq_color(Vwk *vwk)
     INTOUT[2] = st2vdi(c >> 4);
     INTOUT[3] = st2vdi(c);
 }
+
+
+#if CONF_WITH_VDI_NVDI_EXT
+/*
+ * the first index into REQ_COL/req_col2 of the pens of the screen: not 0
+ * on a TT in a mode with fewer colours, with a palette bank selected
+ * (see adjust_tt_colnum())
+ */
+static WORD request_offset(void)
+{
+#if CONF_WITH_TT_SHIFTER
+    if (has_tt_shifter)
+        return adjust_tt_colnum(0);
+#endif
+    return 0;
+}
+
+
+/*
+ * vdi_pen_request - the colour last requested for a VDI pen
+ *
+ * the three components as they were asked for, 0-1000 (not limited)
+ * of VDI pen 'pen', which must be valid
+ */
+void vdi_pen_request(Vwk *vwk, WORD pen, WORD *rgb)
+{
+    const WORD *src;
+
+#if CONF_WITH_VDI_16BIT
+    if (TRUECOLOR_MODE)
+    {
+        src = vwk->ext->req_col[pen];
+    }
+    else
+#endif
+    {
+        pen += request_offset();
+        if (pen < 16)
+            src = REQ_COL[pen];
+#if EXTENDED_PALETTE
+        else
+            src = req_col2[pen-16];
+#else
+        else
+            src = REQ_COL[0];
+#endif
+    }
+    rgb[0] = src[0];
+    rgb[1] = src[1];
+    rgb[2] = src[2];
+}
+
+
+/*
+ * vdi_nearest_pen_in - the VDI pen whose requested colour is nearest a colour
+ *
+ * squared distance of the requested colours, 0-1000, the lowest pen of
+ * equals; 'vwk' is where a 16-bit screen keeps its requested colours
+ */
+WORD vdi_nearest_pen_in(Vwk *vwk, const COLOR_RGB *c)
+{
+    WORD rgb[3], start, count, pen, found, f;
+    LONG best = VDI_DIST_FAR;
+
+    rgb[0] = rgb16_to_vdi(c->red);
+    rgb[1] = rgb16_to_vdi(c->green);
+    rgb[2] = rgb16_to_vdi(c->blue);
+
+#if CONF_WITH_VDI_16BIT
+    if (TRUECOLOR_MODE)
+    {
+        f = vdi_nearest_index((const WORD (*)[3])vwk->ext->req_col, numcolors, rgb, &best);
+        return (f < 0) ? 0 : f;
+    }
+#endif
+
+    found = 0;
+    pen = 0;
+    count = numcolors;
+    start = request_offset();
+    if (start < 16)
+    {
+        WORD n = 16 - start;
+
+        if (n > count)
+            n = count;
+        f = vdi_nearest_index((const WORD (*)[3])&REQ_COL[start], n, rgb, &best);
+        if (f >= 0)
+            found = f;
+        pen = n;
+        start += n;
+        count -= n;
+    }
+#if EXTENDED_PALETTE
+    if (count > 0)
+    {
+        f = vdi_nearest_index((const WORD (*)[3])&req_col2[start-16], count, rgb, &best);
+        if (f >= 0)
+            found = pen + f;
+    }
+#endif
+    return found;
+}
+#endif /* CONF_WITH_VDI_NVDI_EXT */

@@ -21,6 +21,7 @@
 /* #define ENABLE_KDEBUG */
 
 #include "emutos.h"
+#include "gemdos.h"
 #include "fs.h"
 #include "biosdefs.h"
 #include "mem.h"
@@ -350,6 +351,20 @@ void osinit_before_xmaddalt(void)
     osmem_init();
     umem_init();
 }
+
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+/*
+ * make the initial process the owner of a block
+ *
+ * The initial process is the one that runs before the first program is
+ * started.  It never terminates, so its blocks are never freed by ixterm().
+ * Used by the VDI for memory that must outlive the program that called it.
+ */
+void bdos_keep_block(void *addr)
+{
+    set_owner(addr, &initial_basepage);
+}
+#endif
 
 /* BIOS may call xmaddalt() between those two calls */
 

@@ -207,10 +207,20 @@ void vdi_vsf_color(Vwk * vwk)
 {
     WORD fc;
 
+#if CONF_WITH_VDI_FASTDRAW
+    /* validate_color_index() without the call */
+    fc = INTIN[0];
+    if ((fc < 0) || (fc >= numcolors))
+        fc = 1;
+#else
     fc = validate_color_index(INTIN[0]);
+#endif
 
     INTOUT[0] = fc;
     vwk->fill_color = MAP_COL[fc];
+#if CONF_WITH_VDI_NVDI_EXT
+    VDI_FG_BY_PEN(vwk, VDI_COL_FILL);
+#endif
 }
 
 
@@ -324,7 +334,11 @@ void vdi_vqf_attributes(Vwk * vwk)
 
     pointer = INTOUT;
     *pointer++ = vwk->fill_style;
+#if CONF_WITH_VDI_NVDI_EXT
+    *pointer++ = VDI_PEN_OF(vwk, VDI_COL_FILL, vwk->fill_color);
+#else
     *pointer++ = REV_MAP_COL[vwk->fill_color];
+#endif
     *pointer++ = vwk->fill_index + 1;
     *pointer++ = vwk->wrt_mode + 1;
     *pointer = vwk->fill_per;
@@ -1098,6 +1112,12 @@ void vdi_v_get_pixel(Vwk * vwk)
     const WORD x = PTSIN[0];       /* fetch x coord. */
     const WORD y = PTSIN[1];       /* fetch y coord. */
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /* outside an off-screen bitmap there is nothing to read: pixel 0 */
+    if (vdi_screen_swapped && (x < 0 || y < 0 || x > vdi_bm_xres || y > vdi_bm_yres))
+        pel = 0;
+    else
+#endif
     /* Get the requested pixel */
     pel = (WORD)pixelread(x,y);
 

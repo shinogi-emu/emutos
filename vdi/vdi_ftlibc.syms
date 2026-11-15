@@ -1,0 +1,15 @@
+_memchr _ftlibc_memchr
+_memcmp _ftlibc_memcmp
+_memcpy _ftlibc_memcpy
+_memmove _ftlibc_memmove
+_memset _ftlibc_memset
+_strcat _ftlibc_strcat
+_strcmp _ftlibc_strcmp
+_strcpy _ftlibc_strcpy
+_strlen _ftlibc_strlen
+_strncmp _ftlibc_strncmp
+_strncpy _ftlibc_strncpy
+_strrchr _ftlibc_strrchr
+_strstr _ftlibc_strstr
+_strtol _ftlibc_strtol
+_qsort _ftlibc_qsort

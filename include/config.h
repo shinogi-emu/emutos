@@ -1799,6 +1799,57 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_FASTDRAW to 1 to use the faster (and larger) software
+ * drawing loops in the VDI: filled rectangles, horizontal and vertical
+ * lines, screen to screen copies, expanded monochrome bitmaps and text.
+ * They draw exactly what the plain loops draw.  The small ROM and floppy
+ * targets keep the plain loops, to stay within their size limits.
+ */
+#ifndef CONF_WITH_VDI_FASTDRAW
+# if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) \
+  || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) \
+  || defined(TARGET_AMIGA_ROM) || defined(TARGET_LISA_FLOPPY)
+#  define CONF_WITH_VDI_FASTDRAW 0
+# else
+#  define CONF_WITH_VDI_FASTDRAW 1
+# endif
+#endif
+
+/*
+ * Set CONF_WITH_VDI_OUTLINE_FONTS to 1 to build FreeType and the VDI
+ * outline font engine, so that the VDI can draw scalable (TrueType and
+ * OpenType) fonts found in C:\GEMSYS\FONTS.  FreeType is built with
+ * 32-bit ints, and is large: about 400 KB of code, and a 64 KB stack of
+ * its own in RAM.  So this is only enabled by default for the QEMU virt
+ * machine.  The 1024 KB ROM would have less than 10 KB left with it, and
+ * the PRG builds, which owners of machines with 1 MB of RAM run, and the
+ * smaller ROMs have no room for it either; add it with
+ * DEF="-DCONF_WITH_VDI_OUTLINE_FONTS=1" on the make command line, for
+ * example "make 1024 DEF=-DCONF_WITH_VDI_OUTLINE_FONTS=1".
+ */
+#ifndef CONF_WITH_VDI_OUTLINE_FONTS
+# if defined(TARGET_QEMU_VIRT)
+#  define CONF_WITH_VDI_OUTLINE_FONTS 1
+# else
+#  define CONF_WITH_VDI_OUTLINE_FONTS 0
+# endif
+#endif
+
+/*
+ * Set CONF_WITH_VDI_NVDI_EXT to 1 to add the NVDI colour, raster and
+ * off-screen bitmap calls to the VDI (v_setrgb(), vr_clip_rects_by_dst(),
+ * v_color2value() and its relatives, vr_transfer_bits(), v_opnbm() and
+ * friends).  It is left out of the targets short of ROM space.
+ */
+#ifndef CONF_WITH_VDI_NVDI_EXT
+# if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) || defined(TARGET_AMIGA_ROM) || defined(TARGET_LISA_FLOPPY)
+#  define CONF_WITH_VDI_NVDI_EXT 0
+# else
+#  define CONF_WITH_VDI_NVDI_EXT 1
+# endif
+#endif
+
+/*
  * The VDI functions v_fillarea(), v_pline(), v_pmarker() can handle
  * up to MAX_VERTICES coordinates (MAX_VERTICES/2 points).
  * TOS2 allows 512 vertices, TOS3/TOS4 allow 1024.

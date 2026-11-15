@@ -21,8 +21,8 @@
 #include "intmath.h"
 #include "bdosbind.h"
 #include "tosvars.h"
+#include "vdi_kept.h"
 
-#define FIRST_VDI_HANDLE    1
 #define LAST_VDI_HANDLE     (FIRST_VDI_HANDLE+NUM_VDI_HANDLES-1)
 #define VDI_PHYS_HANDLE     FIRST_VDI_HANDLE
 
@@ -45,7 +45,11 @@ MCS *mcs_ptr;
  * entry n in the following array points to the Vwk corresponding to
  * VDI handle n.  entry 0 is unused.
  */
+#if CONF_WITH_VDI_FASTDRAW
+Vwk *vwk_ptr[NUM_VDI_HANDLES+1];    /* read by _screen in vdi_asm.S */
+#else
 static Vwk *vwk_ptr[NUM_VDI_HANDLES+1];
+#endif
 extern Vwk phys_work;       /* attribute area for physical workstation */
 #if CONF_WITH_VDI_16BIT
 static VwkExt phys_work_ext;
@@ -105,9 +109,17 @@ static const WORD INQ_TAB_rom[45] = {
     0,                  /* 27 -  */
     0,                  /* 28 - bezier flag (bit 1) */
     0,                  /* 29 -  */
+#if CONF_WITH_VDI_NVDI_EXT
+    4,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling?; bit 2: vr_clip_rects */
+#else
     0,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling? */
+#endif
     0,                  /* 31 -  */
+#if CONF_WITH_VDI_NVDI_EXT
+    1,                  /* 32 - the NVDI colour calls (v_setrgb, vs_fg_color, v_color2value ...) */
+#else
     0,                  /* 32 -  */
+#endif
     0,                  /* 33 -  */
     0,                  /* 34 -  */
     0,                  /* 35 -  */
@@ -341,6 +353,10 @@ static void init_wk(Vwk * vwk)
     vwk->multifill = 0;
     vwk->ud_ls = LINE_STYLE[0];
 
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_color_init(vwk);
+#endif
+
     pointer = INTOUT;
     src_ptr = DEV_TAB;
     for (l = 0; l < 45; l++)
@@ -368,9 +384,11 @@ static void init_wk(Vwk * vwk)
     }
 #endif
 
+#if WITH_BEZ_QUAL
+    vwk->bez_qual = 7;
+#endif
 #if HAVE_BEZIER
     /* setup initial bezier values */
-    vwk->bez_qual = 7;
 #if 0
     vwk->bezier.available = 1;
     vwk->bezier.depth_scale.min = 9;
@@ -416,11 +434,29 @@ void vdi_v_opnvwk(Vwk * vwk)
     LONG size;
     Vwk **p;
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * v_opnbm() (sub-opcode 1 with the 20 intin it has), v_resize_bm() (2)
+     * and v_open_bm() (3) are opcode 100 too; any other sub-opcode is
+     * v_opnvwk(), as fVDI has it.  v_opnvwk() always has 11 intin, and
+     * the other two have fewer (4 and 6): a binding that leaves CONTRL[5]
+     * stale (the DRI one does) must still open its workstation.
+     */
+    if (((CONTRL[5] == 2 || CONTRL[5] == 3) && CONTRL[3] < 11) ||
+        (CONTRL[5] == 1 && CONTRL[3] >= 20)) {
+        vdi_bitmap_open();
+        return;
+    }
+#endif
+
     /*
      * ensure that CUR_WORK always points to a valid workstation
      * even if v_opnvwk() exits early.
      */
     CUR_WORK = &phys_work;
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    vdi_reap_vwk();                 /* workstations closed while a call slept */
+#endif
 
     /* First find a free handle */
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
@@ -446,7 +482,23 @@ void vdi_v_opnvwk(Vwk * vwk)
     if (TRUECOLOR_MODE)
         size += sizeof(VwkExt); /* for simplicity, allocate them together */
 #endif
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    /* a kept block (see vdi_kept.h): it may be freed after its program ended */
+    vwk = (Vwk *)vdi_alloc_kept_mode(size, MX_SUPER);   /* may sleep: see vdi_sleep.h */
+    if (vwk != NULL && vwk_ptr[handle] != NULL) {
+        /* another program took the handle while this one slept: find another */
+        for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
+            if (!*p)
+                break;
+        }
+        if (handle > LAST_VDI_HANDLE) {
+            vdi_os_mfree(vwk);
+            vwk = NULL;
+        }
+    }
+#else
     vwk = (Vwk *)Mxalloc(size, MX_SUPER);
+#endif
     if (vwk == NULL) {
         CONTRL[6] = 0;  /* No memory available, exit */
         return;
@@ -461,6 +513,10 @@ void vdi_v_opnvwk(Vwk * vwk)
     }
 #endif
 
+#if CONF_WITH_VDI_NVDI_EXT
+    vwk->bm.addr = NULL;        /* a workstation of the screen */
+    vwk->bm.mem = NULL;
+#endif
     vwk_ptr[handle] = vwk;
     vwk->handle = CONTRL[6] = handle;
     init_wk(vwk);
@@ -496,7 +552,12 @@ void vdi_v_clsvwk(Vwk * vwk)
      */
     CUR_WORK = &phys_work;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    vdi_reap_vwk();
+    vdi_release_vwk(vwk);       /* the pixels and the block; may sleep: see vdi_sleep.h */
+#else
     Mfree(vwk);
+#endif
 }
 
 
@@ -584,11 +645,29 @@ void vdi_v_clswk(Vwk * vwk)
     WORD handle;
     Vwk **p;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    /*
+     * CUR_WORK may be one of the workstations freed below, and the calls
+     * that free them may sleep: point it at one that stays (see v_clsvwk)
+     */
+    CUR_WORK = &phys_work;
+    vdi_reap_vwk();
+#endif
+
     /* close all open virtual workstations */
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
         if (*p) {
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+            {
+                Vwk *closing = *p;
+
+                *p = NULL;          /* closed before the call that may sleep */
+                vdi_release_vwk(closing);
+            }
+#else
             Mfree(*p);
             *p = NULL;
+#endif
         }
     }
     CUR_WORK = vwk_ptr[VDI_PHYS_HANDLE];
@@ -665,17 +744,30 @@ static void vq_scrninfo(Vwk *vwk)
     out[0] = 2;             /* packed pixels, not planes            */
     out[1] = 2;             /* software CLUT: hi/true colour        */
     out[2] = v_planes;      /* bits per pixel                       */
+#if CONF_WITH_VDI_NVDI_EXT
+    out[3] = 1;             /* colours, high word: 65536 = 0x10000  */
+    out[4] = 0;             /* low word                             */
+#else
     out[3] = 0;             /* colours, high word of the longword   */
     out[4] = 0x8000;        /* 32768: five bits each of r, g and b  */
+#endif
     out[5] = BYTES_LIN;
     *(UBYTE **)&out[6] = v_bas_ad;
     out[8] = 5;             /* red                                  */
+#if CONF_WITH_VDI_NVDI_EXT
+    out[9] = 6;             /* green: six bits, as fVDI's 16_bit.sys */
+#else
     out[9] = 5;             /* green                                */
+#endif
     out[10] = 5;            /* blue                                 */
     out[11] = 0;            /* no alpha                             */
     out[12] = 0;            /* no genlock                           */
+#if CONF_WITH_VDI_NVDI_EXT
+    out[13] = 0;            /* no unused bit: 5-6-5                 */
+#else
     out[13] = 1;            /* one unused bit                       */
-    out[14] = 1;            /* Falcon bit order                     */
+#endif
+    out[14] = 1;            /* organisation, as fVDI's 16_bit.sys   */
     out[15] = 0;
 
     /*
@@ -685,10 +777,25 @@ static void vq_scrninfo(Vwk *vwk)
     for (i = 0; i < 5; i++)
     {
         out[16 + i] = 11 + i;   /* red   -> bits 11..15 */
+#if CONF_WITH_VDI_NVDI_EXT
+        out[32 + i] = 5 + i;    /* green -> bits 5..9 (10 below)  */
+#else
         out[32 + i] = 6 + i;    /* green -> bits 6..10  */
+#endif
         out[48 + i] = i;        /* blue  -> bits 0..4   */
     }
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * Green has six bits, 5..10, as in fVDI's 16_bit.sys. The VDI's own
+     * colour packing (set_color16, vdi_pack16) leaves bit 5 clear, which
+     * is a green with a zero least significant bit and so agrees with
+     * this description to within one step of six bits.
+     */
+    out[32 + 5] = 10;
+    /* no spare bit: out[96] stays -1 */
+#else
     out[96] = 5;                /* the spare bit        */
+#endif
 
     CONTRL[4] = 128;
     CONTRL[2] = 0;
@@ -733,11 +840,24 @@ void vdi_vq_extnd(Vwk * vwk)
             *dst++ = 0;
 
         src = INQ_TAB;
+#if CONF_WITH_VDI_NVDI_EXT
+        /* what the caller set, not the clipping a call on a bitmap forces */
+        INQ_TAB[19] = vdi_screen_swapped ? vdi_bm_caller_clip : vwk->clip;
+#else
         INQ_TAB[19] = vwk->clip;      /* now update INQTAB */
+#endif
     }
 
     /* copy DEV_TAB or INQ_TAB to INTOUT */
     dst = INTOUT;
     for (i = 0; i < 45; i++)
         *dst++ = *src++;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    /* the size of a bitmap, not of the screen (DEV_TAB[0] and [1] are not swapped) */
+    if (vdi_screen_swapped && *(INTIN) == 0) {
+        INTOUT[0] = vdi_bm_xres;
+        INTOUT[1] = vdi_bm_yres;
+    }
+#endif
 }

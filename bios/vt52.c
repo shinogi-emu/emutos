@@ -848,6 +848,12 @@ static void ascii_lf(void)
  */
 void blink(void)
 {
+#if CONF_WITH_VDI_NVDI_EXT
+    /* the screen variables describe an off-screen bitmap for a moment */
+    if (vdi_screen_swapped)
+        return;
+#endif
+
     /* test visibility/semaphore bit */
     if (!(v_stat_0 & M_CVIS) )
         return;    /* if invisible or blocked, return */

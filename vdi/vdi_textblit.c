@@ -741,6 +741,368 @@ void scale(LOCALVARS *vars)
 }
 
 
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+/*
+ * 16-bit expands, two pixels per store
+ *
+ * a pair of source bits indexes a 4-entry table of pixel pairs, so one
+ * long store (or one read/AND/XOR/write for the modes that leave some
+ * pixels alone) draws two pixels.  the tables are built once per call.
+ */
+
+/*
+ * build the tables for one mode
+ *  replace: source 1 -> fg, source 0 -> bg
+ *  trans:   source 1 -> fg, source 0 left alone
+ *  xor:     source 1 -> complement, source 0 left alone
+ *  erase:   source 0 -> bg, source 1 left alone (each caller passes the
+ *           colour its own erase rule wants as bg)
+ */
+const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg)
+{
+    static struct expand16 tab;     /* in BSS: kind is stored +1, 0 means empty */
+    struct expand16 *e = &tab;
+    UWORD sa, sx, ca, cx, ha, hx, la, lx;
+    WORD k;
+
+    /* text calls this once per glyph: keep the last table */
+    if (e->kind == kind + 1 && e->fg == fg && e->bg == bg)
+        return e;
+
+    switch(kind) {
+    case EXP16_TRANS:
+        sa = 0;      sx = fg;     ca = 0xffff; cx = 0;
+        e->masked = 1;
+        e->mod = 3;
+        e->inv = 0;
+        break;
+    case EXP16_XOR:
+        sa = 0xffff; sx = 0xffff; ca = 0xffff; cx = 0;
+        e->masked = 1;
+        e->mod = 3;
+        e->inv = 0;
+        break;
+    case EXP16_ERASE:
+        sa = 0xffff; sx = 0;      ca = 0;      cx = bg;
+        e->masked = 1;
+        e->mod = 0;         /* the pixels changed are those of the clear source bits */
+        e->inv = 0xffff;
+        break;
+    default:        /* EXP16_REPLACE */
+        sa = 0;      sx = fg;     ca = 0;      cx = bg;
+        e->masked = 0;
+        e->mod = 3;
+        e->inv = 0;
+        break;
+    }
+
+    for (k = 0; k < 4; k++)
+    {
+        if (k & 2)
+        {
+            ha = sa;
+            hx = sx;
+        }
+        else
+        {
+            ha = ca;
+            hx = cx;
+        }
+        if (k & 1)
+        {
+            la = sa;
+            lx = sx;
+        }
+        else
+        {
+            la = ca;
+            lx = cx;
+        }
+        e->a[k] = ((ULONG)ha << 16) | la;
+        e->x[k] = ((ULONG)hx << 16) | lx;
+    }
+    e->kind = kind + 1;
+    e->fg = fg;
+    e->bg = bg;
+    return e;
+}
+
+/*
+ * 'rows' rows of 'width' pixels from the monochrome bits at 'src', whose
+ * first pixel is bit 'bit' (0-15, from the msb) of the first source word;
+ * the next row is 'sstep' bytes from the source, 'dstep' bytes from the
+ * destination.  the source words read are the ones the pixels need, so a
+ * caller's row stride can assume 1 + ((bit + width - 1) >> 4) words.
+ * a pair of pixels is one long store; what does not change from row to row
+ * (alignment, plain or masked) is decided once.  the alignment is that of
+ * the first row: with a row pitch that is a multiple of 4 bytes (the screen
+ * in every 16-bit mode) every row's long stores are aligned.  an off-screen
+ * bitmap in a program's memory can have a pitch of 2 mod 4 bytes; every
+ * other row's long stores are then misaligned, which only costs time on the
+ * 68020 and later, the only processors with 16-bit screens.
+ */
+#define XP(t,off)   (*(const ULONG *)((const UBYTE *)(t) + (off)))
+#define PX(w,j)     (((w) >> (12 - 2*(j))) & 12)
+
+/*
+ * store px into the pixels whose bit is set in w (msb first) at d, a pair
+ * of bits at a time: where most pixels are drawn (erase) that costs less
+ * than testing each one
+ */
+#define STORE_BITS16(d, w, px)                          \
+    do {                                                \
+        UWORD *dp_ = (d);                               \
+        UWORD wp_ = (w);                                \
+        for ( ; wp_; wp_ <<= 2, dp_ += 2)               \
+        {                                               \
+            if (wp_ & 0xc000)                           \
+            {                                           \
+                if (wp_ & 0x8000)                       \
+                    dp_[0] = (px);                      \
+                if (wp_ & 0x4000)                       \
+                    dp_[1] = (px);                      \
+            }                                           \
+        }                                               \
+    } while(0)
+
+static void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
+                    LONG sstep, LONG dstep, const struct expand16 *e)
+{
+    const ULONG *xt = e->x;
+    UWORD x0 = (UWORD)xt[0], x1 = (UWORD)xt[3];
+    UWORD w;
+    WORD lead = ((ULONG)dst & 2) ? 1 : 0;
+    WORD pairs = (width - lead) >> 1;
+    WORD trail = (width - lead) & 1;
+    ULONG *l;
+    UWORD *d;
+
+    for ( ; rows > 0; rows--)
+    {
+        w = *src << bit;
+        d = dst;
+        if (lead)
+        {
+            *d = (w & 0x8000) ? x1 : x0;
+            d++;
+            w <<= 1;
+        }
+        l = (ULONG *)d;
+        switch(pairs) {
+        case 8: l[7] = XP(xt, (w << 2) & 12);
+        /* fall through */
+        case 7: l[6] = XP(xt, PX(w,6));
+        /* fall through */
+        case 6: l[5] = XP(xt, PX(w,5));
+        /* fall through */
+        case 5: l[4] = XP(xt, PX(w,4));
+        /* fall through */
+        case 4: l[3] = XP(xt, PX(w,3));
+        /* fall through */
+        case 3: l[2] = XP(xt, PX(w,2));
+        /* fall through */
+        case 2: l[1] = XP(xt, PX(w,1));
+        /* fall through */
+        case 1: l[0] = XP(xt, PX(w,0));
+        /* fall through */
+        default:
+            break;
+        }
+        if (trail)
+        {
+            d += pairs << 1;
+            w <<= (pairs << 1);
+            *d = (w & 0x8000) ? x1 : x0;
+        }
+        src = (const UWORD *)((const UBYTE *)src + sstep);
+        dst = (UWORD *)((UBYTE *)dst + dstep);
+    }
+}
+
+static void expand_small16_masked(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
+                           LONG sstep, LONG dstep, const struct expand16 *e)
+{
+    UWORD px = (UWORD)e->x[e->mod];
+    UWORD keep = (UWORD)(0xffffU << (16 - width));
+    UWORD inv = e->inv;
+    UWORD w;
+    UWORD *d;
+    WORD n;
+
+    /*
+     * only the pixels the mode changes are visited, by testing bits, not
+     * through the pair table: where branches are cheap and stores are not
+     * (QEMU), that is the faster way
+     */
+    for ( ; rows > 0; rows--)
+    {
+        w = (*src << bit) ^ inv;
+        d = dst;
+        if (e->a[e->mod])           /* xor */
+        {
+            for (w &= keep; w; w <<= 1, d++)
+            {
+                if (w & 0x8000)
+                    *d = ~*d;
+            }
+        }
+        else if (inv)               /* erase: most pixels are drawn */
+        {
+            for (n = width; n > 0; n--, w <<= 1, d++)
+            {
+                if (w & 0x8000)
+                    *d = px;
+            }
+        }
+        else                        /* transparent: the set pixels */
+        {
+            for (w &= keep; w; w <<= 1, d++)
+            {
+                if (w & 0x8000)
+                    *d = px;
+            }
+        }
+        src = (const UWORD *)((const UBYTE *)src + sstep);
+        dst = (UWORD *)((UBYTE *)dst + dstep);
+    }
+}
+
+static void expand_rows16_plain(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
+                    LONG sstep, LONG dstep, const struct expand16 *e)
+{
+    const ULONG *xt = e->x;
+    UWORD x0 = (UWORD)xt[0], x1 = (UWORD)xt[3];
+    const UWORD *s;
+    UWORD w;
+    WORD lead = ((ULONG)dst & 2) ? 1 : 0;
+    WORD sb, n, pairs;
+    LONG left;
+    ULONG *l;
+    UWORD *d;
+
+    for ( ; rows > 0; rows--)
+    {
+        d = dst;
+        s = src;
+        sb = bit;
+        left = width;
+        if (lead)               /* long stores need an even word address */
+        {
+            w = *s << sb;
+            *d = (w & 0x8000) ? x1 : x0;
+            d++;
+            left--;
+            if (++sb > 15)
+            {
+                sb = 0;
+                s++;
+            }
+        }
+        l = (ULONG *)d;
+        while (left > 0)        /* up to 16 pixels, i.e. one source word, a time */
+        {
+            n = (left < 16) ? (WORD)left : 16;
+            w = *s << sb;
+            if (sb && n > 16 - sb)
+                w |= s[1] >> (16 - sb);
+            s++;
+            pairs = n >> 1;
+            switch(pairs) {
+            case 8: l[7] = XP(xt, (w << 2) & 12);
+            /* fall through */
+            case 7: l[6] = XP(xt, PX(w,6));
+            /* fall through */
+            case 6: l[5] = XP(xt, PX(w,5));
+            /* fall through */
+            case 5: l[4] = XP(xt, PX(w,4));
+            /* fall through */
+            case 4: l[3] = XP(xt, PX(w,3));
+            /* fall through */
+            case 3: l[2] = XP(xt, PX(w,2));
+            /* fall through */
+            case 2: l[1] = XP(xt, PX(w,1));
+            /* fall through */
+            case 1: l[0] = XP(xt, PX(w,0));
+            /* fall through */
+            default:
+                break;
+            }
+            l += pairs;
+            if (n & 1)          /* the last, odd pixel */
+            {
+                d = (UWORD *)l;
+                *d = ((UWORD)(w << (pairs << 1)) & 0x8000) ? x1 : x0;
+            }
+            left -= n;
+        }
+        src = (const UWORD *)((const UBYTE *)src + sstep);
+        dst = (UWORD *)((UBYTE *)dst + dstep);
+    }
+}
+
+static void expand_rows16_masked(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
+                    LONG sstep, LONG dstep, const struct expand16 *e)
+{
+    UWORD pa = (UWORD)e->a[e->mod], px = (UWORD)e->x[e->mod];
+    UWORD inv = e->inv;
+    const UWORD *s;
+    UWORD w;
+    WORD n;
+    LONG left;
+    UWORD *d, *dd;
+
+    for ( ; rows > 0; rows--)
+    {
+        d = dst;
+        s = src;
+        left = width;
+        while (left > 0)        /* up to 16 pixels, i.e. one source word, a time */
+        {
+            n = (left < 16) ? (WORD)left : 16;
+            w = *s << bit;
+            if (bit && n > 16 - bit)
+                w |= s[1] >> (16 - bit);
+            s++;
+            w = (w ^ inv) & (UWORD)(0xffffU << (16 - n));
+            dd = d;
+            if (pa)
+            {
+                for ( ; w; w <<= 1, dd++)
+                {
+                    if (w & 0x8000)
+                        *dd = ~*dd;
+                }
+            }
+            else
+                STORE_BITS16(dd, w, px);
+            d += n;
+            left -= n;
+        }
+        src = (const UWORD *)((const UBYTE *)src + sstep);
+        dst = (UWORD *)((UBYTE *)dst + dstep);
+    }
+}
+
+void expand_rows16(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
+                   LONG sstep, LONG dstep, const struct expand16 *e)
+{
+    if (width <= 0)
+        return;
+    if (bit + width <= 16)      /* all in one source word: the usual glyph */
+    {
+        if (e->masked)
+            expand_small16_masked(dst, src, bit, (WORD)width, rows, sstep, dstep, e);
+        else
+            expand_small16_plain(dst, src, bit, (WORD)width, rows, sstep, dstep, e);
+    }
+    else if (e->masked)
+        expand_rows16_masked(dst, src, bit, width, rows, sstep, dstep, e);
+    else
+        expand_rows16_plain(dst, src, bit, width, rows, sstep, dstep, e);
+}
+#endif
+
+
 #if CONF_WITH_VDI_TEXT_SPEEDUP
 #if CONF_WITH_VDI_16BIT
 /*
@@ -752,9 +1114,14 @@ static void direct_screen_blit16(WORD count, WORD *str)
 {
     WORD fgcol, bgcol, height, mode, n;
     WORD src_width, dst_width;
-    UBYTE mask;
     UBYTE *src, *p;
-    UWORD *dst, *save_dst, *q, *palette;
+    UWORD *dst, *q, *palette;
+    UBYTE mask;
+    UWORD *save_dst;
+#if CONF_WITH_VDI_FASTDRAW
+    const struct expand16 *e;
+    WORD kind;
+#endif
 
     height = DELY;
     mode = WRT_MODE;
@@ -763,10 +1130,94 @@ static void direct_screen_blit16(WORD count, WORD *str)
 
     palette = CUR_WORK->ext->palette;
     fgcol = palette[TEXTFG];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_text];
+#else
     bgcol = palette[0];
+#endif
 
     dst = get_start_addr16(DESTX, DESTY);
 
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * an 8-pixel row is at most 4 long stores, built from the 8 source bits.
+     * erase keeps the loops below: under QEMU they are faster than any way
+     * of visiting the many pixels it draws
+     */
+    if (mode != WM_ERASE)
+    {
+        switch(mode) {
+        default:        /* WM_REPLACE */
+            kind = EXP16_REPLACE;
+            break;
+        case WM_TRANS:
+            kind = EXP16_TRANS;
+            break;
+        case WM_XOR:
+            kind = EXP16_XOR;
+            break;
+        }
+        e = expand_tab16(kind, fgcol, bgcol);
+
+        for ( ; count > 0; count--)
+        {
+            src = (UBYTE *)FBASE + *str++;
+            if ((ULONG)dst & 2)         /* not a long word address: generic path */
+            {
+                for (n = height, p = src, q = dst; n > 0; n--)
+                {
+                    UWORD row = (UWORD)*p << 8;
+
+                    expand_rows16(q, &row, 0, 8, 1, 0, 0, e);
+                    p += src_width;
+                    q += dst_width;
+                }
+            }
+            else if (e->masked)
+            {
+                UWORD pa = (UWORD)e->a[e->mod], px = (UWORD)e->x[e->mod];
+
+                /* only the pixels the mode changes, tested bit by bit (see expand_small16_masked) */
+                for (n = height, p = src, q = dst; n > 0; n--)
+                {
+                    UWORD w = (UWORD)((*p ^ e->inv) & 0xff) << 8;
+                    UWORD *d;
+
+                    d = q;
+                    if (pa)
+                    {
+                        for ( ; w; w <<= 1, d++)
+                        {
+                            if (w & 0x8000)
+                                *d = ~*d;
+                        }
+                    }
+                    else
+                        STORE_BITS16(d, w, px);
+                    p += src_width;
+                    q += dst_width;
+                }
+            }
+            else
+            {
+                for (n = height, p = src, q = dst; n > 0; n--)
+                {
+                    ULONG *l = (ULONG *)q;
+                    UWORD b = *p;
+
+                    l[0] = e->x[b >> 6];
+                    l[1] = e->x[(b >> 4) & 3];
+                    l[2] = e->x[(b >> 2) & 3];
+                    l[3] = e->x[b & 3];
+                    p += src_width;
+                    q += dst_width;
+                }
+            }
+            dst += 8;
+        }
+        return;
+    }
+#endif
     for ( ; count > 0; count--)
     {
         src = (UBYTE *)FBASE + *str++;
@@ -966,10 +1417,18 @@ void direct_screen_blit(WORD count, WORD *str)
  */
 static void screen_blit16(LOCALVARS *vars)
 {
-    UWORD *palette, *p, *q;
+    UWORD *palette;
     UBYTE *src, *dst;
-    WORD fgcol, bgcol, h, w, skew, skew_start;
-    UWORD src_mask, mask, skew_mask;
+    WORD fgcol, bgcol, h, skew, skew_start;
+    UWORD skew_mask;
+#if CONF_WITH_VDI_FASTDRAW
+    const struct expand16 *e;
+    WORD kind, bit;
+#else
+    UWORD *p, *q;
+    WORD w;
+    UWORD src_mask, mask;
+#endif
 
     /*
      * set skew-related values
@@ -1025,7 +1484,11 @@ static void screen_blit16(LOCALVARS *vars)
      * set up source stuff
      */
     src = vars->sform;
+#if CONF_WITH_VDI_FASTDRAW
+    bit = vars->tsdad;
+#else
     src_mask = 0x8000 >> vars->tsdad;
+#endif
 
     /*
      * set up destination stuff
@@ -1041,8 +1504,75 @@ static void screen_blit16(LOCALVARS *vars)
      */
     palette = CUR_WORK->ext->palette;
     fgcol = palette[vars->forecol];
+#if CONF_WITH_VDI_NVDI_EXT
+    bgcol = palette[vdi_bg_text];
+#else
     bgcol = palette[0];
+#endif
 
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * when called via lineA, modes 4-19 (corresponding to BitBlt modes 0-15)
+     * are theoretically possible.  however, at this time we do not support them.
+     */
+    switch(vars->WRT_MODE) {
+    default:    /* WM_REPLACE */
+        kind = EXP16_REPLACE;
+        break;
+    case WM_TRANS:
+        kind = EXP16_TRANS;
+        break;
+    case WM_XOR:
+        kind = EXP16_XOR;
+        break;
+    case WM_ERASE:
+        kind = EXP16_ERASE;
+        bgcol = fgcol;      /* behaviour differs from TOS 4.04 - see direct_screen_blit16() */
+        break;
+    }
+    e = expand_tab16(kind, fgcol, bgcol);
+
+    if (!skew && vars->width > 0 && bit + vars->width <= 16)  /* a glyph within one source word */
+    {
+        if (e->masked)
+            expand_small16_masked((UWORD *)dst, (const UWORD *)src, bit, vars->width, vars->height,
+                                  vars->s_next, vars->d_next, e);
+        else
+            expand_small16_plain((UWORD *)dst, (const UWORD *)src, bit, vars->width, vars->height,
+                                 vars->s_next, vars->d_next, e);
+        return;
+    }
+
+    if (!skew)
+    {
+        expand_rows16((UWORD *)dst, (const UWORD *)src, bit, vars->width, vars->height,
+                      vars->s_next, vars->d_next, e);
+        return;
+    }
+
+    for (h = vars->height; h > 0; h--, src += vars->s_next, dst += vars->d_next)
+    {
+        expand_rows16((UWORD *)dst, (const UWORD *)src, bit, vars->width, 1, 0, 0, e);
+        /*
+         * special handling for skewed text: since the character cells
+         * are effectively slanted, we must shift the starting position
+         * of a cell rightwards as we go up the character.
+         */
+        if (skew && (h <= skew_start))  /* OK to shift box for skewed text? */
+        {
+            rolw1(skew_mask);
+            if (skew_mask & 0x8000)
+            {
+                if (++bit > 15)
+                {
+                    bit = 0;
+                    src++;
+                }
+                dst += sizeof(UWORD);
+            }
+        }
+    }
+#else
     switch(vars->WRT_MODE) {
     /*
      * when called via lineA, modes 4-19 (corresponding to BitBlt modes 0-15)
@@ -1176,6 +1706,7 @@ static void screen_blit16(LOCALVARS *vars)
         }
         break;
     }
+#endif
 }
 #endif
 
