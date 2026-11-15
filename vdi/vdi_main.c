@@ -16,6 +16,9 @@
 
 /* forward prototypes */
 void screen(void);
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+void screen_general(void);      /* screen() is in vdi_asm.S */
+#endif
 
 
 WORD flip_y;                    /* True if magnitudes being returned */
@@ -24,14 +27,26 @@ extern Vwk phys_work;           /* attribute area for physical workstation */
 typedef void (*VDI_OP_T)(Vwk *); /* Pointer type to VDI operation */
 #define vdi_v_nop ((VDI_OP_T)just_rts) /* VDI dummy operation */
 
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+/* words, so that the rows are 8 bytes and screen() below can take them as such */
+typedef WORD VDI_COUNT_T;
+#else
+typedef unsigned char VDI_COUNT_T;
+#endif
+
 struct vdi_jmptab {
-    unsigned char nptsout;
-    unsigned char nintout;
+    VDI_COUNT_T nptsout;
+    VDI_COUNT_T nintout;
     VDI_OP_T op;
 };
 
 /* Two main jumptables for VDI functions */
-static struct vdi_jmptab const jmptb1[] = {
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+#define JMPTB_STATIC            /* read by screen() in vdi_asm.S */
+#else
+#define JMPTB_STATIC static
+#endif
+JMPTB_STATIC struct vdi_jmptab const jmptb1[] = {
     { 6, 45, vdi_v_opnwk },            /*   1 */
     { 0,  0, vdi_v_clswk },            /*   2 */
     { 0,  0, vdi_v_clrwk },            /*   3 */
@@ -73,7 +88,7 @@ static struct vdi_jmptab const jmptb1[] = {
     { 0,  2, vdi_vst_alignment }       /*  39 */
 };
 
-static struct vdi_jmptab const jmptb2[] = {
+JMPTB_STATIC struct vdi_jmptab const jmptb2[] = {
     { 6, 45, vdi_v_opnvwk },           /* 100 */
     { 0,  0, vdi_v_clsvwk },           /* 101 */
     { 6, 45, vdi_vq_extnd },           /* 102 */
@@ -245,10 +260,53 @@ void vdi_sleep_end(VdiSleepState *state)
 #endif /* WITH_JMPTB3 */
 
 
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+/*
+ * The numbers screen() in vdi_asm.S uses (vdiscreen.h) are those of the
+ * structures here
+ */
+_Static_assert(sizeof(struct vdi_jmptab) == (1 << VS_ROW_SHIFT), "vdi_jmptab row size");
+_Static_assert(offsetof(struct vdi_jmptab, nptsout) == VS_ROW_NPTSOUT, "nptsout");
+_Static_assert(offsetof(struct vdi_jmptab, nintout) == VS_ROW_NINTOUT, "nintout");
+_Static_assert(offsetof(struct vdi_jmptab, op) == VS_ROW_OP, "op");
+_Static_assert(sizeof(jmptb1[0]) == (1 << VS_ROW_SHIFT), "jmptb1 row size");
+_Static_assert(ARRAY_SIZE(jmptb1) == VS_OP_TAB1_LAST - V_OPNWK_OP + 1, "jmptb1 entries");
+_Static_assert(ARRAY_SIZE(jmptb2) == VS_OP_TAB2_LAST - V_OPNVWK_OP + 1, "jmptb2 entries");
+_Static_assert(V_OPNWK_OP + 1 == VS_OP_CLSWK && V_CLSWK_OP == VS_OP_CLSWK, "close workstation");
+_Static_assert(V_OPNVWK_OP + 1 == VS_OP_CLSVWK && V_CLSVWK_OP == VS_OP_CLSVWK, "close virtual workstation");
+_Static_assert(sizeof(vwk_ptr[0]) == (1 << VS_VWKPTR_SHIFT), "vwk_ptr element size");
+_Static_assert(sizeof(WORD) == 2, "CONTRL words");
+_Static_assert(VS_CONTRL_OP == 0 * sizeof(WORD), "CONTRL[0]");
+_Static_assert(VS_CONTRL_NPTSOUT == 2 * sizeof(WORD), "CONTRL[2]");
+_Static_assert(VS_CONTRL_NINTOUT == 4 * sizeof(WORD), "CONTRL[4]");
+_Static_assert(VS_CONTRL_HANDLE == 6 * sizeof(WORD), "CONTRL[6]");
+_Static_assert(VS_FIS_USER == FIS_USER, "FIS_USER");
+_Static_assert(offsetof(Vwk, clip) == VS_VWK_CLIP, "clip");
+_Static_assert(offsetof(Vwk, cur_font) == VS_VWK_CUR_FONT, "cur_font");
+_Static_assert(offsetof(Vwk, multifill) == VS_VWK_MULTIFILL, "multifill");
+_Static_assert(offsetof(Vwk, fill_style) == VS_VWK_FILL_STYLE, "fill_style");
+_Static_assert(offsetof(Vwk, wrt_mode) == VS_VWK_WRT_MODE, "wrt_mode");
+_Static_assert(offsetof(Vwk, xmn_clip) == VS_VWK_XMN_CLIP, "xmn_clip");
+_Static_assert(offsetof(Vwk, xmx_clip) == VS_VWK_XMX_CLIP, "xmx_clip");
+_Static_assert(offsetof(Vwk, ymn_clip) == VS_VWK_YMN_CLIP, "ymn_clip");
+_Static_assert(offsetof(Vwk, ymx_clip) == VS_VWK_YMX_CLIP, "ymx_clip");
+#if CONF_WITH_VDI_OUTLINE_FONTS
+_Static_assert(offsetof(Vwk, outline_head) == VS_VWK_OUTLINE_HEAD, "outline_head");
+_Static_assert(offsetof(Vwk, outline_font) == VS_VWK_OUTLINE_FONT, "outline_font");
+#endif
+#if CONF_WITH_VDI_NVDI_EXT
+_Static_assert(offsetof(Vwk, bm.addr) == VS_VWK_BM_ADDR, "bm.addr");
+#endif
+#endif
+
 /*
  * screen - Screen driver entry point
  */
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+void screen_general(void)
+#else
 void screen(void)
+#endif
 {
     WORD opcode, handle;
     WORD *contrl = CONTRL;

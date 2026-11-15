@@ -207,7 +207,14 @@ void vdi_vsf_color(Vwk * vwk)
 {
     WORD fc;
 
+#if CONF_WITH_VDI_FASTDRAW
+    /* validate_color_index() without the call */
+    fc = INTIN[0];
+    if ((fc < 0) || (fc >= numcolors))
+        fc = 1;
+#else
     fc = validate_color_index(INTIN[0]);
+#endif
 
     INTOUT[0] = fc;
     vwk->fill_color = MAP_COL[fc];

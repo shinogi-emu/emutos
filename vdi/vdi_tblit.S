@@ -245,9 +245,136 @@ _normal_blit:
         move.l  44+4(sp),a6             // load ptr to end of vars
         move.l  44+8(sp),a0             // a0 & a1 must also be set
         move.l  44+12(sp),a1
+// The column loop is 68000 code that uses colblt from vdi_blit.S, which
+// ColdFire builds do not have: leaving it out for ColdFire keeps the file
+// that PortAsm turns into vdi_tblit_cf.S what it was.
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+        jbsr    text_cols               // d0.w: 0 if it drew the glyph
+        tst.w   d0
+        jeq     nb_done
+#endif
         jbsr    norm_blt
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+nb_done:
+#endif
         movem.l (sp)+,d2-d7/a2-a6       // restore saved registers
         rts
+
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+
+        .extern _CHUP
+        .extern _SCALE
+        .extern colblt
+
+//
+// text_cols - a plain glyph on 4 to 8 interleaved planes, a column of
+//             planes at a time
+//
+// Takes the glyph when it has no skew, thickening, lightening or outline,
+// is not rotated or scaled, and is a rectangle of at least one pixel;
+// then colblt (vdi_blit.S) does every plane of a destination column
+// together, building the glyph's 16 source bits for the column once,
+// where norm_blt/plane_loop shift and mask them again for every plane.
+// Anything else is left to norm_blt, nothing having been changed.
+//
+// The glyph is whatever norm_blt would get: the same frame, a0 and a1, so
+// a caller that has the same variables set up enters here the same way.
+// A caller that draws a whole string in one blit, with its own geometry,
+// uses colblt (vdi_blit.S) directly; what it needs from that caller is
+// documented there.
+//
+//  in:
+//      a6.l    frame, as for norm_blt
+//      a0.l    source: the font's word holding the glyph's first column,
+//              on its last row
+//      a1.l    destination: plane 0's word holding the first column, on
+//              the last row
+//  out:
+//      d0.w    0: drawn; else nothing has been changed (a0, a1, a6 kept)
+//
+// These must equal the offsets in vdi_blit.S
+
+#define CB_SSTEP        0
+#define CB_DSTEP        4
+#define CB_ROWS         24
+#define CB_PAIRS        28
+#define CB_OPS          40
+#define CB_SIZE         112
+
+        .text
+        .even
+text_cols:
+        move.w  nbrplane(a6),d1
+        subq.w  #4,d1
+        cmpi.w  #4,d1
+        jhi     tc_no                   // not 4 to 8 planes: at 1 and 2 the
+        btst    #0,d1                   // plane loop of norm_blt is quicker
+        jne     tc_no                   // odd
+        move.w  STYLE(a6),d0
+        andi.w  #(1<<THICKEN)+(1<<LIGHT)+(1<<SKEW)+(1<<OUTLINE),d0
+        jne     tc_no
+        tst.w   _CHUP
+        jne     tc_no
+        tst.w   _SCALE
+        jne     tc_no
+        move.w  nbrplane(a6),d1
+        add.w   d1,d1
+        cmp.w   nextwrd(a6),d1
+        jne     tc_no                   // planes not interleaved word by word
+        move.w  WRT_MOD(a6),d0
+        cmpi.w  #20,d0
+        jcc     tc_no                   // not a mode wrmappin has
+        move.w  width(a6),d2
+        jle     tc_no
+        move.w  height(a6),d3
+        jle     tc_no
+
+        lea     -CB_SIZE(sp),sp
+        move.l  sp,a5                   // a5 -> block for colblt
+
+//   the logic operation of each plane
+
+        move.w  forecol(a6),d4
+        move.w  ambient(a6),d5
+        lea     CB_OPS(a5),a2
+        lea     wrmappin,a3
+        move.w  nbrplane(a6),d7
+        subq.w  #1,d7
+tc_op:  move.w  d0,d1
+        lsr.w   #1,d4
+        addx.w  d1,d1
+        lsr.w   #1,d5
+        addx.w  d1,d1
+        moveq   #0,d6
+        move.b  0(a3,d1.w),d6           // the operation times 4
+        lsr.w   #2,d6
+        move.b  d6,(a2)+
+        dbra    d7,tc_op
+
+        move.w  s_next(a6),d4
+        ext.l   d4
+        move.l  d4,CB_SSTEP(a5)
+        move.w  d_next(a6),d4
+        ext.l   d4
+        move.l  d4,CB_DSTEP(a5)
+        subq.w  #1,d3
+        move.w  d3,CB_ROWS(a5)
+        move.w  nbrplane(a6),d4
+        lsr.w   #1,d4
+        subq.w  #1,d4
+        move.w  d4,CB_PAIRS(a5)
+        move.w  tsdad(a6),d0
+        move.w  tddad(a6),d1
+        move.l  a5,a6
+        jbsr    colblt
+        lea     CB_SIZE(sp),sp
+        moveq   #0,d0
+        rts
+
+tc_no:  moveq   #1,d0
+        rts
+
+#endif
 
         SECTION_RODATA
 

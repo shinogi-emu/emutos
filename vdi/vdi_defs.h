@@ -20,6 +20,7 @@
 #if CONF_WITH_VDI_NVDI_EXT
 #include "vdi_nvdiext.h"
 #endif
+#include "vdiscreen.h"
 #if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
 #include "vdi_sleep.h"
 #endif
@@ -34,7 +35,7 @@
  */
 #define EXTENDED_PALETTE (CONF_WITH_VIDEL || CONF_WITH_TT_SHIFTER || CONF_WITH_VDI_16BIT)
 
-#define TRUECOLOR_MODE  (v_planes > 8)
+#define TRUECOLOR_MODE  (v_planes > VS_MAX_INDEXED_PLANES)
 
 
 #if CONF_WITH_VIDEL
@@ -411,6 +412,9 @@ void arb_line(Line *line);
 
 /* C Support routines */
 Vwk *get_vwk_by_handle(WORD);
+#if CONF_WITH_VDI_FASTDRAW
+extern Vwk *vwk_ptr[];          /* the same, by index: handle 0 is unused */
+#endif
 UWORD *get_start_addr(const WORD x, const WORD y);
 void set_LN_MASK(Vwk *vwk);
 void st_fl_ptr(Vwk *);

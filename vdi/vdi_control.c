@@ -46,7 +46,11 @@ MCS *mcs_ptr;
  * entry n in the following array points to the Vwk corresponding to
  * VDI handle n.  entry 0 is unused.
  */
+#if CONF_WITH_VDI_FASTDRAW
+Vwk *vwk_ptr[NUM_VDI_HANDLES+1];    /* read by screen() in vdi_main.c */
+#else
 static Vwk *vwk_ptr[NUM_VDI_HANDLES+1];
+#endif
 extern Vwk phys_work;       /* attribute area for physical workstation */
 #if CONF_WITH_VDI_16BIT
 static VwkExt phys_work_ext;
