@@ -13,9 +13,13 @@
 #include "lineavars.h"
 #include "asm.h"
 #include "string.h"
+#include <stddef.h>
 
 /* forward prototypes */
 void screen(void);
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+void screen_general(void);
+#endif
 
 
 WORD flip_y;                    /* True if magnitudes being returned */
@@ -24,9 +28,16 @@ extern Vwk phys_work;           /* attribute area for physical workstation */
 typedef void (*VDI_OP_T)(Vwk *); /* Pointer type to VDI operation */
 #define vdi_v_nop ((VDI_OP_T)just_rts) /* VDI dummy operation */
 
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+/* words, so that the rows are 8 bytes and screen() below can take them as such */
+typedef WORD VDI_COUNT_T;
+#else
+typedef unsigned char VDI_COUNT_T;
+#endif
+
 struct vdi_jmptab {
-    unsigned char nptsout;
-    unsigned char nintout;
+    VDI_COUNT_T nptsout;
+    VDI_COUNT_T nintout;
     VDI_OP_T op;
 };
 
@@ -244,7 +255,11 @@ void vdi_sleep_end(VdiSleepState *state)
 /*
  * screen - Screen driver entry point
  */
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+void screen_general(void)
+#else
 void screen(void)
+#endif
 {
     WORD opcode, handle;
     WORD *contrl = CONTRL;
@@ -363,3 +378,135 @@ void screen(void)
         CUR_WORK = vwk;
     }
 }
+
+
+#if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
+/*
+ * screen - Screen driver entry point
+ *
+ * The calls of the first two tables on a workstation that draws on the
+ * screen take the same steps as in screen_general(), in the same order,
+ * without the code the compiler makes of them.  Every other call (the
+ * opening calls, the NVDI calls of the third table, a handle without a
+ * workstation, and the workstation of an off-screen bitmap) goes to
+ * screen_general().  The registers a C function keeps are kept: only
+ * a2 is used besides d0, d1, a0 and a1.
+ *
+ *      a0  CONTRL          d0  the handle, then the opcode
+ *      a1  the workstation d1  the index into a table
+ *      a2  the table row
+ */
+void screen(void)
+{
+    __asm__ volatile (
+        "movea.l _CONTRL,%%a0\n\t"             /* CONTRL */
+        "move.w  12(%%a0),%%d0\n\t"               /* the handle */
+        "subq.w  #1,%%d0\n\t"
+        "cmp.w   %[nhandles],%%d0\n\t"
+        "jhi     _screen_general\n\t"                 /* none: 0 or too large */
+        "ext.l   %%d0\n\t"
+        "add.l   %%d0,%%d0\n\t"
+        "add.l   %%d0,%%d0\n\t"
+        "lea     _vwk_ptr+4,%%a1\n\t"            /* vwk_ptr[1] */
+        "movea.l (%%a1,%%d0.l),%%a1\n\t"          /* the workstation */
+        "cmpa.w  #0,%%a1\n\t"
+        "jeq     _screen_general\n\t"
+#if CONF_WITH_VDI_NVDI_EXT
+        "tst.l   %c[bm_addr](%%a1)\n\t"           /* an off-screen bitmap: general */
+        "jne     _screen_general\n\t"
+#endif
+        "move.w  (%%a0),%%d0\n\t"                 /* the opcode */
+        "move.w  %%d0,%%d1\n\t"
+        "subq.w  #2,%%d1\n\t"                     /* 2-39: first table, not the open call */
+        "cmp.w   %[n1],%%d1\n\t"
+        "jhi     2f\n\t"
+        "lsl.w   #3,%%d1\n\t"
+        "lea     %c[jmptb1]+8,%%a2\n\t"
+        "jra     3f\n"
+        "2:\n\t"
+        "sub.w   #99,%%d1\n\t"                    /* 101-134: second table, not the open call */
+        "cmp.w   %[n2],%%d1\n\t"
+        "jhi     _screen_general\n\t"
+        "lsl.w   #3,%%d1\n\t"
+        "lea     %c[jmptb2]+8,%%a2\n"
+        "3:\n\t"
+        "adda.w  %%d1,%%a2\n\t"
+        /* a2 is kept from here on: the call is made, so it is saved */
+        "move.l  %%a2,-(%%sp)\n\t"
+        "move.l  %%d0,-(%%sp)\n\t"                /* the opcode */
+        "move.w  (%%a2),4(%%a0)\n\t"              /* CONTRL[2] */
+        "move.w  2(%%a2),8(%%a0)\n\t"             /* CONTRL[4] */
+        "clr.w   _flip_y\n\t"
+        "cmp.w   #4,%c[fill_style](%%a1)\n\t"     /* multifill just for user */
+        "jeq     4f\n\t"
+        "clr.w   %c[multifill](%%a1)\n"
+        "4:\n\t"
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+        "cmp.w   #8,_v_planes\n\t"
+        "jls     5f\n\t"
+        "move.l  %%a1,_CUR_WORK\n"
+        "5:\n\t"
+#endif
+        "move.l  %%a1,-(%%sp)\n\t"                /* kept for after the call */
+        "move.l  %%a1,-(%%sp)\n\t"                /* the argument */
+        "movea.l 4(%%a2),%%a2\n\t"
+        "jsr     (%%a2)\n\t"
+        "addq.l  #4,%%sp\n\t"
+        "movea.l (%%sp)+,%%a1\n\t"
+        "move.l  (%%sp)+,%%d0\n\t"
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+        "clr.w   _vdi_bg_text\n\t"
+        "clr.w   _vdi_bg_line\n\t"
+#endif
+        "cmp.w   #2,%%d0\n\t"                     /* closing a workstation: nothing to show */
+        "jeq     6f\n\t"
+        "cmp.w   #101,%%d0\n\t"
+        "jeq     6f\n\t"
+#if CONF_WITH_VDI_OUTLINE_FONTS
+        "move.l  %c[cur_font](%%a1),%%d0\n\t"
+        "lea     %c[outline_head](%%a1),%%a0\n\t"
+        "cmp.l   %%a0,%%d0\n\t"
+        "jne     7f\n\t"
+        "tst.l   %c[outline_font](%%a1)\n\t"
+        "jeq     7f\n\t"
+        "move.l  _def_font,%%d0\n"
+        "7:\n\t"
+        "move.l  %%d0,_CUR_FONT\n\t"
+#else
+        "move.l  %c[cur_font](%%a1),_CUR_FONT\n\t"
+#endif
+        "move.w  %c[wrt_mode](%%a1),_WRT_MODE\n\t"
+        "move.w  %c[clip](%%a1),_CLIP\n\t"
+        "move.w  %c[xmn_clip](%%a1),_XMINCL\n\t"
+        "move.w  %c[ymn_clip](%%a1),_YMINCL\n\t"
+        "move.w  %c[xmx_clip](%%a1),_XMAXCL\n\t"
+        "move.w  %c[ymx_clip](%%a1),_YMAXCL\n\t"
+        "move.l  %%a1,_CUR_WORK\n"
+        "6:\n\t"
+        "movea.l (%%sp)+,%%a2\n\t"
+        "rts"
+        :
+        : [nhandles] "i" (NUM_VDI_HANDLES - 1),
+          [n1] "i" (JMPTB1_ENTRIES - 2),
+          [n2] "i" (JMPTB2_ENTRIES - 2),
+          [jmptb1] "i" (jmptb1),
+          [jmptb2] "i" (jmptb2),
+          [fill_style] "i" (offsetof(Vwk, fill_style)),
+          [multifill] "i" (offsetof(Vwk, multifill)),
+#if CONF_WITH_VDI_NVDI_EXT
+          [bm_addr] "i" (offsetof(Vwk, bm.addr)),
+#endif
+#if CONF_WITH_VDI_OUTLINE_FONTS
+          [outline_head] "i" (offsetof(Vwk, outline_head)),
+          [outline_font] "i" (offsetof(Vwk, outline_font)),
+#endif
+          [cur_font] "i" (offsetof(Vwk, cur_font)),
+          [wrt_mode] "i" (offsetof(Vwk, wrt_mode)),
+          [clip] "i" (offsetof(Vwk, clip)),
+          [xmn_clip] "i" (offsetof(Vwk, xmn_clip)),
+          [ymn_clip] "i" (offsetof(Vwk, ymn_clip)),
+          [xmx_clip] "i" (offsetof(Vwk, xmx_clip)),
+          [ymx_clip] "i" (offsetof(Vwk, ymx_clip))
+        : "memory", "cc");
+}
+#endif /* CONF_WITH_VDI_FASTDRAW && !__mcoldfire__ */

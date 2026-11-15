@@ -411,6 +411,9 @@ void arb_line(Line *line);
 
 /* C Support routines */
 Vwk *get_vwk_by_handle(WORD);
+#if CONF_WITH_VDI_FASTDRAW
+extern Vwk *vwk_ptr[];          /* the same, by index: handle 0 is unused */
+#endif
 UWORD *get_start_addr(const WORD x, const WORD y);
 void set_LN_MASK(Vwk *vwk);
 void st_fl_ptr(Vwk *);
