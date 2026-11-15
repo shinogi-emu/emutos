@@ -13,6 +13,9 @@
         .globl  _fast_bit_blt
 
         .extern _PTSIN
+#if CONF_WITH_VDI_FASTDRAW
+        .extern _mcpu
+#endif
 
 // The following defines are offsets inside fringe code fragments
 // As a result this file cannot be converted to ColdFire using PortAsm.
@@ -1641,11 +1644,14 @@ al_ul1: move.w  -(a0),d0                // left column
 //      d0.w    source x mod 16 of the first pixel
 //      d1.w    destination x mod 16 of the first pixel
 //      d2.w    width in pixels (>= 1)
-//      a6.l    block of CB_SIZE bytes with these fields set (the others are
-//              this routine's):
+//      a6.l    block of CB_SIZE bytes, word aligned, with these fields set (the
+//              others are this routine's).  The destination planes must be
+//              exactly interleaved: a column is 2 * planes bytes, plane p's
+//              word at 2 * p in it:
 //                CB_SSTEP.l  bytes from a source row to the next
 //                CB_DSTEP.l  bytes from a destination row to the next
-//                CB_ROWS.w   rows - 1  (>= 0)
+//                CB_ROWS.w   rows - 1  (>= 0); counted down to -1, so a caller
+//                            that reuses the block must set it again
 //                CB_PAIRS.w  planes/2 - 1  (2, 4, 6 or 8 planes)
 //                CB_OPS      one byte per plane: its logic operation 0-15
 //  out:
@@ -1878,6 +1884,8 @@ cb_opw:
 //
         .even
 expand_cols:
+        cmpi.l  #20,_mcpu
+        jlt     ec_no                   // 68000/68010: the plane loops are as quick
         tst.l   P_ADDR(a6)
         jne     ec_no
         move.w  PLANE_CT(a6),d1
