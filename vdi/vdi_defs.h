@@ -623,6 +623,7 @@ BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width);
 BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified);
 BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result);
 BOOL outline_stack_low(void);
+void *outline_caller_stack(void);
 /* the NVDI calls (vdi_nvdi.c) */
 BOOL outline_set_arbpt(Vwk *vwk, LONG point);
 BOOL outline_set_width(Vwk *vwk, WORD width);

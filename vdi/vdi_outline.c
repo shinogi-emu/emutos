@@ -1027,7 +1027,10 @@ static BOOL draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINF
  * ===========================================================================
  */
 
-/* call fn(arg) with the stack pointer at top, and return what it returns */
+/*
+ * call fn(arg) with the stack pointer at top, and return what it returns;
+ * the caller's stack pointer is kept at top - 4 (outline_caller_stack())
+ */
 static LONG switch_stack(LONG (*fn)(void *), void *arg, void *top)
 {
     register LONG ret __asm__("d0");
@@ -1072,6 +1075,25 @@ BOOL outline_stack_low(void)
 
     return (sp >= (ULONG)font_stack.canary)
         && (sp < (ULONG)font_stack.stack + VDI_FT_STACK_GUARD);
+}
+
+
+/*
+ * the stack pointer the call on the font stack had before it came there,
+ * kept at the top of the font stack by switch_stack(); NULL off the font
+ * stack.  The OS glue makes the OS calls that can sleep there (see
+ * vdi_ftos.c).
+ */
+void *outline_caller_stack(void)
+{
+    char here;
+    ULONG sp = (ULONG)&here;
+
+    if ((sp < (ULONG)font_stack.canary)
+     || (sp >= (ULONG)stack_top()))
+        return NULL;
+
+    return (void *)stack_top()[-1];
 }
 
 
