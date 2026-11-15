@@ -411,7 +411,16 @@ void arb_line(Line *line);
 
 
 /* C Support routines */
+#define FIRST_VDI_HANDLE    1   /* the physical workstation; _screen in vdi_asm.S assumes it */
 Vwk *get_vwk_by_handle(WORD);
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+/*
+ * closing a workstation while a program sleeps in an OS call (see
+ * vdi_sleep.h): the block is kept until no program sleeps
+ */
+void vdi_release_vwk(Vwk *vwk);     /* free a closed workstation, now or later */
+void vdi_reap_vwk(void);            /* free those that waited: at the start of a call that opens or closes */
+#endif
 #if CONF_WITH_VDI_FASTDRAW
 extern Vwk *vwk_ptr[];          /* the same, by index: handle 0 is unused */
 #endif

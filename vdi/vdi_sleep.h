@@ -49,7 +49,10 @@
  * that is closed, or at a Line-A program's own array.  End puts it back
  * only if it is NULL, the physical workstation or still one of the open
  * workstations (compared as a pointer); otherwise it leaves CUR_WORK as
- * it finds it.
+ * it finds it.  A workstation that another program closes while this
+ * one sleeps is not freed then (vdi_release_vwk() in vdi_main.c keeps it
+ * until no program sleeps): the call's own pointer to it stays valid until
+ * the call ends, and CUR_WORK never points at freed memory.
  *
  * Known limits: the waits of request-mode input (Bconin() in v_choice,
  * v_string, vrq_locator) and of the escapes' Bconout() are not bracketed;
