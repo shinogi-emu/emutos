@@ -1131,7 +1131,7 @@ static __attribute__((noinline)) void copy16_fwd(UWORD *src, UWORD *dst, LONG sw
                 " move.l (%[s])+,(%[d])+\n"
                 : [s]"+a"(ps), [d]"+a"(qs)
                 : [o]"d"(skip)
-                : "memory");
+                : "memory", "cc");
         }
         if (trail)
             *(UWORD_ALIAS *)qs = *(UWORD_ALIAS *)ps;
@@ -1173,7 +1173,7 @@ static __attribute__((noinline)) void copy16_back(UWORD *src, UWORD *dst, LONG s
                 " move.l -(%[s]),-(%[d])\n"
                 : [s]"+a"(ps), [d]"+a"(qs)
                 : [o]"d"(skip)
-                : "memory");
+                : "memory", "cc");
         }
         if (trail)
             *(UWORD_ALIAS *)((UBYTE *)qs - 2) = *(UWORD_ALIAS *)((UBYTE *)ps - 2);
