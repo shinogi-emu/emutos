@@ -1670,24 +1670,7 @@ al_ul1: move.w  -(a0),d0                // left column
 //  out:
 //      the block's other fields, all registers except sp are lost
 //
-#define CB_SSTEP        0
-#define CB_DSTEP        4
-#define CB_LM           8       // left column: mask, then its complement
-#define CB_NLM          12
-#define CB_RM           16      // right column
-#define CB_NRM          20
-#define CB_ROWS         24
-#define CB_MID          26      // whole columns between the two ends, -1
-#define CB_PAIRS        28
-#define CB_SHIFT        30      // left shift of the two-word window (0-15)
-#define CB_KNEG         32      // -1: the first window starts before the source
-#define CB_LAST         34      // 1: the last column has no source word to add
-#define CB_COLS         36      // destination columns - 1
-#define CB_MODE         38      // 0, or the text writing mode 1-4
-#define CB_OPS          40
-#define CB_K            48      // per pair: ka, kx, sa, sx as long words
-#define CB_F            112     // per pair: the foreground bits as masks
-#define CB_SIZE         128
+#include "vdicolblt.h"
 
         .globl  colblt
         .even

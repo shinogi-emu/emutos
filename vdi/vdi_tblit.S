@@ -264,13 +264,14 @@ nb_done:
 
         .extern _CHUP
         .extern _SCALE
+        .extern _text_form
         .extern colblt
 
 //
 // text_cols - a plain glyph on 4 to 8 interleaved planes, a column of
-//             planes at a time; on 1 or 2 planes a form of TC_WIDE pixels
-//             or more (a string: output_text() in vdi_text.c draws its
-//             bitmap-font strings in one blit)
+//             planes at a time; on 1 or 2 planes the form of a string of TC_WIDE
+//             pixels or more (output_text() in vdi_text.c draws its
+//             bitmap-font strings in one blit, text_form set)
 //
 // Takes the glyph when it has no skew, thickening, lightening or outline,
 // is not rotated or scaled, and is a rectangle of at least one pixel;
@@ -296,16 +297,8 @@ nb_done:
 //  out:
 //      d0.w    0: drawn; else nothing has been changed (a0, a1, a6 kept)
 //
-// These must equal the offsets in vdi_blit.S
+#include "vdicolblt.h"
 
-#define CB_SSTEP        0
-#define CB_DSTEP        4
-#define CB_ROWS         24
-#define CB_PAIRS        28
-#define CB_MODE         38
-#define CB_OPS          40
-#define CB_F            112
-#define CB_SIZE         128
 #define TC_WIDE         32              // narrowest form that takes 1 or 2 planes
 
         .text
@@ -420,9 +413,13 @@ tc_no:  moveq   #1,d0
         rts
 
 //   one or two planes: the column loop costs more to set up than it saves
-//   for a glyph, and less than the plane loop for a whole string's form
+//   for a glyph, and less than the plane loop for a whole string's form;
+//   only the form of output_text()'s string (text_form is set around its
+//   text_blt()) takes it, every other blit stays with norm_blt
 
-tc_p2:  cmpi.w  #TC_WIDE,width(a6)
+tc_p2:  tst.w   _text_form
+        jeq     tc_no                   // not the form of a string
+        cmpi.w  #TC_WIDE,width(a6)
         jlt     tc_no
         jra     tc_p0
 

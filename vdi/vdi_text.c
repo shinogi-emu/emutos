@@ -363,6 +363,9 @@ static __inline__ __attribute__((always_inline)) void text_alignment(Vwk *vwk, c
  */
 #define STRBUF_SIZE     (sizeof(vdishare.main.fill_buffer) - 2) /* bytes; 2 are left for a blit that reads one word on */
 
+/* set while text_string() has text_blt() draw its form: vdi_tblit.S takes a wide one-plane form of 1 or 2 planes only then */
+WORD text_form;
+
 #define STR_XLIMIT      16000   /* beyond this the blit's arithmetic and the loop's differ */
 
 #if !defined(__mcoldfire__)
@@ -414,14 +417,16 @@ static void text_char(const Fonthead *fnt_ptr, WORD code)
  * the font are then offsets, and the string need only be checked to lie in
  * the font (the test direct_screen_blit() makes of its font as well)
  */
+#if !defined(__mcoldfire__)
 static BOOL font8(const Fonthead *fnt_ptr)
 {
     UWORD cells = fnt_ptr->last_ade - fnt_ptr->first_ade + 1;
 
     return (fnt_ptr->flags & F_MONOSPACE) && (fnt_ptr->first_ade <= fnt_ptr->last_ade)
         && (fnt_ptr->last_ade <= 32767) && (fnt_ptr->off_table[0] == 0)
-        && (fnt_ptr->off_table[1] == 8) && (fnt_ptr->off_table[cells] == cells * 8);
+        && (fnt_ptr->off_table[1] == 8) && ((ULONG)fnt_ptr->off_table[cells] == (ULONG)cells * 8);
 }
+#endif
 
 /*
  * how many of the characters fit into the buffer, as cells side by side
@@ -626,7 +631,9 @@ static void text_string(const Fonthead *fnt_ptr, WORD count, const WORD *str)
             SOURCEY = 0;
             DELX = width;
             DELY = height;
+            text_form = TRUE;
             text_blt();
+            text_form = FALSE;
         }
         str += n;
         count -= n;
