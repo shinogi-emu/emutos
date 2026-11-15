@@ -203,8 +203,8 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         if (dst->px_format != vdi_px_format())
             return;
         dsize = xfer_dst_size(dst, planes);
-        if (dsize == 0 || !xfer_rect_in(dst, &dr))
-            return;
+        if (dsize == 0 || !xfer_rect_in(dst, &dr) || dst->addr == v_bas_ad)
+            return;                 /* the screen is the workstation, not memory */
         base = dst->addr;
         pitch = dst->width;
         xbase = dst->xmin;
@@ -305,6 +305,12 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         }
     }
 
+    /*
+     * The allocation below can sleep.  base, pitch and the clip bounds were
+     * read before it: under MiNT a bitmap workstation that another program
+     * closes or resizes meanwhile leaves them stale.  Not guarded: the same
+     * known limit as the bitmap swap's (see vdi_bitmap.c and vdi_sleep.h).
+     */
     /* work memory: the pixel of each index, a row of pixel values and, if transparent, a mask */
     mapbytes = (k == XK_8) ? 512L : 0L;
     rowbytes = (planes != XD_16) ? job.count : 0L;
@@ -338,6 +344,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     }
 
     xfer_begin(&st, &job);
+#if CONF_WITH_VDI_16BIT
     if (planes == XD_16)
     {
         row = base + (dy1 - ybase) * pitch + (dx1 - xbase) * 2;
@@ -345,6 +352,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             xfer_row16(&st, row, y ? row - pitch : NULL);
     }
     else
+#endif
     {
         UBYTE *pix = block + mapbytes;
         UBYTE *mask = transparent ? pix + job.count : NULL;
@@ -411,7 +419,7 @@ static ULONG mfdb_pixel(const SMFDB *b, LONG x, LONG y, BOOL packed)
         else
             offset = ((y * b->fd_wdwidth + (x >> 4)) * b->fd_nplanes + p) * 2;
         if ((base[offset + ((x & 15) >> 3)] << (x & 7)) & 0x80)
-            pixel |= 1UL << p;
+            pixel |= 1UL << ((packed && b->fd_stand) ? 15 - p : p);   /* as vr_trnfm16: plane 0 is bit 15 */
     }
     return pixel;
 }

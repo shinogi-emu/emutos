@@ -16,6 +16,13 @@
 
 #include "vdi_xfercore.h"
 
+/* a 16-bit destination exists only in a build with 16-bit graphics */
+#if CONF_WITH_VDI_16BIT
+#define IS_D16(planes)  ((planes) == XD_16)
+#else
+#define IS_D16(planes)  0
+#endif
+
 WORD xfer_kind(ULONG px_format)
 {
     ULONG base = px_format & ~XF_PX_REVERSED;
@@ -158,7 +165,7 @@ ULONG xfer_src_size(const GCBITMAP *bm, WORD kind)
 /* the bytes of a line of 'width' pixels of a destination of 'planes' planes */
 static LONG dst_line_min(WORD planes, LONG width)
 {
-    if (planes == XD_16)
+    if (IS_D16(planes))
         return width * 2;
     return ((width + 15) / 16) * 2 * planes;
 }
@@ -166,11 +173,11 @@ static LONG dst_line_min(WORD planes, LONG width)
 
 ULONG xfer_dst_size(const GCBITMAP *bm, WORD planes)
 {
-    if (planes != XD_16 && planes != 1 && planes != 2 && planes != 4 && planes != 8)
+    if (!IS_D16(planes) && planes != 1 && planes != 2 && planes != 4 && planes != 8)
         return 0;
     if (bm->bits != planes)
         return 0;
-    return bitmap_size(bm, dst_line_min, planes, planes == XD_16);
+    return bitmap_size(bm, dst_line_min, planes, IS_D16(planes));
 }
 
 
@@ -242,7 +249,7 @@ void xfer_begin(XferState *s, const XferJob *job)
     s->job = job;
     s->filtered = FALSE;
     if ((job->kind & XK_MASK) != XK_1 && (job->kind & XK_MASK) != XK_8 &&
-        job->planes == XD_16 && (job->sw > job->dw || job->sh > job->dh))
+        IS_D16(job->planes) && (job->sw > job->dw || job->sh > job->dh))
         s->filtered = TRUE;
     xfer_axis_start(&s->x0, job->sw, job->dw, job->skipx, s->filtered);
     xfer_axis_start(&s->y, job->sh, job->dh, job->skipy, s->filtered);
@@ -377,7 +384,7 @@ static void make_row(XferState *s, UBYTE *out, UBYTE *mask)
 {
     const XferJob *j = s->job;
     WORD kind = j->kind & XK_MASK;
-    BOOL d16 = j->planes == XD_16;
+    BOOL d16 = IS_D16(j->planes);
     const UBYTE *next, *row;
     LONG fy, n = j->count, pbytes = xfer_kind_bits(j->kind) / 8;
     XferAxis x = s->x0;
@@ -489,6 +496,7 @@ static void make_row(XferState *s, UBYTE *out, UBYTE *mask)
 }
 
 
+#if CONF_WITH_VDI_16BIT
 void xfer_row16(XferState *s, UBYTE *dst, const UBYTE *prev)
 {
     const XferJob *j = s->job;
@@ -505,6 +513,7 @@ void xfer_row16(XferState *s, UBYTE *dst, const UBYTE *prev)
     s->prev_y = s->y.pos;
     xfer_axis_next(&s->y);
 }
+#endif
 
 
 void xfer_row_pix(XferState *s, UBYTE *pix, UBYTE *mask)

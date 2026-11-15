@@ -16,6 +16,7 @@
 #define VDI_XFERCORE_H
 
 #include "portab.h"
+#include "config.h"
 #include "vdi_nvdiext.h"
 
 /* the pixel formats (GCBITMAP.px_format) of the sources */
@@ -38,7 +39,7 @@
 #define XK_MASK         0x0f
 #define XK_REV          0x10            /* or-ed in: PX_REVERSED */
 
-/* the destinations: 16-bit words (red, green and blue in 5-6-5), or 1, 2, 4 and 8 planes */
+/* the destinations (16-bit words only with CONF_WITH_VDI_16BIT): 16-bit words (red, green and blue in 5-6-5), or 1, 2, 4 and 8 planes */
 #define XD_16           16
 
 /* the source kind of a pixel format, XK_NONE if it is not one */
