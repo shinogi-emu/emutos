@@ -974,8 +974,12 @@ extern ULONG mcpu;              /* processor type, see bios/processor.h */
  * long word copies for vro_cpyfm16()
  *
  * For the operations that read the source, a pair of pixels is read and
- * written as one ULONG when source and destination have the same long
- * alignment and both pitches are a multiple of four bytes.  The operation is
+ * written as one ULONG.  On a 68020 or later (mcpu >= 20, not ColdFire) the
+ * source longs are always aligned and the destination longs may be
+ * misaligned when source and destination differ in long alignment or in
+ * pitch; only a source pitch that is not a multiple of four bytes takes the
+ * word path.  On a 68000/68010 and on ColdFire the long loops need the same
+ * long alignment and pitches that are multiples of four bytes.  The operation is
  * chosen once per call, one loop per operation and direction.  The width is
  * split once per call: a leading pixel to reach long alignment, pairs eight
  * long words at a time, single pairs, a trailing pixel.
@@ -1149,7 +1153,9 @@ static BOOL cpyfm16_long(UWORD *src, UWORD *dst, LONG sw, LONG dw,
 }
 
 /*
- * source and destination of different long alignment: no long words, but
+ * the word path: used on a 68020 or later only for an odd source pitch, and
+ * on a 68000/68010 or ColdFire when source and destination differ in long
+ * alignment or a pitch is not a multiple of four bytes.  No long words, but
  * the same decisions once per call, eight pixels a pass
  */
 #define PIX_F(OP)       { *q = (UWORD)OP(*p, *q); p++; q++; }
