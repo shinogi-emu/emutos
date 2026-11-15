@@ -483,7 +483,8 @@ void vdi_v_opnvwk(Vwk * vwk)
         size += sizeof(VwkExt); /* for simplicity, allocate them together */
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
-    vwk = (Vwk *)vdi_os_mxalloc(size, MX_SUPER);    /* may sleep: see vdi_sleep.h */
+    /* a kept block (see vdi_kept.h): it may be freed after its program ended */
+    vwk = (Vwk *)vdi_alloc_kept_mode(size, MX_SUPER);   /* may sleep: see vdi_sleep.h */
     if (vwk != NULL && vwk_ptr[handle] != NULL) {
         /* another program took the handle while this one slept: find another */
         for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {

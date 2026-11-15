@@ -57,22 +57,20 @@ WORD vdi_bm_xres, vdi_bm_yres;  /* the size of the bitmap in use, less one */
 /*
  * The memory of bitmaps: the one place that asks the OS for it.
  *
- * It is owned by the calling program, like the Vwk (Mxalloc, not the kept
- * allocator).  The program reads the pixels directly, so under MiNT the
+ * It is a kept block, like the Vwk: it may be freed from another
+ * program's call after its owner has ended, and leaks if the owner ends
+ * with the bitmap open.  The program reads the pixels directly, so under MiNT the
  * block is readable by every program.  With a blitter the block must be
  * in ST-RAM, for the blitter to reach it.
  */
 static void *bm_alloc(LONG size)
 {
-    LONG block;
-
-    block = vdi_os_mxalloc(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
-    return block ? (void *)block : NULL;
+    return vdi_alloc_kept_mode(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
 }
 
-static void bm_free(void *block)
+static BOOL bm_free(void *block)
 {
-    vdi_os_mfree(block);
+    return vdi_os_mfree(block) == 0;
 }
 
 
@@ -501,7 +499,8 @@ void vdi_bitmap_open(void)
 }
 
 
-/* v_clsvwk and v_clswk call this before they free a workstation */
+/* release_vwk() in vdi_main.c calls this before it frees a closed workstation,
+   perhaps from another program's call: the pixels are kept blocks */
 void vdi_bitmap_release(Vwk *vwk)
 {
     if (vwk->bm.mem)

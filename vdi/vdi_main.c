@@ -217,28 +217,36 @@ static const struct vdi_xjmptab *find_xjmptab(UWORD opcode, UWORD subop)
  * by the next call that opens or closes a workstation once no program is
  * asleep (vdi_reap_vwk(): nothing else runs between a wake up and the end
  * of its call).  CUR_WORK is then taken off it, if it is still there.
+ *
+ * The blocks (the Vwk, the VDI's bitmap pixels) are kept blocks that no
+ * program owns (vdi_alloc_kept_mode()), as the owner may end while the block
+ * waits here.  The price: a program that ends without v_clsvwk leaks its Vwk
+ * (bounded by the handle table; stock leaves the slot taken too, pointing at
+ * freed memory), and bitmap pixels of a program that ends with bitmaps open
+ * leak until reboot.  A refused Mfree() leaves the block on the list.
  */
 static WORD vdi_sleeping;
 static Vwk *vdi_zombies;
 
-static void release_vwk(Vwk *vwk)
+static BOOL release_vwk(Vwk *vwk)
 {
 #if CONF_WITH_VDI_NVDI_EXT
     vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
 #endif
-    vdi_os_mfree(vwk);          /* may sleep: see vdi_sleep.h */
+    return vdi_os_mfree(vwk) == 0;  /* may sleep: see vdi_sleep.h */
+}
+
+static void defer_vwk(Vwk *vwk)
+{
+    vwk->next_work = vdi_zombies;
+    vdi_zombies = vwk;
 }
 
 /* free a workstation that is closed (it is out of vwk_ptr[] already) */
 void vdi_release_vwk(Vwk *vwk)
 {
-    if (vdi_sleeping)
-    {
-        vwk->next_work = vdi_zombies;
-        vdi_zombies = vwk;
-        return;
-    }
-    release_vwk(vwk);
+    if (vdi_sleeping || !release_vwk(vwk))
+        defer_vwk(vwk);     /* the block is kept: valid until the VDI frees it */
 }
 
 /* free the workstations that were closed while a program slept */
@@ -251,7 +259,11 @@ void vdi_reap_vwk(void)
         vdi_zombies = vwk->next_work;
         if (CUR_WORK == vwk)
             CUR_WORK = &phys_work;
-        release_vwk(vwk);
+        if (!release_vwk(vwk))
+        {
+            defer_vwk(vwk);     /* refused: try again at the next call */
+            break;
+        }
     }
 }
 

@@ -18,12 +18,11 @@
 #define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
 
 /*
- * Mxalloc() mode used under MiNT and MagiC, in the kind of RAM given (the
- * usual one prefers TT-RAM): keep the block
- * when its owner terminates (0x4000) and make it accessible from supervisor
- * mode only (0x30), as fVDI does for its own memory.
+ * Mxalloc() bit used under MiNT and MagiC: keep the block when its owner
+ * terminates.  The kept blocks use supervisor-only access (0x30), as fVDI
+ * does for its own memory, unless a caller gives its own protection bits.
  */
-#define MX_KEEP_MODE_OF(ram)    ((ram) | 0x4030)
+#define MX_KEEP_BIT             0x4000
 
 /* the same, but readable by every program (0x40), as fVDI's cookie data */
 #define MX_READABLE_MODE (MX_PREFTTRAM | 0x4040)
@@ -57,7 +56,7 @@ LONG vdi_os_mxalloc(LONG size, WORD mode)
     }
 }
 
-void vdi_os_mfree(void *block)
+LONG vdi_os_mfree(void *block)
 {
     register LONG ret __asm__("d0");
     VdiSleepState sw;
@@ -70,7 +69,12 @@ void vdi_os_mfree(void *block)
      "addq.l  #6,%%sp"
     : "=r"(ret) : "r"(block)
     : "d1", "d2", "a0", "a1", "a2", "cc", "memory");
-    vdi_sleep_end(&sw);
+    {
+        LONG r = ret;
+
+        vdi_sleep_end(&sw);
+        return r;
+    }
 }
 
 /*
@@ -98,24 +102,33 @@ BOOL vdi_other_gemdos(void)
  * the one running before the first program starts, and it never terminates.
  * Mfree() does not check the owner, so any process can free the block.
  */
-static void *alloc_kept(LONG size, WORD ram)
+/*
+ * mode: the kind of RAM and the protection bits of Mxalloc(); the keep bit
+ * is added under MiNT or MagiC
+ */
+void *vdi_alloc_kept_mode(LONG size, WORD mode)
 {
     void *block;
 
     if (vdi_other_gemdos())
     {
-        block = (void *)vdi_os_mxalloc(size, MX_KEEP_MODE_OF(ram));
+        block = (void *)vdi_os_mxalloc(size, mode | MX_KEEP_BIT);
         if ((LONG)block <= 0)
             return NULL;
         return block;
     }
 
-    block = (void *)vdi_os_mxalloc(size, ram);
+    block = (void *)vdi_os_mxalloc(size, mode);
     if ((LONG)block <= 0)
         return NULL;
     bdos_keep_block(block);
 
     return block;
+}
+
+static void *alloc_kept(LONG size, WORD ram)
+{
+    return vdi_alloc_kept_mode(size, ram | 0x30);
 }
 
 void *vdi_alloc_kept(LONG size)
