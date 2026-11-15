@@ -154,7 +154,7 @@ static struct {
     BOOL busy;                  /* a call is on the stack */
     BOOL off;                   /* it went past the bottom: the engine is not called again */
     BOOL given_up;              /* a wait gave up, and the stack has not been free since */
-    WORD waiting;               /* calls waiting for the stack */
+    BOOL wanted;                /* a call is waiting for the stack */
     LONG files_found;           /* by the scans, to tell a busy stack that gets on */
 } font_stack;
 
@@ -1243,7 +1243,6 @@ static BOOL wait_for_stack(const BOOL *done)
     if (font_stack.given_up)
         return FALSE;
 
-    font_stack.waiting++;
     start = hz_200;
     found = font_stack.files_found;
     while (font_stack.busy)
@@ -1258,6 +1257,7 @@ static BOOL wait_for_stack(const BOOL *done)
             got_it = FALSE;
             break;
         }
+        font_stack.wanted = TRUE;   /* set each time: a waiter can be killed in vdi_yield() */
         if ((hz_200 - start > (LONG)BUSY_WAIT) || font_stack.off || !vdi_yield())
         {
             font_stack.given_up = TRUE;
@@ -1265,8 +1265,6 @@ static BOOL wait_for_stack(const BOOL *done)
             break;
         }
     }
-    font_stack.waiting--;
-
     return got_it;
 }
 
@@ -1307,8 +1305,11 @@ static WORD on_stack(LONG (*fn)(void *), void *arg, LONG *result, const BOOL *do
     }
     font_stack.busy = FALSE;
     font_stack.given_up = FALSE;
-    if (font_stack.waiting)
+    if (font_stack.wanted)
+    {
+        font_stack.wanted = FALSE;
         vdi_yield();                /* let a call that waits have it now */
+    }
 
     if (result)
         *result = ret;
