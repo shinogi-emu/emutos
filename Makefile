@@ -555,6 +555,9 @@ TOCLEAN += *.img *.map
 
 emutos.img: $(OBJECTS) obj/emutospp.ld
 	$(LD) $(CORE_OBJ) $(LIBS) $(OPTIONAL_OBJ) $(LIBS) $(END_OBJ) $(LDFLAGS) -Wl,-Map=emutos.map -o emutos.img
+ifeq (1,$(VDI_OUTLINE_FONTS))
+	NM=$(TOOLCHAIN_PREFIX)nm bash tools/check-ft-abi.sh obj || { rm -f $@; exit 1; }
+endif
 	@if [ $$(($$(awk '/^\.data /{print $$3}' emutos.map))) -gt 0 ]; then \
 	  echo "### Warning: The DATA segment is not empty."; \
 	  echo "### Please examine emutos.map and use \"const\" where appropriate."; \
@@ -1343,7 +1346,7 @@ obj/%.o : %.S
 # bring their own C library functions (vdi/vdi_ftlibc.c).  The library
 # symbols are renamed in the objects (vdi/vdi_ftlibc.syms), so that nothing
 # here links to the 16-bit int functions of the same name.
-# tools/check-ft-abi.sh checks the result.
+# tools/check-ft-abi.sh checks the result, after each link of emutos.img.
 # The TrueType bytecode interpreter stops after 50000 instructions a run
 # (FreeType's default is a million), so that a font whose glyph programs
 # loop cannot freeze a slow machine for long.
@@ -1370,8 +1373,9 @@ obj/ft_$(subst /,_,$(basename $(1))).o: freetype/src/$(1) $(FT_CONFIG_H)
 endef
 $(foreach f,$(FT_SOURCES),$(eval $(call FT_OBJ_RULE,$(f))))
 
+# the engine's own files are held to the warnings of the rest of EmuTOS
 obj/vdi_ft2.o obj/vdi_ftmap.o obj/vdi_ftlibc.o: obj/%.o: vdi/%.c vdi/vdi_ft2.h vdi/vdi_ftos.h vdi/vdi_ftmap.h $(FT_CONFIG_H)
-	$(CC) $(FT_CFLAGS) -c $< -o $@
+	$(CC) $(FT_CFLAGS) $(WARNFLAGS) -c $< -o $@
 	$(OBJCOPY) --redefine-syms=vdi/vdi_ftlibc.syms $@
 
 #
