@@ -967,6 +967,276 @@ setup_info (struct raster_t *raster, struct blit_frame * info)
 }
 
 #if CONF_WITH_VDI_16BIT
+#if CONF_WITH_VDI_FASTDRAW
+extern ULONG mcpu;              /* processor type, see bios/processor.h */
+
+/*
+ * long word copies for vro_cpyfm16()
+ *
+ * For the operations that read the source, a pair of pixels is read and
+ * written as one ULONG.  On a 68020 or later (mcpu >= 20, not ColdFire) the
+ * source longs are always aligned and the destination longs may be
+ * misaligned when source and destination differ in long alignment or in
+ * pitch; only a source pitch that is not a multiple of four bytes takes the
+ * word path.  On a 68000/68010 and on ColdFire the long loops need the same
+ * long alignment and pitches that are multiples of four bytes.  The operation is
+ * chosen once per call, one loop per operation and direction.  The width is
+ * split once per call: a leading pixel to reach long alignment, pairs eight
+ * long words at a time, single pairs, a trailing pixel.
+ *
+ * Forward and backward are mirrors; the direction is the caller's (EmuTOS's
+ * `src < dst' rule).  Every access is in the order the pixel loop makes it,
+ * so overlapping rows copy as they do pixel by pixel.
+ */
+#define ROP_1(s, d)     ((s) & (d))
+#define ROP_2(s, d)     ((s) & ~(d))
+#define ROP_3(s, d)     (s)
+#define ROP_4(s, d)     (~(s) & (d))
+#define ROP_6(s, d)     ((s) ^ (d))
+#define ROP_7(s, d)     ((s) | (d))
+#define ROP_8(s, d)     (~((s) | (d)))
+#define ROP_9(s, d)     (~((s) ^ (d)))
+#define ROP_11(s, d)    ((s) | ~(d))
+#define ROP_12(s, d)    (~(s))
+#define ROP_13(s, d)    (~(s) | (d))
+#define ROP_14(s, d)    (~((s) & (d)))
+
+#define PAIR_F(OP)      { *qs = OP(*ps, *qs); ps++; qs++; }
+#define PAIR_B(OP)      { *qs = OP(*ps, *qs); ps--; qs--; }
+#define REP8(x)         x x x x x x x x
+
+/*
+ * a plain copy gets move.l (a0)+,(a1)+ eight deep: the compiler turns the
+ * unrolled C into longer move.l d(a0),d(a1) forms
+ */
+#define COPY8 \
+    " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n" \
+    " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n" \
+    " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n" \
+    " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n"
+#define COPY8B \
+    " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n" \
+    " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n" \
+    " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n" \
+    " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n"
+
+#define BLOCKS_F(OP) \
+    { for (k = n8; k > 0; k--) { REP8(PAIR_F(OP)) } }
+#define BLOCKS_B(OP) \
+    { for (k = n8; k > 0; k--) { REP8(PAIR_B(OP)) } }
+#define BLOCKS_F_ROP_3(OP) \
+    if (n8 > 0) { \
+        WORD cnt = (WORD)(n8 - 1); \
+        __asm__ __volatile__( \
+            "1:\n" COPY8 " dbra %[c],1b\n" \
+            : [s]"+a"(ps), [d]"+a"(qs), [c]"+d"(cnt) \
+            : : "cc", "memory"); \
+    }
+#define BLOCKS_B_ROP_3(OP) \
+    if (n8 > 0) { \
+        WORD cnt = (WORD)(n8 - 1); \
+        ps++; qs++; \
+        __asm__ __volatile__( \
+            "1:\n" COPY8B " dbra %[c],1b\n" \
+            : [s]"+a"(ps), [d]"+a"(qs), [c]"+d"(cnt) \
+            : : "cc", "memory"); \
+        ps--; qs--; \
+    }
+
+#ifdef __mcoldfire__
+/* ColdFire has no memory to memory move.w and no dbra: plain C there */
+# undef BLOCKS_F_ROP_3
+# define BLOCKS_F_ROP_3(OP) BLOCKS_F(OP)
+# undef BLOCKS_B_ROP_3
+# define BLOCKS_B_ROP_3(OP) BLOCKS_B(OP)
+#endif
+
+#define LOOP_F(OP, BLK) \
+    while (rows-- > 0) { \
+        UWORD_ALIAS *p = src, *q = dst; \
+        ULONG_ALIAS *ps, *qs; \
+        LONG k; \
+        if (lead) { \
+            *q = (UWORD)OP(*p, *q); \
+            p++; q++; \
+        } \
+        ps = (ULONG_ALIAS *)p; qs = (ULONG_ALIAS *)q; \
+        BLK(OP) \
+        for (k = n1; k > 0; k--) PAIR_F(OP) \
+        if (trail) \
+            *(UWORD_ALIAS *)qs = (UWORD)OP(*(UWORD_ALIAS *)ps, *(UWORD_ALIAS *)qs); \
+        src += sw; dst += dw; \
+    }
+
+#define LOOP_B(OP, BLK) \
+    while (rows-- > 0) { \
+        UWORD_ALIAS *p = src, *q = dst; \
+        ULONG_ALIAS *ps, *qs; \
+        LONG k; \
+        if (lead) { \
+            *q = (UWORD)OP(*p, *q); \
+            p--; q--; \
+        } \
+        ps = (ULONG_ALIAS *)(p - 1); qs = (ULONG_ALIAS *)(q - 1); \
+        BLK(OP) \
+        for (k = n1; k > 0; k--) PAIR_B(OP) \
+        if (trail) { \
+            UWORD_ALIAS *pp = (UWORD_ALIAS *)ps + 1, *qq = (UWORD_ALIAS *)qs + 1; \
+            *qq = (UWORD)OP(*pp, *qq); \
+        } \
+        src += sw; dst += dw; \
+    }
+
+#define ROP_CASES(LOOP, BLK, BLK3) \
+    switch(mode) { \
+    case BM_S_AND_D:    LOOP(ROP_1, BLK) break; \
+    case BM_S_AND_NOTD: LOOP(ROP_2, BLK) break; \
+    case BM_S_ONLY:     LOOP(ROP_3, BLK3) break; \
+    case BM_NOTS_AND_D: LOOP(ROP_4, BLK) break; \
+    case BM_S_XOR_D:    LOOP(ROP_6, BLK) break; \
+    case BM_S_OR_D:     LOOP(ROP_7, BLK) break; \
+    case BM_NOT_SORD:   LOOP(ROP_8, BLK) break; \
+    case BM_NOT_SXORD:  LOOP(ROP_9, BLK) break; \
+    case BM_S_OR_NOTD:  LOOP(ROP_11, BLK) break; \
+    case BM_NOT_S:      LOOP(ROP_12, BLK) break; \
+    case BM_NOTS_OR_D:  LOOP(ROP_13, BLK) break; \
+    case BM_NOT_SANDD:  LOOP(ROP_14, BLK) break; \
+    default: return FALSE; \
+    }
+
+static BOOL cpyfm16_words(UWORD *src, UWORD *dst, LONG sw, LONG dw,
+                          WORD mode, WORD rows, LONG cols, BOOL backward);
+
+/*
+ * src, dst: first pixel of the first row (forward), or last pixel of the
+ * last row (backward); sw, dw: row steps in pixels (negative backward).
+ * Returns FALSE, having drawn nothing, if the call is not one for the
+ * long word loops.
+ */
+static BOOL cpyfm16_long(UWORD *src, UWORD *dst, LONG sw, LONG dw,
+                         WORD mode, WORD rows, LONG cols, BOOL backward)
+{
+    LONG n, n8, n1;
+    WORD lead, trail;
+
+    if (cols <= 0 || rows <= 0)
+        return FALSE;
+#ifndef __mcoldfire__
+    /*
+     * a 68020 or later reads the source as long words wherever it lies
+     * (never outside the source pixels: the pairs are the ones the pixel loop
+     * reads); only the destination has to be long aligned
+     */
+    if (mcpu >= 20) {
+        if (sw & 1)
+            return cpyfm16_words(src, dst, sw, dw, mode, rows, cols, backward);
+    } else
+#endif
+    if ((((LONG)src ^ (LONG)dst) & 2) || ((sw | dw) & 1))
+        return cpyfm16_words(src, dst, sw, dw, mode, rows, cols, backward);
+
+    /* the pixel that is not the first (forward) or last (backward) of its long word */
+    lead = backward ? !((LONG)src & 2) : (WORD)(((LONG)src & 2) != 0);
+    if (lead)
+        cols--;
+    n = cols;
+    n8 = n >> 4;
+    n1 = (n >> 1) & 7;
+    trail = n & 1;
+
+    if (backward) {
+        ROP_CASES(LOOP_B, BLOCKS_B, BLOCKS_B_ROP_3)
+    } else {
+        ROP_CASES(LOOP_F, BLOCKS_F, BLOCKS_F_ROP_3)
+    }
+    return TRUE;
+}
+
+/*
+ * the word path: used on a 68020 or later only for an odd source pitch, and
+ * on a 68000/68010 or ColdFire when source and destination differ in long
+ * alignment or a pitch is not a multiple of four bytes.  No long words, but
+ * the same decisions once per call, eight pixels a pass
+ */
+#define PIX_F(OP)       { *q = (UWORD)OP(*p, *q); p++; q++; }
+#define PIX_B(OP)       { *q = (UWORD)OP(*p, *q); p--; q--; }
+#define WCOPY8 \
+    " move.w (%[s])+,(%[d])+\n" " move.w (%[s])+,(%[d])+\n" \
+    " move.w (%[s])+,(%[d])+\n" " move.w (%[s])+,(%[d])+\n" \
+    " move.w (%[s])+,(%[d])+\n" " move.w (%[s])+,(%[d])+\n" \
+    " move.w (%[s])+,(%[d])+\n" " move.w (%[s])+,(%[d])+\n"
+#define WCOPY8B \
+    " move.w -(%[s]),-(%[d])\n" " move.w -(%[s]),-(%[d])\n" \
+    " move.w -(%[s]),-(%[d])\n" " move.w -(%[s]),-(%[d])\n" \
+    " move.w -(%[s]),-(%[d])\n" " move.w -(%[s]),-(%[d])\n" \
+    " move.w -(%[s]),-(%[d])\n" " move.w -(%[s]),-(%[d])\n"
+#define WBLOCKS_F(OP) \
+    { for (k = n8; k > 0; k--) { REP8(PIX_F(OP)) } }
+#define WBLOCKS_B(OP) \
+    { for (k = n8; k > 0; k--) { REP8(PIX_B(OP)) } }
+#define WBLOCKS_F_ROP_3(OP) \
+    if (n8 > 0) { \
+        WORD cnt = (WORD)(n8 - 1); \
+        __asm__ __volatile__( \
+            "1:\n" WCOPY8 " dbra %[c],1b\n" \
+            : [s]"+a"(p), [d]"+a"(q), [c]"+d"(cnt) \
+            : : "cc", "memory"); \
+    }
+#define WBLOCKS_B_ROP_3(OP) \
+    if (n8 > 0) { \
+        WORD cnt = (WORD)(n8 - 1); \
+        p++; q++; \
+        __asm__ __volatile__( \
+            "1:\n" WCOPY8B " dbra %[c],1b\n" \
+            : [s]"+a"(p), [d]"+a"(q), [c]"+d"(cnt) \
+            : : "cc", "memory"); \
+        p--; q--; \
+    }
+#ifdef __mcoldfire__
+/* ColdFire has no memory to memory move.w and no dbra: plain C there */
+# undef WBLOCKS_F_ROP_3
+# define WBLOCKS_F_ROP_3(OP) WBLOCKS_F(OP)
+# undef WBLOCKS_B_ROP_3
+# define WBLOCKS_B_ROP_3(OP) WBLOCKS_B(OP)
+#endif
+
+#define WLOOP_F(OP, BLK) \
+    while (rows-- > 0) { \
+        UWORD *p = src, *q = dst; \
+        LONG k; \
+        BLK(OP) \
+        for (k = n1; k > 0; k--) PIX_F(OP) \
+        src += sw; dst += dw; \
+    }
+#define WLOOP_B(OP, BLK) \
+    while (rows-- > 0) { \
+        UWORD *p = src, *q = dst; \
+        LONG k; \
+        BLK(OP) \
+        for (k = n1; k > 0; k--) PIX_B(OP) \
+        src += sw; dst += dw; \
+    }
+
+/* the same arguments as cpyfm16_long() */
+static BOOL cpyfm16_words(UWORD *src, UWORD *dst, LONG sw, LONG dw,
+                          WORD mode, WORD rows, LONG cols, BOOL backward)
+{
+    LONG n8, n1;
+
+    if (cols <= 0 || rows <= 0)
+        return FALSE;
+    n8 = cols >> 3;
+    n1 = cols & 7;
+
+    if (backward) {
+        ROP_CASES(WLOOP_B, WBLOCKS_B, WBLOCKS_B_ROP_3)
+    } else {
+        ROP_CASES(WLOOP_F, WBLOCKS_F, WBLOCKS_F_ROP_3)
+    }
+    return TRUE;
+}
+#endif
+
 /*
  * vro_cpyfm16() - handle vro_cpyfm() for 16-bit graphics
  *
@@ -1004,6 +1274,12 @@ static void vro_cpyfm16(struct blit_frame *info)
     q = dst;
 
     rows = info->s_ymax - info->s_ymin + 1;
+
+#if CONF_WITH_VDI_FASTDRAW
+    if (cpyfm16_long(src, dst, (LONG)src_width, (LONG)dst_width, mode, rows,
+                     (LONG)info->s_xmax - info->s_xmin + 1, next_pixel < 0))
+        return;
+#endif
 
     switch(mode) {
     case BM_ALL_WHITE:  /* D1 = 0 */
@@ -1226,8 +1502,15 @@ static void vro_cpyfm16(struct blit_frame *info)
 static void vrt_cpyfm16(struct blit_frame *info)
 {
     UWORD *src, *dst, *p, *q;
-    WORD mode, src_width, src_off, dst_width, x, y;
-    UWORD *palette, src_mask, bit_mask, fgcol, bgcol;
+    WORD mode, src_width, src_off, dst_width;
+    UWORD *palette, fgcol, bgcol;
+#if CONF_WITH_VDI_FASTDRAW
+    const struct expand16 *e;
+    WORD kind;
+#else
+    WORD x, y;
+    UWORD src_mask, bit_mask;
+#endif
 
     mode = INTIN[0];
 
@@ -1240,7 +1523,9 @@ static void vrt_cpyfm16(struct blit_frame *info)
      */
     src_width = info->s_nxln / sizeof(WORD);/* width in words */
     src_off = info->s_xmin >> 4;            /* starting x offset in words */
+#if !CONF_WITH_VDI_FASTDRAW
     bit_mask = src_mask = 0x8000U >> (info->s_xmin&0x000f); /* starting bit mask */
+#endif
     p = src = info->s_form + ((LONG)info->s_ymin * src_width) + src_off;
 
     /*
@@ -1249,6 +1534,29 @@ static void vrt_cpyfm16(struct blit_frame *info)
     dst_width = info->d_nxln / sizeof(WORD);    /* in words */
     q = dst = info->d_form + ((LONG)info->d_ymin * dst_width) + info->d_xmin;
 
+#if CONF_WITH_VDI_FASTDRAW
+    switch(mode) {
+    case MD_ERASE:
+        kind = EXP16_ERASE;
+        break;
+    case MD_XOR:
+        kind = EXP16_XOR;
+        break;
+    case MD_TRANS:
+        kind = EXP16_TRANS;
+        break;
+    case MD_REPLACE:
+        kind = EXP16_REPLACE;
+        break;
+    default:
+        return;                     /* unsupported mode */
+    }
+    e = expand_tab16(kind, fgcol, bgcol);
+
+    expand_rows16(q, p, info->s_xmin & 0x000f, (LONG)info->s_xmax - info->s_xmin + 1,
+                  info->s_ymax - info->s_ymin + 1, (LONG)src_width * sizeof(WORD),
+                  (LONG)dst_width * sizeof(WORD), e);
+#else
     switch(mode) {
     case MD_ERASE:
         for (y = info->s_ymin; y <= info->s_ymax; y++) {
@@ -1323,6 +1631,7 @@ static void vrt_cpyfm16(struct blit_frame *info)
     default:
         return;                     /* unsupported mode */
     }
+#endif
 }
 #endif
 

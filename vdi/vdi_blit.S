@@ -552,7 +552,7 @@ f2op_04:
         and.w   d0,(a1)
         jra     f2_rtn
 
-mode_05:                        // dummy label. Never called!!!!
+mode_05:                        // dummy label. Never called: next_plane skips op 5
 
         and.w   d7,d0           // S and P                                       4
 mode_06:
@@ -858,7 +858,11 @@ bit_blt:
         add.w   d6,d7                   // three or more words apiece ...
 
         cmpi.w  #4,d7
+#if CONF_WITH_VDI_FASTDRAW
+        jcc     aligned_blt             // do the special word aligned blt
+#else
         jcc     word_blt                // do the special word aligned blt
+#endif
 
 std_blt:
 //  in:
@@ -1083,7 +1087,10 @@ next_plane:
         swap    d5
         move.w  INNER_CT(a6),d5         // d5(15:00) <- inner loop counter
 
-        move.l  #0x8421,d1              // logic ops 15,10,5, and 0 are special cases ($8421=%1000010000100001)
+        cmp.w   #5,d0                   // logic op 5 (D' <- D) leaves the destination
+        jeq     np_cont                 // alone: there is no fragment for it, skip the plane
+
+        move.l  #0x8421,d1              // logic ops 15,10, and 0 are special cases ($8421=%1000010000100001)
         btst    d0,d1                   // where operation is performed directly upon
         jne     unary_blt               // the destination independent of the source
 
@@ -1404,3 +1411,193 @@ sc_mp_enter:
 sc_plane:
         dbra    d4,sc_mp_enter
         rts
+
+#if CONF_WITH_VDI_FASTDRAW
+
+//
+// aligned_blt - a replace-mode copy whose source and destination sit at the
+//               same place in a word, between forms of the same interleaved
+//               planes (what word_blt does a plane at a time)
+//
+// The planes of a row are interleaved, so the words between the two end
+// columns, in every plane, are one run of memory: it is moved as long words
+// (at even addresses, which every 68000 accepts), and only the two end
+// columns are masked.  The rows, and the words of a row, go in the direction
+// word_blt would pick (source address below the destination address: bottom
+// up and right to left), so an overlapping copy reads before it writes.
+// Forms whose layout is not the plain interleaved one go to word_blt.
+//
+//  in:
+//      d4.w    words in source -1
+//      d6.w    words in destination -1  (d4 = d6, both >= 2: checked before)
+//
+        .even
+aligned_blt:
+        move.w  S_NXWD(a6),d0
+        cmp.w   D_NXWD(a6),d0
+        jne     word_blt                // both forms have the same word step
+        move.w  PLANE_CT(a6),d1
+        add.w   d1,d1
+        cmp.w   d0,d1
+        jne     word_blt                // the step is the plane count
+        cmpi.w  #2,S_NXPL(a6)
+        jne     word_blt                // the planes follow each other
+        cmpi.w  #2,D_NXPL(a6)
+        jne     word_blt
+        cmp.w   d4,d6
+        jne     word_blt                // as many words in the source
+        tst.w   B_HT(a6)
+        jle     word_blt
+
+        move.w  S_XMIN(a6),d0
+        move.w  S_YMIN(a6),d1
+        jbsr    s_xy2addr               // a0 -> first source word
+        move.w  D_XMIN(a6),d0
+        move.w  D_YMIN(a6),d1
+        jbsr    d_xy2addr               // a1 -> first destination word
+
+        moveq   #0,d0
+        move.w  S_NXLN(a6),d0
+        move.l  d0,a4                   // a4 <- source line step
+        moveq   #0,d0
+        move.w  D_NXLN(a6),d0
+        move.l  d0,a5                   // a5 <- destination line step
+
+        addq.w  #1,d6                   // columns
+        moveq   #0,d7
+        move.w  d6,d7
+        mulu    D_NXWD(a6),d7           // d7 <- bytes in a row of the copy
+
+        moveq   #0,d3
+        move.w  D_NXWD(a6),d3
+        add.l   d3,d3                   // the two end columns
+        neg.l   d3
+        add.l   d7,d3                   // d3 <- bytes between them
+
+        jbsr    get_fringe              // d6.w left mask, d6(31:16) right mask
+        move.l  d6,d5
+        swap    d5                      // d5.w <- right mask
+
+//   the words between the end columns: odd word, and long words, the latter
+//   as passes of 8 entered part way: entry offset in SRC_WR, passes-1 in
+//   INNER_CT (-1: none)
+
+        move.l  d3,d0
+        lsr.l   #2,d0                   // d0.w <- long words
+        andi.w  #2,d3
+        move.w  d3,DST_WR(a6)           // 2: a word more
+        move.w  d0,d1
+        neg.w   d1
+        andi.w  #7,d1
+        add.w   d1,d1
+        move.w  d1,SRC_WR(a6)
+        subq.w  #1,d0                   // none: -1
+        jmi     al_set
+        lsr.w   #3,d0
+al_set:
+        move.w  d0,INNER_CT(a6)
+
+        move.w  PLANE_CT(a6),d2
+        subq.w  #1,d2                   // d2 <- planes -1
+        move.w  B_HT(a6),d4
+        subq.w  #1,d4                   // d4 <- rows -1
+        move.l  a0,a2                   // a2, a3: first word of the row
+        move.l  a1,a3
+
+        cmp.l   a1,a0
+        jcs     al_up                   // source below the destination: bottom up
+
+al_down:
+        move.l  a2,a0
+        move.l  a3,a1
+        move.w  d2,d1
+al_dl:  move.w  (a0)+,d0                // left column
+        move.w  (a1),d3
+        eor.w   d3,d0
+        and.w   d6,d0
+        eor.w   d0,(a1)+
+        dbra    d1,al_dl
+
+        move.w  INNER_CT(a6),d0
+        jmi     al_dw
+        move.w  SRC_WR(a6),d1
+        jmp     al_df(pc,d1.w)
+al_df:  move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        move.l  (a0)+,(a1)+
+        dbra    d0,al_df
+al_dw:  tst.w   DST_WR(a6)
+        jeq     al_dr
+        move.w  (a0)+,(a1)+
+
+al_dr:  move.w  d2,d1
+al_dr1: move.w  (a0)+,d0                // right column
+        move.w  (a1),d3
+        eor.w   d3,d0
+        and.w   d5,d0
+        eor.w   d0,(a1)+
+        dbra    d1,al_dr1
+
+        adda.l  a4,a2
+        adda.l  a5,a3
+        move.l  a2,a0
+        move.l  a3,a1
+        move.w  d2,d1
+        dbra    d4,al_dl
+        rts
+
+al_up:  move.w  d4,d0                   // start at the last row
+        mulu    S_NXLN(a6),d0
+        adda.l  d0,a2
+        move.w  d4,d0
+        mulu    D_NXLN(a6),d0
+        adda.l  d0,a3
+
+al_ur:  move.l  a2,a0
+        adda.l  d7,a0                   // after the row
+        move.l  a3,a1
+        adda.l  d7,a1
+        move.w  d2,d1
+al_ur1: move.w  -(a0),d0                // right column
+        move.w  -(a1),d3
+        eor.w   d3,d0
+        and.w   d5,d0
+        eor.w   d0,(a1)
+        dbra    d1,al_ur1
+
+        tst.w   DST_WR(a6)
+        jeq     al_um
+        move.w  -(a0),-(a1)
+al_um:  move.w  INNER_CT(a6),d0
+        jmi     al_ul
+        move.w  SRC_WR(a6),d1
+        jmp     al_ub(pc,d1.w)
+al_ub:  move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        move.l  -(a0),-(a1)
+        dbra    d0,al_ub
+
+al_ul:  move.w  d2,d1
+al_ul1: move.w  -(a0),d0                // left column
+        move.w  -(a1),d3
+        eor.w   d3,d0
+        and.w   d6,d0
+        eor.w   d0,(a1)
+        dbra    d1,al_ul1
+
+        suba.l  a4,a2
+        suba.l  a5,a3
+        dbra    d4,al_ur
+        rts
+
+#endif
