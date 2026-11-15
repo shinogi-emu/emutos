@@ -13,11 +13,12 @@
 #include "lineavars.h"
 #include "asm.h"
 #include "string.h"
+#include "vdi_kept.h"
 
 /* forward prototypes */
 void screen(void);
 #if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
-void screen_general(void);      /* screen() is in vdi_asm.S */
+void screen_general(void);      /* _screen is in vdi_asm.S */
 #endif
 
 
@@ -28,7 +29,7 @@ typedef void (*VDI_OP_T)(Vwk *); /* Pointer type to VDI operation */
 #define vdi_v_nop ((VDI_OP_T)just_rts) /* VDI dummy operation */
 
 #if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
-/* words, so that the rows are 8 bytes and screen() below can take them as such */
+/* words, so that the rows are 8 bytes and _screen in vdi_asm.S can take them as such */
 typedef WORD VDI_COUNT_T;
 #else
 typedef unsigned char VDI_COUNT_T;
@@ -42,7 +43,7 @@ struct vdi_jmptab {
 
 /* Two main jumptables for VDI functions */
 #if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
-#define JMPTB_STATIC            /* read by screen() in vdi_asm.S */
+#define JMPTB_STATIC            /* read by _screen in vdi_asm.S */
 #else
 #define JMPTB_STATIC static
 #endif
@@ -205,6 +206,68 @@ static const struct vdi_xjmptab *find_xjmptab(UWORD opcode, UWORD subop)
 
 #if WITH_JMPTB3
 /*
+ * The brackets open now (programs asleep in an OS call), and the
+ * workstations closed while there were any.  A call that sleeps goes on
+ * with its pointer to its workstation, and its dispatcher (screen_general()
+ * or _screen) stores it in CUR_WORK and the Line-A variables when it
+ * returns: that workstation must still be there then, and nothing is
+ * checked on the normal path to be sure of it.  So while a program is
+ * asleep a closed workstation is kept (already out of vwk_ptr[], so closed
+ * for every call) and put on this list, linked by next_work, and freed
+ * by the next call that opens or closes a workstation once no program is
+ * asleep (vdi_reap_vwk(): nothing else runs between a wake up and the end
+ * of its call).  CUR_WORK is then taken off it, if it is still there.
+ *
+ * The blocks (the Vwk, the VDI's bitmap pixels) are kept blocks that no
+ * program owns (vdi_alloc_kept_mode()), as the owner may end while the block
+ * waits here.  The price: a program that ends without v_clsvwk leaks its Vwk
+ * (bounded by the handle table; stock leaves the slot taken too, pointing at
+ * freed memory), and bitmap pixels of a program that ends with bitmaps open
+ * leak until reboot.  A refused Mfree() leaves the block on the list.
+ */
+static WORD vdi_sleeping;
+static Vwk *vdi_zombies;
+
+static BOOL release_vwk(Vwk *vwk)
+{
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
+#endif
+    return vdi_os_mfree(vwk) == 0;  /* may sleep: see vdi_sleep.h */
+}
+
+static void defer_vwk(Vwk *vwk)
+{
+    vwk->next_work = vdi_zombies;
+    vdi_zombies = vwk;
+}
+
+/* free a workstation that is closed (it is out of vwk_ptr[] already) */
+void vdi_release_vwk(Vwk *vwk)
+{
+    if (vdi_sleeping || !release_vwk(vwk))
+        defer_vwk(vwk);     /* the block is kept: valid until the VDI frees it */
+}
+
+/* free the workstations that were closed while a program slept */
+void vdi_reap_vwk(void)
+{
+    Vwk *vwk;
+
+    while (!vdi_sleeping && (vwk = vdi_zombies) != NULL)
+    {
+        vdi_zombies = vwk->next_work;
+        if (CUR_WORK == vwk)
+            CUR_WORK = &phys_work;
+        if (!release_vwk(vwk))
+        {
+            defer_vwk(vwk);     /* refused: try again at the next call */
+            break;
+        }
+    }
+}
+
+/*
  * Around an OS call that can sleep: see vdi_sleep.h.  What another
  * program's VDI call would overwrite is kept in the caller's state.
  */
@@ -219,6 +282,7 @@ void vdi_sleep_begin(VdiSleepState *state)
     state->flip_y = flip_y;
     memcpy(state->ptsin, vdishare.main.local_ptsin, sizeof(state->ptsin));
     state->vwk = NULL;
+    vdi_sleeping++;
 #if CONF_WITH_VDI_NVDI_EXT
     vdi_bitmap_sleep_begin(state);
 #endif
@@ -253,6 +317,7 @@ void vdi_sleep_end(VdiSleepState *state)
     }
     flip_y = state->flip_y;
     memcpy(vdishare.main.local_ptsin, state->ptsin, sizeof(state->ptsin));
+    vdi_sleeping--;
 #if CONF_WITH_VDI_NVDI_EXT
     vdi_bitmap_sleep_end(state);
 #endif
@@ -262,7 +327,7 @@ void vdi_sleep_end(VdiSleepState *state)
 
 #if CONF_WITH_VDI_FASTDRAW && !defined(__mcoldfire__)
 /*
- * The numbers screen() in vdi_asm.S uses (vdiscreen.h) are those of the
+ * The numbers _screen in vdi_asm.S uses (vdiscreen.h) are those of the
  * structures here
  */
 _Static_assert(sizeof(struct vdi_jmptab) == (1 << VS_ROW_SHIFT), "vdi_jmptab row size");
@@ -290,12 +355,37 @@ _Static_assert(offsetof(Vwk, xmn_clip) == VS_VWK_XMN_CLIP, "xmn_clip");
 _Static_assert(offsetof(Vwk, xmx_clip) == VS_VWK_XMX_CLIP, "xmx_clip");
 _Static_assert(offsetof(Vwk, ymn_clip) == VS_VWK_YMN_CLIP, "ymn_clip");
 _Static_assert(offsetof(Vwk, ymx_clip) == VS_VWK_YMX_CLIP, "ymx_clip");
+_Static_assert(FIRST_VDI_HANDLE == 1, "_screen: handle 1 is vwk_ptr[1]");
+/* the widths of the moves in _screen: .w and .l as the structures have them */
+_Static_assert(sizeof(((Vwk *)0)->clip) == 2, "clip is a word");
+_Static_assert(sizeof(((Vwk *)0)->cur_font) == 4, "cur_font is a long");
+_Static_assert(sizeof(((Vwk *)0)->multifill) == 2, "multifill is a word");
+_Static_assert(sizeof(((Vwk *)0)->fill_style) == 2, "fill_style is a word");
+_Static_assert(sizeof(((Vwk *)0)->wrt_mode) == 2, "wrt_mode is a word");
+_Static_assert(sizeof(((Vwk *)0)->xmn_clip) == 2, "xmn_clip is a word");
+_Static_assert(sizeof(((Vwk *)0)->xmx_clip) == 2, "xmx_clip is a word");
+_Static_assert(sizeof(((Vwk *)0)->ymn_clip) == 2, "ymn_clip is a word");
+_Static_assert(sizeof(((Vwk *)0)->ymx_clip) == 2, "ymx_clip is a word");
+_Static_assert(sizeof(flip_y) == 2, "flip_y is a word");
+_Static_assert(sizeof(def_font) == sizeof(void *), "def_font is a pointer variable");
+_Static_assert(sizeof(void *) == 4, "pointers are longs");
+_Static_assert(sizeof(CUR_WORK) == 4, "CUR_WORK is a long");
+_Static_assert(sizeof(CUR_FONT) == 4, "CUR_FONT is a long");
+_Static_assert(sizeof(WRT_MODE) == 2 && sizeof(CLIP) == 2, "WRT_MODE and CLIP are words");
+_Static_assert(sizeof(XMINCL) == 2 && sizeof(YMINCL) == 2 &&
+               sizeof(XMAXCL) == 2 && sizeof(YMAXCL) == 2, "the clip rectangle is words");
+_Static_assert(sizeof(v_planes) == 2, "v_planes is a word");
 #if CONF_WITH_VDI_OUTLINE_FONTS
+_Static_assert(sizeof(((Vwk *)0)->outline_font) == 4, "outline_font is a long");
 _Static_assert(offsetof(Vwk, outline_head) == VS_VWK_OUTLINE_HEAD, "outline_head");
 _Static_assert(offsetof(Vwk, outline_font) == VS_VWK_OUTLINE_FONT, "outline_font");
 #endif
 #if CONF_WITH_VDI_NVDI_EXT
+_Static_assert(sizeof(((Vwk *)0)->bm.addr) == 4, "bm.addr is a long");
 _Static_assert(offsetof(Vwk, bm.addr) == VS_VWK_BM_ADDR, "bm.addr");
+#if CONF_WITH_VDI_16BIT
+_Static_assert(sizeof(vdi_bg_text) == 2 && sizeof(vdi_bg_line) == 2, "vdi_bg_text and vdi_bg_line are words");
+#endif
 #endif
 #endif
 

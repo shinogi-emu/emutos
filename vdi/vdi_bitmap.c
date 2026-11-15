@@ -57,22 +57,20 @@ WORD vdi_bm_xres, vdi_bm_yres;  /* the size of the bitmap in use, less one */
 /*
  * The memory of bitmaps: the one place that asks the OS for it.
  *
- * It is owned by the calling program, like the Vwk (Mxalloc, not the kept
- * allocator).  The program reads the pixels directly, so under MiNT the
+ * It is a kept block, like the Vwk: it may be freed from another
+ * program's call after its owner has ended, and leaks if the owner ends
+ * with the bitmap open.  The program reads the pixels directly, so under MiNT the
  * block is readable by every program.  With a blitter the block must be
  * in ST-RAM, for the blitter to reach it.
  */
 static void *bm_alloc(LONG size)
 {
-    LONG block;
-
-    block = vdi_os_mxalloc(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
-    return block ? (void *)block : NULL;
+    return vdi_alloc_kept_mode(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
 }
 
-static void bm_free(void *block)
+static BOOL bm_free(void *block)
 {
-    vdi_os_mfree(block);
+    return vdi_os_mfree(block) == 0;
 }
 
 
@@ -294,9 +292,11 @@ static WORD micron_size(WORD value, LONG unit)
 
 /*
  * v_open_bm: 100, sub-opcode 3.  CONTRL[7..8] points to a GCBITMAP (NULL:
- * the size of the screen), intin[0] is the colour flags (bit 0 set: the
- * bitmap starts with the colours a new workstation has, clear: with those
- * of the base workstation), intin[1] the unit of the pixel size in
+ * the size of the base workstation), intin[0] is the colour flags (bit 0
+ * set: the bitmap shares the colour table of the base workstation, clear:
+ * it has one of its own).  EmuTOS has no shared tables: either way the
+ * bitmap starts with a copy of the colours of the base workstation as
+ * they are now, as fVDI does.  intin[1] the unit of the pixel size in
  * intin[2..3]: -1 dots per inch, 0 to 3 microns, tenths, hundredths and
  * thousandths of a micron.  Only the handle is returned.
  */
@@ -311,14 +311,21 @@ static void open_bm(void)
     LONG width = (LONG)DEV_TAB[0] + 1, height = (LONG)DEV_TAB[1] + 1;
     LONG wbytes = 0;
     UBYTE *addr = NULL;
-    WORD pw, ph;
+    WORD pw, ph, base_handle;
     VwkBitmap bm;
 
     if (CONTRL[3] < 4 || (in[0] & ~1))
         { refuse(); return; }
-    base = get_vwk_by_handle(CONTRL[6]);
+    base_handle = CONTRL[6];
+    base = get_vwk_by_handle(base_handle);
     if (base == NULL)
         { refuse(); return; }
+    if (base->bm.addr)
+    {
+        /* no size given: that of the base bitmap */
+        width = base->bm.width;
+        height = base->bm.height;
+    }
     gc = (GCBITMAP *)long_at(&CONTRL[7]);
 
     if (gc)
@@ -371,8 +378,9 @@ static void open_bm(void)
     attach(vwk, &bm);
 
 #if CONF_WITH_VDI_16BIT
-    /* colour flag bit 0 clear: the colours of the base workstation as they are now */
-    if (!(in[0] & 1) && vwk->ext && base->ext)
+    /* the colours of the base workstation as they are now (it may be gone if the open slept) */
+    base = get_vwk_by_handle(base_handle);
+    if (vwk->ext && base && base->ext)
         memcpy(vwk->ext, base->ext, sizeof(VwkExt));
 #endif
 
@@ -491,7 +499,8 @@ void vdi_bitmap_open(void)
 }
 
 
-/* v_clsvwk and v_clswk call this before they free a workstation */
+/* release_vwk() in vdi_main.c calls this before it frees a closed workstation,
+   perhaps from another program's call: the pixels are kept blocks */
 void vdi_bitmap_release(Vwk *vwk)
 {
     if (vwk->bm.mem)

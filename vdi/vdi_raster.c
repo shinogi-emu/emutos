@@ -1056,7 +1056,7 @@ extern ULONG mcpu;              /* processor type, see bios/processor.h */
 
 #define LOOP_F(OP, BLK) \
     while (rows-- > 0) { \
-        UWORD_ALIAS *p = src, *q = dst; \
+        UWORD_ALIAS *p = (UWORD_ALIAS *)src, *q = (UWORD_ALIAS *)dst; \
         ULONG_ALIAS *ps, *qs; \
         LONG k; \
         if (lead) { \
@@ -1073,7 +1073,7 @@ extern ULONG mcpu;              /* processor type, see bios/processor.h */
 
 #define LOOP_B(OP, BLK) \
     while (rows-- > 0) { \
-        UWORD_ALIAS *p = src, *q = dst; \
+        UWORD_ALIAS *p = (UWORD_ALIAS *)src, *q = (UWORD_ALIAS *)dst; \
         ULONG_ALIAS *ps, *qs; \
         LONG k; \
         if (lead) { \
@@ -1104,7 +1104,7 @@ static __attribute__((noinline)) void copy16_fwd(UWORD *src, UWORD *dst, LONG sw
     const WORD cnt0 = (WORD)(n8 - 1);
 
     while (rows-- > 0) {
-        UWORD_ALIAS *p = src, *q = dst;
+        UWORD_ALIAS *p = (UWORD_ALIAS *)src, *q = (UWORD_ALIAS *)dst;
         ULONG_ALIAS *ps, *qs;
 
         if (lead) {
@@ -1147,7 +1147,7 @@ static __attribute__((noinline)) void copy16_back(UWORD *src, UWORD *dst, LONG s
     const WORD cnt0 = (WORD)(n8 - 1);
 
     while (rows-- > 0) {
-        UWORD_ALIAS *p = src, *q = dst;
+        UWORD_ALIAS *p = (UWORD_ALIAS *)src, *q = (UWORD_ALIAS *)dst;
         ULONG_ALIAS *ps, *qs;
 
         if (lead) {

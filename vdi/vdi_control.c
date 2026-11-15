@@ -23,7 +23,6 @@
 #include "tosvars.h"
 #include "vdi_kept.h"
 
-#define FIRST_VDI_HANDLE    1
 #define LAST_VDI_HANDLE     (FIRST_VDI_HANDLE+NUM_VDI_HANDLES-1)
 #define VDI_PHYS_HANDLE     FIRST_VDI_HANDLE
 
@@ -47,7 +46,7 @@ MCS *mcs_ptr;
  * VDI handle n.  entry 0 is unused.
  */
 #if CONF_WITH_VDI_FASTDRAW
-Vwk *vwk_ptr[NUM_VDI_HANDLES+1];    /* read by screen() in vdi_main.c */
+Vwk *vwk_ptr[NUM_VDI_HANDLES+1];    /* read by _screen in vdi_asm.S */
 #else
 static Vwk *vwk_ptr[NUM_VDI_HANDLES+1];
 #endif
@@ -439,9 +438,12 @@ void vdi_v_opnvwk(Vwk * vwk)
     /*
      * v_opnbm() (sub-opcode 1 with the 20 intin it has), v_resize_bm() (2)
      * and v_open_bm() (3) are opcode 100 too; any other sub-opcode is
-     * v_opnvwk(), as fVDI has it
+     * v_opnvwk(), as fVDI has it.  v_opnvwk() always has 11 intin, and
+     * the other two have fewer (4 and 6): a binding that leaves CONTRL[5]
+     * stale (the DRI one does) must still open its workstation.
      */
-    if (CONTRL[5] == 2 || CONTRL[5] == 3 || (CONTRL[5] == 1 && CONTRL[3] >= 20)) {
+    if (((CONTRL[5] == 2 || CONTRL[5] == 3) && CONTRL[3] < 11) ||
+        (CONTRL[5] == 1 && CONTRL[3] >= 20)) {
         vdi_bitmap_open();
         return;
     }
@@ -452,6 +454,9 @@ void vdi_v_opnvwk(Vwk * vwk)
      * even if v_opnvwk() exits early.
      */
     CUR_WORK = &phys_work;
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    vdi_reap_vwk();                 /* workstations closed while a call slept */
+#endif
 
     /* First find a free handle */
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
@@ -478,7 +483,19 @@ void vdi_v_opnvwk(Vwk * vwk)
         size += sizeof(VwkExt); /* for simplicity, allocate them together */
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
-    vwk = (Vwk *)vdi_os_mxalloc(size, MX_SUPER);    /* may sleep: see vdi_sleep.h */
+    /* a kept block (see vdi_kept.h): it may be freed after its program ended */
+    vwk = (Vwk *)vdi_alloc_kept_mode(size, MX_SUPER);   /* may sleep: see vdi_sleep.h */
+    if (vwk != NULL && vwk_ptr[handle] != NULL) {
+        /* another program took the handle while this one slept: find another */
+        for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
+            if (!*p)
+                break;
+        }
+        if (handle > LAST_VDI_HANDLE) {
+            vdi_os_mfree(vwk);
+            vwk = NULL;
+        }
+    }
 #else
     vwk = (Vwk *)Mxalloc(size, MX_SUPER);
 #endif
@@ -535,11 +552,9 @@ void vdi_v_clsvwk(Vwk * vwk)
      */
     CUR_WORK = &phys_work;
 
-#if CONF_WITH_VDI_NVDI_EXT
-    vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
-#endif
 #if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
-    vdi_os_mfree(vwk);          /* may sleep: see vdi_sleep.h */
+    vdi_reap_vwk();
+    vdi_release_vwk(vwk);       /* the pixels and the block; may sleep: see vdi_sleep.h */
 #else
     Mfree(vwk);
 #endif
@@ -636,6 +651,7 @@ void vdi_v_clswk(Vwk * vwk)
      * that free them may sleep: point it at one that stays (see v_clsvwk)
      */
     CUR_WORK = &phys_work;
+    vdi_reap_vwk();
 #endif
 
     /* close all open virtual workstations */
@@ -646,10 +662,7 @@ void vdi_v_clswk(Vwk * vwk)
                 Vwk *closing = *p;
 
                 *p = NULL;          /* closed before the call that may sleep */
-#if CONF_WITH_VDI_NVDI_EXT
-                vdi_bitmap_release(closing);
-#endif
-                vdi_os_mfree(closing);
+                vdi_release_vwk(closing);
             }
 #else
             Mfree(*p);
