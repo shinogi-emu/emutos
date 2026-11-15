@@ -38,6 +38,7 @@
 #include "biosext.h"
 #include "vdi_ft2.h"
 #include "vdi_ftos.h"
+#include "vdi_kept.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 

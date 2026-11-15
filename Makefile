@@ -382,6 +382,11 @@ VDI_OUTLINE_FONTS := $(shell echo CONF_WITH_VDI_OUTLINE_FONTS | $(CPP) -P -x c $
 # include/config.h), evaluated the same way
 VDI_NVDI_EXT := $(shell echo CONF_WITH_VDI_NVDI_EXT | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
 
+# OS glue of the allocation that outlives the caller; another host may supply it
+ifneq (,$(filter 1,$(VDI_OUTLINE_FONTS) $(VDI_NVDI_EXT)))
+vdi_src += vdi_kept.c
+endif
+
 ifeq (1,$(VDI_OUTLINE_FONTS))
 vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
 endif

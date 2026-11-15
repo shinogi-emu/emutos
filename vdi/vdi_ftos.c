@@ -13,9 +13,12 @@
 #include "cookie.h"
 #include "vdi_ftos.h"
 #include "vdi_ftmem.h"
+#include "vdi_kept.h"
 #include "vdi_defs.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
+
+#define COOKIE_MINT     0x4d694e54L     /* 'MiNT' */
 
 /* the deepest level of sub-folders searched by vdi_font_dir_scan() */
 #define MAX_SCAN_DEPTH  8

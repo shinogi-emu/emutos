@@ -530,16 +530,6 @@ void vdi_vst_setsize(Vwk *);        /* 252 */
 void vdi_vst_skew(Vwk *);           /* 253 */
 #endif
 
-#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
-/* vdi_misc.c: memory that outlives the program making the VDI call */
-#define COOKIE_MINT     0x4d694e54L     /* 'MiNT' */
-#define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
-BOOL vdi_other_gemdos(void);
-void *vdi_alloc_kept(LONG size);
-void vdi_free_kept(void *block);
-void *vdi_alloc_readable(LONG size);    /* every program can read it */
-#endif
-
 #if HAVE_BEZIER
 /* not in original TOS */
 void v_bez_qual(Vwk *);
