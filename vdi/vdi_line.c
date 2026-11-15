@@ -3158,6 +3158,37 @@ static void vertical_line(const Line *line, WORD wrt_mode, UWORD color)
 #endif
 
 
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+/*
+ * solid_hline16 - a solid horizontal line on 16 bits as one run of pixels
+ *
+ * A style of all ones puts the foreground colour in every pixel, or
+ * inverts it: what swblit_rect_common16() does with the row, without the
+ * set-up of a rectangle.  Returns FALSE, having drawn nothing, for any
+ * other style or mode.  (A function of its own so that abline() keeps the
+ * registers it had.)
+ */
+static __attribute__((noinline)) BOOL solid_hline16(UWORD x1, UWORD y1, UWORD x2, UWORD linemask,
+                                         WORD wrt_mode, UWORD color)
+{
+    const WORD left = x1, right = x2, row = y1;     /* as the Rect holds them */
+    UWORD *addr;
+    LONG count;
+
+    if (linemask != 0xffff || wrt_mode == WM_ERASE)
+        return FALSE;
+
+    addr = get_start_addr16(left, row);
+    count = (LONG)right - left + 1;
+    if (wrt_mode == WM_XOR)
+        not_run16(addr, count);
+    else
+        solid_run16(addr, count, CUR_WORK->ext->palette[color]);
+    return TRUE;
+}
+#endif
+
+
 /*
  * abline - draw a line
  *
@@ -3245,6 +3276,11 @@ void abline(const Line *line, const WORD wrt_mode, UWORD color)
         UWORD linemask = LN_MASK;   /* linestyle bits */
         VwkAttrib attr;
         Rect rect;
+
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+        if (TRUECOLOR_MODE && solid_hline16(x1, y1, x2, linemask, wrt_mode, color))
+            return;
+#endif
 
         attr.clip = 0;
         attr.multifill = 0;
