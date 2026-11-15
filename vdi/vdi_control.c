@@ -626,6 +626,14 @@ void vdi_v_clswk(Vwk * vwk)
     WORD handle;
     Vwk **p;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+    /*
+     * CUR_WORK may be one of the workstations freed below, and the calls
+     * that free them may sleep: point it at one that stays (see v_clsvwk)
+     */
+    CUR_WORK = &phys_work;
+#endif
+
     /* close all open virtual workstations */
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
         if (*p) {

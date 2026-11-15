@@ -195,8 +195,7 @@ void vdi_sleep_begin(VdiSleepState *state)
     state->pb[2] = PTSIN;
     state->pb[3] = INTOUT;
     state->pb[4] = PTSOUT;
-    state->cur_work = CUR_WORK;
-    state->cur_handle = CUR_WORK ? CUR_WORK->handle : 0;
+    state->cur_work = CUR_WORK;     /* the pointer only: see vdi_sleep_end() */
     state->flip_y = flip_y;
     memcpy(state->ptsin, vdishare.main.local_ptsin, sizeof(state->ptsin));
     state->vwk = NULL;
@@ -212,10 +211,26 @@ void vdi_sleep_end(VdiSleepState *state)
     PTSIN = state->pb[2];
     INTOUT = state->pb[3];
     PTSOUT = state->pb[4];
-    /* not a workstation that was closed meanwhile (the physical one never is) */
-    if (state->cur_work == NULL || state->cur_work == (void *)&phys_work ||
-        get_vwk_by_handle(state->cur_handle) == (Vwk *)state->cur_work)
+    /*
+     * CUR_WORK may point at a workstation closed meanwhile, or at memory
+     * that was never one (a program's own Line-A array): it is not read,
+     * only looked for among the open workstations.
+     */
+    if (state->cur_work == NULL || state->cur_work == (void *)&phys_work)
         CUR_WORK = (Vwk *)state->cur_work;
+    else
+    {
+        WORD handle;
+
+        for (handle = 1; handle <= NUM_VDI_HANDLES; handle++)
+        {
+            if (get_vwk_by_handle(handle) == (Vwk *)state->cur_work)
+            {
+                CUR_WORK = (Vwk *)state->cur_work;
+                break;
+            }
+        }
+    }
     flip_y = state->flip_y;
     memcpy(vdishare.main.local_ptsin, state->ptsin, sizeof(state->ptsin));
 #if CONF_WITH_VDI_NVDI_EXT

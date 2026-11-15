@@ -28,7 +28,9 @@
  * its own, like a large one.
  *
  * This file is compiled with 16-bit int, so every size is a ULONG.  It is
- * not reentrant, and need not be: it never waits for anything.
+ * not reentrant, and need not be: ftmem_os_alloc() and ftmem_os_free() can
+ * sleep (see vdi_sleep.h), but every caller is on the font stack of
+ * vdi_outline.c, which one call uses at a time.
  */
 
 #include "portab.h"

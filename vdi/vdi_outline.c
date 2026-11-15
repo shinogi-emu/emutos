@@ -111,9 +111,12 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
  * - the state of a call that sleeps here (the parameter block, the current
  *   workstation, the first points of PTSIN) is kept and put back by
  *   vdi_sleep_begin() and vdi_sleep_end() around every OS call (see
- *   vdi_sleep.h); a static of this file that is set before a call into
- *   the engine and read after it is wrong, as another program's call can
- *   set it meanwhile.
+ *   vdi_sleep.h).  A static that code off the font stack can set must not
+ *   be set before a call into the engine and read after it, as another
+ *   program's call can set it meanwhile.  One that only code on the font
+ *   stack sets may be: listed_point() sets xfnt and reads it across a
+ *   call into the engine, and runs only on the font stack, which one call
+ *   uses at a time.
  */
 
 static LONG font_stack[FONT_STACK_SIZE / sizeof(LONG)];
@@ -144,17 +147,25 @@ static void found_font(const char *path, void *ctx)
 static void make_faces(void)
 {
     LONG n = vdi_ft_face_count(), i;
-    OutlineFace *f, **tab;
+    OutlineFace *f, **tab, **old;
 
     if (n > MAX_FACES)
         n = MAX_FACES;
     if (n <= face_count)
         return;
 
-    tab = vdi_ft_realloc(face_tab, n * sizeof(OutlineFace *));
+    /*
+     * The calls below can sleep, and calls off the font stack read face_tab
+     * meanwhile: the old table goes only once the new one is in place.
+     */
+    tab = vdi_ft_alloc(n * sizeof(OutlineFace *));
     if (!tab)
         return;
+    old = face_tab;
+    if (face_count)
+        memcpy(tab, old, face_count * sizeof(OutlineFace *));
     face_tab = tab;
+    vdi_ft_free(old);
     f = vdi_ft_alloc((n - face_count) * sizeof(OutlineFace));
     if (!f)
         return;

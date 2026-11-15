@@ -45,7 +45,11 @@
  * across its sleep (hence the traps of vdi_ftos.c and vdi_kept.c, not
  * trap1()).  A static of the VDI that is set before an OS call and read
  * after it is not saved: no code may do that (set it after the call).
- * End leaves CUR_WORK alone when its workstation was closed meanwhile.
+ * Begin does not read through CUR_WORK: it may point at a workstation
+ * that is closed, or at a Line-A program's own array.  End puts it back
+ * only if it is NULL, the physical workstation or still one of the open
+ * workstations (compared as a pointer); otherwise it leaves CUR_WORK as
+ * it finds it.
  *
  * Known limits: the waits of request-mode input (Bconin() in v_choice,
  * v_string, vrq_locator) and of the escapes' Bconout() are not bracketed;
@@ -63,8 +67,7 @@
 #if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
 typedef struct {
     WORD *pb[5];                /* CONTRL, INTIN, PTSIN, INTOUT, PTSOUT */
-    void *cur_work;
-    WORD cur_handle;            /* its handle, to see that it is still open */
+    void *cur_work;             /* compared, never read through */
     WORD flip_y;
     WORD ptsin[8];              /* the first four points of the copy of PTSIN */
     void *vwk;                  /* the bitmap workstation in use, or NULL */

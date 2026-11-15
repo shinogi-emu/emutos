@@ -174,7 +174,10 @@ static WORD calc_width(Vwk *vwk, WORD cnt, WORD *str)
     {
         if (outline_text_width(vwk, cnt, str, &width))
         {
-            /* set after the engine has been called: it can sleep, and another program can set it meanwhile */
+            /*
+             * set after the engine has been called: it can sleep, and
+             * another program can set it meanwhile
+             */
             measured_in_system_font = FALSE;
             return width;
         }
