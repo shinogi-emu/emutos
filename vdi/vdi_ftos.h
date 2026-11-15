@@ -12,6 +12,35 @@
  * 32-bit int) and implemented by vdi_ftos.c using GEMDOS.  Like the
  * functions in vdi_ft2.h, they take and return only LONG, ULONG and
  * pointers.
+ *
+ * vdi_ftos.c is the OS glue: another host may build the VDI without it,
+ * and supply these functions, ftmem_os_alloc() and ftmem_os_free() (see
+ * vdi_ftmem.h) itself.  What a host's glue must do:
+ *
+ * - vdi_ft_alloc(), vdi_ft_free() and vdi_ft_realloc() take their blocks
+ *   from vdi_ftmem.c (ftmem_alloc(), ftmem_free(), ftmem_realloc()),
+ *   which refuses memory close to the bottom of the font stack (see
+ *   VDI_FT_STACK_GUARD in vdi_ft2.h).  A host that does not use it must
+ *   make that check itself, with outline_stack_low(), or deeply nested
+ *   glyphs overflow the font stack.
+ * - The memory and file functions, and ftmem_os_alloc() and
+ *   ftmem_os_free(), are called on the font stack of vdi_outline.c, in
+ *   EmuTOS's own memory.  An OS call that sleeps there must not wake up
+ *   on it where the OS checks the stack pointer of a process (FreeMiNT
+ *   kills a process whose stack pointer is below its own kernel stack
+ *   when it wakes up): vdi_ftos.c makes its GEMDOS calls under MiNT or
+ *   MagiC on the stack the VDI call came in on, below where that call
+ *   stands (outline_caller_stack(), see vdi_defs.h).  Under a
+ *   single-tasking GEMDOS nothing sleeps.
+ * - What can sleep: the file and folder calls of vdi_font_file_load()
+ *   and vdi_font_dir_scan(), and vdi_yield().  The memory calls behind
+ *   ftmem_os_alloc() and ftmem_os_free() (Mxalloc() and Mfree() through
+ *   vdi_kept.c here) stay on the font stack, and must not sleep: they do
+ *   not under FreeMiNT or MagiC.
+ * - Every OS call that can sleep is bracketed by vdi_sleep_begin() and
+ *   vdi_sleep_end() (see vdi_sleep.h), and keeps nothing in statics.
+ * - vdi_caller_is_system() and vdi_yield() are called off the font stack,
+ *   by vdi_outline.c and vdi_nvdi.c (16-bit int code).
  */
 
 #ifndef VDI_FTOS_H

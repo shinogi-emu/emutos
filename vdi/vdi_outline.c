@@ -52,6 +52,7 @@
 #include "biosdefs.h"
 #include "vdi_ft2.h"
 #include "vdi_ftos.h"
+#include "vdi_ftmem.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 
@@ -100,14 +101,14 @@ static VdiOutlineFont unsized;
  * faces was measured to use 18.5 KB of it, and a CFF glyph built of two
  * others (seac) about 35 KB.
  *
- * FreeType does not bound such nesting, so vdi_ft_alloc() gives nothing
- * to a call that comes within VDI_FT_STACK_GUARD bytes of the bottom (see
- * vdi_ft2.h and outline_stack_low()).  Should a call still go past the
- * bottom, it overwrites the canary below it, which is checked after every
- * call: the engine is then turned off for good, as nothing it holds can
- * be trusted.  The flags are kept above the stack, out of an overflow's
- * reach, and the canary and a scratch buffer keep what lies below the
- * stack (the allocator's state) at a distance.
+ * FreeType does not bound such nesting, so the allocator (vdi_ftmem.c)
+ * gives nothing to a call that comes within VDI_FT_STACK_GUARD bytes of the
+ * bottom (see vdi_ft2.h and outline_stack_low()).  Should a call still go
+ * past the bottom, it overwrites the canary below it, which is checked
+ * after every call: the engine is then turned off for good, as nothing it
+ * holds can be trusted.  The flags are kept above the stack, out of an
+ * overflow's reach, and the canary and a scratch buffer keep what lies
+ * below the stack (the allocator's state) at a distance.
  *
  * The engine is not reentrant, and the font stack is used by one call at a
  * time.  Under EmuTOS's own GEMDOS nothing can come in while a call is on
