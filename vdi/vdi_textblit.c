@@ -773,18 +773,26 @@ const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg)
     case EXP16_TRANS:
         sa = 0;      sx = fg;     ca = 0xffff; cx = 0;
         e->masked = 1;
+        e->mod = 3;
+        e->inv = 0;
         break;
     case EXP16_XOR:
         sa = 0xffff; sx = 0xffff; ca = 0xffff; cx = 0;
         e->masked = 1;
+        e->mod = 3;
+        e->inv = 0;
         break;
     case EXP16_ERASE:
         sa = 0xffff; sx = 0;      ca = 0;      cx = bg;
         e->masked = 1;
+        e->mod = 0;         /* the pixels changed are those of the clear source bits */
+        e->inv = 0xffff;
         break;
     default:        /* EXP16_REPLACE */
         sa = 0;      sx = fg;     ca = 0;      cx = bg;
         e->masked = 0;
+        e->mod = 3;
+        e->inv = 0;
         break;
     }
 
@@ -830,6 +838,27 @@ const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg)
  */
 #define XP(t,off)   (*(const ULONG *)((const UBYTE *)(t) + (off)))
 #define PX(w,j)     (((w) >> (12 - 2*(j))) & 12)
+
+/*
+ * store px into the pixels whose bit is set in w (msb first) at d, a pair
+ * of bits at a time: where most pixels are drawn (erase) that costs less
+ * than testing each one
+ */
+#define STORE_BITS16(d, w, px)                          \
+    do {                                                \
+        UWORD *dp_ = (d);                               \
+        UWORD wp_ = (w);                                \
+        for ( ; wp_; wp_ <<= 2, dp_ += 2)               \
+        {                                               \
+            if (wp_ & 0xc000)                           \
+            {                                           \
+                if (wp_ & 0x8000)                       \
+                    dp_[0] = (px);                      \
+                if (wp_ & 0x4000)                       \
+                    dp_[1] = (px);                      \
+            }                                           \
+        }                                               \
+    } while(0)
 
 void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
                     LONG sstep, LONG dstep, const struct expand16 *e)
@@ -886,55 +915,47 @@ void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WO
 }
 
 void expand_small16_masked(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
-                    LONG sstep, LONG dstep, const struct expand16 *e)
+                           LONG sstep, LONG dstep, const struct expand16 *e)
 {
-    const ULONG *xt = e->x;
-    const ULONG *at = e->a;
-    UWORD a0 = (UWORD)at[0], a1 = (UWORD)at[3];
-    UWORD x0 = (UWORD)xt[0], x1 = (UWORD)xt[3];
+    UWORD px = (UWORD)e->x[e->mod];
+    UWORD keep = (UWORD)(0xffffU << (16 - width));
+    UWORD inv = e->inv;
     UWORD w;
-    WORD lead = ((ULONG)dst & 2) ? 1 : 0;
-    WORD pairs = (width - lead) >> 1;
-    WORD trail = (width - lead) & 1;
-    ULONG *l;
     UWORD *d;
+    WORD n;
 
+    /*
+     * only the pixels the mode changes are visited, by testing bits, not
+     * through the pair table: where branches are cheap and stores are not
+     * (QEMU), that is the faster way
+     */
     for ( ; rows > 0; rows--)
     {
-        w = *src << bit;
+        w = (*src << bit) ^ inv;
         d = dst;
-        if (lead)
+        if (e->a[e->mod])           /* xor */
         {
-            *d = (*d & ((w & 0x8000) ? a1 : a0)) ^ ((w & 0x8000) ? x1 : x0);
-            d++;
-            w <<= 1;
+            for (w &= keep; w; w <<= 1, d++)
+            {
+                if (w & 0x8000)
+                    *d = ~*d;
+            }
         }
-        l = (ULONG *)d;
-        switch(pairs) {
-        case 8: l[7] = (l[7] & XP(at, (w << 2) & 12)) ^ XP(xt, (w << 2) & 12);
-        /* fall through */
-        case 7: l[6] = (l[6] & XP(at, PX(w,6))) ^ XP(xt, PX(w,6));
-        /* fall through */
-        case 6: l[5] = (l[5] & XP(at, PX(w,5))) ^ XP(xt, PX(w,5));
-        /* fall through */
-        case 5: l[4] = (l[4] & XP(at, PX(w,4))) ^ XP(xt, PX(w,4));
-        /* fall through */
-        case 4: l[3] = (l[3] & XP(at, PX(w,3))) ^ XP(xt, PX(w,3));
-        /* fall through */
-        case 3: l[2] = (l[2] & XP(at, PX(w,2))) ^ XP(xt, PX(w,2));
-        /* fall through */
-        case 2: l[1] = (l[1] & XP(at, PX(w,1))) ^ XP(xt, PX(w,1));
-        /* fall through */
-        case 1: l[0] = (l[0] & XP(at, PX(w,0))) ^ XP(xt, PX(w,0));
-        /* fall through */
-        default:
-            break;
-        }
-        if (trail)
+        else if (inv)               /* erase: most pixels are drawn */
         {
-            d += pairs << 1;
-            w <<= (pairs << 1);
-            *d = (*d & ((w & 0x8000) ? a1 : a0)) ^ ((w & 0x8000) ? x1 : x0);
+            for (n = width; n > 0; n--, w <<= 1, d++)
+            {
+                if (w & 0x8000)
+                    *d = px;
+            }
+        }
+        else                        /* transparent: the set pixels */
+        {
+            for (w &= keep; w; w <<= 1, d++)
+            {
+                if (w & 0x8000)
+                    *d = px;
+            }
         }
         src = (const UWORD *)((const UBYTE *)src + sstep);
         dst = (UWORD *)((UBYTE *)dst + dstep);
@@ -1017,71 +1038,39 @@ static void expand_rows16_plain(UWORD *dst, const UWORD *src, WORD bit, LONG wid
 static void expand_rows16_masked(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
                     LONG sstep, LONG dstep, const struct expand16 *e)
 {
-    const ULONG *xt = e->x;
-    const ULONG *at = e->a;
-    UWORD x0 = (UWORD)xt[0], x1 = (UWORD)xt[3];
-    UWORD a0 = (UWORD)at[0], a1 = (UWORD)at[3];
+    UWORD pa = (UWORD)e->a[e->mod], px = (UWORD)e->x[e->mod];
+    UWORD inv = e->inv;
     const UWORD *s;
     UWORD w;
-    WORD lead = ((ULONG)dst & 2) ? 1 : 0;
-    WORD sb, n, pairs;
+    WORD n;
     LONG left;
-    ULONG *l;
-    UWORD *d;
+    UWORD *d, *dd;
 
     for ( ; rows > 0; rows--)
     {
         d = dst;
         s = src;
-        sb = bit;
         left = width;
-        if (lead)               /* long stores need an even word address */
-        {
-            w = *s << sb;
-            *d = (*d & ((w & 0x8000) ? a1 : a0)) ^ ((w & 0x8000) ? x1 : x0);
-            d++;
-            left--;
-            if (++sb > 15)
-            {
-                sb = 0;
-                s++;
-            }
-        }
-        l = (ULONG *)d;
         while (left > 0)        /* up to 16 pixels, i.e. one source word, a time */
         {
             n = (left < 16) ? (WORD)left : 16;
-            w = *s << sb;
-            if (sb && n > 16 - sb)
-                w |= s[1] >> (16 - sb);
+            w = *s << bit;
+            if (bit && n > 16 - bit)
+                w |= s[1] >> (16 - bit);
             s++;
-            pairs = n >> 1;
-            switch(pairs) {
-            case 8: l[7] = (l[7] & XP(at, (w << 2) & 12)) ^ XP(xt, (w << 2) & 12);
-            /* fall through */
-            case 7: l[6] = (l[6] & XP(at, PX(w,6))) ^ XP(xt, PX(w,6));
-            /* fall through */
-            case 6: l[5] = (l[5] & XP(at, PX(w,5))) ^ XP(xt, PX(w,5));
-            /* fall through */
-            case 5: l[4] = (l[4] & XP(at, PX(w,4))) ^ XP(xt, PX(w,4));
-            /* fall through */
-            case 4: l[3] = (l[3] & XP(at, PX(w,3))) ^ XP(xt, PX(w,3));
-            /* fall through */
-            case 3: l[2] = (l[2] & XP(at, PX(w,2))) ^ XP(xt, PX(w,2));
-            /* fall through */
-            case 2: l[1] = (l[1] & XP(at, PX(w,1))) ^ XP(xt, PX(w,1));
-            /* fall through */
-            case 1: l[0] = (l[0] & XP(at, PX(w,0))) ^ XP(xt, PX(w,0));
-            /* fall through */
-            default:
-                break;
-            }
-            l += pairs;
-            if (n & 1)          /* the last, odd pixel */
+            w = (w ^ inv) & (UWORD)(0xffffU << (16 - n));
+            dd = d;
+            if (pa)
             {
-                d = (UWORD *)l;
-                *d = (*d & (((UWORD)(w << (pairs << 1)) & 0x8000) ? a1 : a0)) ^ (((UWORD)(w << (pairs << 1)) & 0x8000) ? x1 : x0);
+                for ( ; w; w <<= 1, dd++)
+                {
+                    if (w & 0x8000)
+                        *dd = ~*dd;
+                }
             }
+            else
+                STORE_BITS16(dd, w, px);
+            d += n;
             left -= n;
         }
         src = (const UWORD *)((const UBYTE *)src + sstep);
@@ -1122,12 +1111,11 @@ static void direct_screen_blit16(WORD count, WORD *str)
     WORD src_width, dst_width;
     UBYTE *src, *p;
     UWORD *dst, *q, *palette;
+    UBYTE mask;
+    UWORD *save_dst;
 #if CONF_WITH_VDI_FASTDRAW
     const struct expand16 *e;
     WORD kind;
-#else
-    UBYTE mask;
-    UWORD *save_dst;
 #endif
 
     height = DELY;
@@ -1142,71 +1130,85 @@ static void direct_screen_blit16(WORD count, WORD *str)
     dst = get_start_addr16(DESTX, DESTY);
 
 #if CONF_WITH_VDI_FASTDRAW
-    /* an 8-pixel row is at most 4 long stores, built from the 8 source bits */
-    switch(mode) {
-    default:        /* WM_REPLACE */
-        kind = EXP16_REPLACE;
-        break;
-    case WM_TRANS:
-        kind = EXP16_TRANS;
-        break;
-    case WM_XOR:
-        kind = EXP16_XOR;
-        break;
-    case WM_ERASE:
-        kind = EXP16_ERASE;
-        bgcol = fgcol;      /* see below: erase draws the foreground */
-        break;
-    }
-    e = expand_tab16(kind, fgcol, bgcol);
-
-    for ( ; count > 0; count--)
+    /*
+     * an 8-pixel row is at most 4 long stores, built from the 8 source bits.
+     * erase keeps the loops below: under QEMU they are faster than any way
+     * of visiting the many pixels it draws
+     */
+    if (mode != WM_ERASE)
     {
-        src = (UBYTE *)FBASE + *str++;
-        if ((ULONG)dst & 2)         /* not a long word address: generic path */
-        {
-            for (n = height, p = src, q = dst; n > 0; n--)
-            {
-                UWORD row = (UWORD)*p << 8;
-
-                expand_rows16(q, &row, 0, 8, 1, 0, 0, e);
-                p += src_width;
-                q += dst_width;
-            }
+        switch(mode) {
+        default:        /* WM_REPLACE */
+            kind = EXP16_REPLACE;
+            break;
+        case WM_TRANS:
+            kind = EXP16_TRANS;
+            break;
+        case WM_XOR:
+            kind = EXP16_XOR;
+            break;
         }
-        else if (e->masked)
-        {
-            for (n = height, p = src, q = dst; n > 0; n--)
-            {
-                ULONG *l = (ULONG *)q;
-                UWORD b = *p;
+        e = expand_tab16(kind, fgcol, bgcol);
 
-                l[0] = (l[0] & e->a[b >> 6]) ^ e->x[b >> 6];
-                l[1] = (l[1] & e->a[(b >> 4) & 3]) ^ e->x[(b >> 4) & 3];
-                l[2] = (l[2] & e->a[(b >> 2) & 3]) ^ e->x[(b >> 2) & 3];
-                l[3] = (l[3] & e->a[b & 3]) ^ e->x[b & 3];
-                p += src_width;
-                q += dst_width;
-            }
-        }
-        else
+        for ( ; count > 0; count--)
         {
-            for (n = height, p = src, q = dst; n > 0; n--)
+            src = (UBYTE *)FBASE + *str++;
+            if ((ULONG)dst & 2)         /* not a long word address: generic path */
             {
-                ULONG *l = (ULONG *)q;
-                UWORD b = *p;
+                for (n = height, p = src, q = dst; n > 0; n--)
+                {
+                    UWORD row = (UWORD)*p << 8;
 
-                l[0] = e->x[b >> 6];
-                l[1] = e->x[(b >> 4) & 3];
-                l[2] = e->x[(b >> 2) & 3];
-                l[3] = e->x[b & 3];
-                p += src_width;
-                q += dst_width;
+                    expand_rows16(q, &row, 0, 8, 1, 0, 0, e);
+                    p += src_width;
+                    q += dst_width;
+                }
             }
+            else if (e->masked)
+            {
+                UWORD pa = (UWORD)e->a[e->mod], px = (UWORD)e->x[e->mod];
+
+                /* only the pixels the mode changes, tested bit by bit (see expand_small16_masked) */
+                for (n = height, p = src, q = dst; n > 0; n--)
+                {
+                    UWORD w = (UWORD)((*p ^ e->inv) & 0xff) << 8;
+                    UWORD *d;
+
+                    d = q;
+                    if (pa)
+                    {
+                        for ( ; w; w <<= 1, d++)
+                        {
+                            if (w & 0x8000)
+                                *d = ~*d;
+                        }
+                    }
+                    else
+                        STORE_BITS16(d, w, px);
+                    p += src_width;
+                    q += dst_width;
+                }
+            }
+            else
+            {
+                for (n = height, p = src, q = dst; n > 0; n--)
+                {
+                    ULONG *l = (ULONG *)q;
+                    UWORD b = *p;
+
+                    l[0] = e->x[b >> 6];
+                    l[1] = e->x[(b >> 4) & 3];
+                    l[2] = e->x[(b >> 2) & 3];
+                    l[3] = e->x[b & 3];
+                    p += src_width;
+                    q += dst_width;
+                }
+            }
+            dst += 8;
         }
-        dst += 8;
+        return;
     }
-#else
+#endif
     for ( ; count > 0; count--)
     {
         src = (UBYTE *)FBASE + *str++;
@@ -1272,7 +1274,6 @@ static void direct_screen_blit16(WORD count, WORD *str)
 
         dst = save_dst + 8;
     }
-#endif
 }
 #endif
 

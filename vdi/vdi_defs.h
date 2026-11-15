@@ -444,6 +444,8 @@ struct expand16 {
     ULONG a[4];         /* AND masks, pair of pixels (masked modes) */
     ULONG x[4];         /* XOR values, or the pair of pixels to store */
     WORD masked;        /* 0: store x[], else new = (old & a[]) ^ x[] */
+    WORD mod;           /* masked: the table entry of the pixels that change */
+    UWORD inv;          /* masked: XOR for the source bits (erase draws the clear ones) */
     WORD kind;          /* the key this table was built for: kind+1, */
     UWORD fg, bg;       /* and colours */
 };
