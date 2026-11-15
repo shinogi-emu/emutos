@@ -435,6 +435,31 @@ void vdi_vex_wheelv(Vwk *);         /* 134 */
 void direct_screen_blit(WORD count, WORD *str);
 #endif
 
+#if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
+/*
+ * 16-bit expands (monochrome source to colour pixels), two pixels a store:
+ * a pair of source bits selects one entry of each table (see expand_tab16())
+ */
+struct expand16 {
+    ULONG a[4];         /* AND masks, pair of pixels (masked modes) */
+    ULONG x[4];         /* XOR values, or the pair of pixels to store */
+    WORD masked;        /* 0: store x[], else new = (old & a[]) ^ x[] */
+    WORD kind;          /* the key this table was built for: kind+1, */
+    UWORD fg, bg;       /* and colours */
+};
+#define EXP16_REPLACE   0
+#define EXP16_TRANS     1
+#define EXP16_XOR       2
+#define EXP16_ERASE     3
+const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg);
+void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
+                          LONG sstep, LONG dstep, const struct expand16 *e);
+void expand_small16_masked(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
+                           LONG sstep, LONG dstep, const struct expand16 *e);
+void expand_rows16(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
+                   LONG sstep, LONG dstep, const struct expand16 *e);
+#endif
+
 #if HAVE_BEZIER
 /* not in original TOS */
 void v_bez_qual(Vwk *);

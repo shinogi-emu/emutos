@@ -1226,8 +1226,15 @@ static void vro_cpyfm16(struct blit_frame *info)
 static void vrt_cpyfm16(struct blit_frame *info)
 {
     UWORD *src, *dst, *p, *q;
-    WORD mode, src_width, src_off, dst_width, x, y;
-    UWORD *palette, src_mask, bit_mask, fgcol, bgcol;
+    WORD mode, src_width, src_off, dst_width;
+    UWORD *palette, fgcol, bgcol;
+#if CONF_WITH_VDI_FASTDRAW
+    const struct expand16 *e;
+    WORD kind;
+#else
+    WORD x, y;
+    UWORD src_mask, bit_mask;
+#endif
 
     mode = INTIN[0];
 
@@ -1240,7 +1247,9 @@ static void vrt_cpyfm16(struct blit_frame *info)
      */
     src_width = info->s_nxln / sizeof(WORD);/* width in words */
     src_off = info->s_xmin >> 4;            /* starting x offset in words */
+#if !CONF_WITH_VDI_FASTDRAW
     bit_mask = src_mask = 0x8000U >> (info->s_xmin&0x000f); /* starting bit mask */
+#endif
     p = src = info->s_form + ((LONG)info->s_ymin * src_width) + src_off;
 
     /*
@@ -1249,6 +1258,29 @@ static void vrt_cpyfm16(struct blit_frame *info)
     dst_width = info->d_nxln / sizeof(WORD);    /* in words */
     q = dst = info->d_form + ((LONG)info->d_ymin * dst_width) + info->d_xmin;
 
+#if CONF_WITH_VDI_FASTDRAW
+    switch(mode) {
+    case MD_ERASE:
+        kind = EXP16_ERASE;
+        break;
+    case MD_XOR:
+        kind = EXP16_XOR;
+        break;
+    case MD_TRANS:
+        kind = EXP16_TRANS;
+        break;
+    case MD_REPLACE:
+        kind = EXP16_REPLACE;
+        break;
+    default:
+        return;                     /* unsupported mode */
+    }
+    e = expand_tab16(kind, fgcol, bgcol);
+
+    expand_rows16(q, p, info->s_xmin & 0x000f, (LONG)info->s_xmax - info->s_xmin + 1,
+                  info->s_ymax - info->s_ymin + 1, (LONG)src_width * sizeof(WORD),
+                  (LONG)dst_width * sizeof(WORD), e);
+#else
     switch(mode) {
     case MD_ERASE:
         for (y = info->s_ymin; y <= info->s_ymax; y++) {
@@ -1323,6 +1355,7 @@ static void vrt_cpyfm16(struct blit_frame *info)
     default:
         return;                     /* unsupported mode */
     }
+#endif
 }
 #endif
 
