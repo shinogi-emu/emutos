@@ -337,8 +337,13 @@ void vdi_v_escape(Vwk * vwk)
 
     KDEBUG(("VDI esc, subfunction %u called\n",escfun));
 
-#if HAVE_BEZIER
+#if HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT
     if (escfun == 99) {
+#if CONF_WITH_VDI_NVDI_EXT
+        /* the call is intin[0] = 32 and the percentage in intin[2] */
+        if (CONTRL[3] < 3 || INTIN[0] != 32)
+            return;
+#endif
         v_bez_qual(vwk);        /* set quality of bezier curves */
         return;
     }

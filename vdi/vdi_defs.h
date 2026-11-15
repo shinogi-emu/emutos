@@ -22,6 +22,8 @@
 #endif
 
 #define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
+/* the quality of Beziers is kept (v_bez_qual) when they are drawn or when NVDI calls are */
+#define WITH_BEZ_QUAL (HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT)
 
 /*
  * The 16-bit VDI needs the 256-entry palette tables regardless of which
@@ -259,7 +261,7 @@ struct Vwk_ {
     VwkExt *ext;                /* 16 bit colour management */
 #endif
     /* newly added */
-#if HAVE_BEZIER
+#if WITH_BEZ_QUAL
     WORD bez_qual;              /* actual quality for bezier curves */
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS
@@ -526,6 +528,7 @@ void vdi_vs_bg_color(Vwk *);        /* 201 */
 void vdi_vq_fg_color(Vwk *);        /* 202 */
 void vdi_vq_bg_color(Vwk *);        /* 203 */
 void vdi_color_entry(Vwk *);        /* 204 */
+void vdi_vr_clip_rects(Vwk *);      /* 171 */
 void vdi_vs_x_color(Vwk *);         /* 207 */
 void vdi_vq_x_color(Vwk *);         /* 209 */
 
@@ -609,9 +612,12 @@ void vdi_vst_setsize(Vwk *);        /* 252 */
 void vdi_vst_skew(Vwk *);           /* 253 */
 #endif
 
+#if WITH_BEZ_QUAL
+void v_bez_qual(Vwk *);
+#endif
+
 #if HAVE_BEZIER
 /* not in original TOS */
-void v_bez_qual(Vwk *);
 void v_bez_control(Vwk *);
 void v_bez(Vwk *vwk, Point *points, int count);
 void v_bez_fill(Vwk *vwk, Point *points, int count);

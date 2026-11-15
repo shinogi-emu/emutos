@@ -83,3 +83,124 @@ WORD vdi_nearest_index(const WORD (*table)[3], WORD count, const WORD *rgb, LONG
     }
     return found;
 }
+
+
+/* a * b as hi:lo, the 32x32 product from 16-bit pieces */
+static void mul32(ULONG a, ULONG b, ULONG *hi, ULONG *lo)
+{
+    ULONG al = a & 0xffffUL, ah = a >> 16;
+    ULONG bl = b & 0xffffUL, bh = b >> 16;
+    ULONG ll = al * bl;
+    ULONG lh = al * bh;
+    ULONG hl = ah * bl;
+    ULONG hh = ah * bh;
+    ULONG mid = (ll >> 16) + (lh & 0xffffUL) + (hl & 0xffffUL);
+
+    *lo = (ll & 0xffffUL) | (mid << 16);
+    *hi = hh + (lh >> 16) + (hl >> 16) + (mid >> 16);
+}
+
+
+/* (a * b - less) / c, for c > 0 and a * b >= less; the quotient capped at 0x7fffffff */
+static LONG muldiv_less(ULONG a, ULONG b, ULONG c, ULONG less)
+{
+    ULONG hi, lo, rem, quo;
+    WORD i;
+
+    mul32(a, b, &hi, &lo);
+    if (lo < less)
+        hi--;
+    lo -= less;
+    if (hi == 0)
+        quo = lo / c;
+    else if (hi >= c)
+        return 0x7fffffffL;     /* too big for a LONG */
+    else
+    {
+        /* restoring division of hi:lo, hi < c <= 0x7fffffff */
+        rem = hi;
+        quo = 0;
+        for (i = 0; i < 32; i++)
+        {
+            rem = (rem << 1) | (lo >> 31);
+            lo <<= 1;
+            quo <<= 1;
+            if (rem >= c)
+            {
+                rem -= c;
+                quo |= 1;
+            }
+        }
+    }
+    return quo > 0x7fffffffUL ? 0x7fffffffL : (LONG)quo;
+}
+
+
+LONG muldiv32(LONG a, LONG b, LONG c)
+{
+    if (a < 0 || b <= 0 || c <= 0)
+        return 0;
+    return muldiv_less((ULONG)a, (ULONG)b, (ULONG)c, 0UL);
+}
+
+
+/* the span a1..a2 as a count, or 0 if it is upside down or over 0x7fffffff */
+static ULONG span(LONG a1, LONG a2)
+{
+    ULONG n;
+
+    if (a1 > a2)
+        return 0;
+    n = (ULONG)a2 - (ULONG)a1 + 1UL;   /* 0 for the full 32 bits: refused too */
+    return n > 0x7fffffffUL ? 0 : n;
+}
+
+
+/* [n1..n2] of a1..a2 onto b1..b2 (sa and sb their counts, both within a LONG) */
+static void bring_along(LONG a1, ULONG sa, LONG n1, LONG n2, LONG b1, ULONG sb,
+                        LONG *m1, LONG *m2)
+{
+    ULONG d1 = (ULONG)n1 - (ULONG)a1;           /* 0 to sa - 1 */
+    ULONG d2 = (ULONG)n2 - (ULONG)a1 + 1UL;     /* 1 to sa */
+    ULONG r1, r2;
+
+    if (sa == sb)
+    {
+        r1 = d1;
+        r2 = d2 - 1UL;
+    }
+    else
+    {
+        r1 = (ULONG)muldiv_less(d1, sb, sa, 0UL);
+        r2 = (ULONG)muldiv_less(d2, sb, sa, 1UL);
+    }
+    *m1 = (LONG)((ULONG)b1 + r1);
+    *m2 = (LONG)((ULONG)b1 + r2);
+}
+
+
+WORD clip_pair(const VDI_RECT32 *clip, const VDI_RECT32 *clipped_side,
+               const VDI_RECT32 *other, VDI_RECT32 *out_clipped,
+               VDI_RECT32 *out_other)
+{
+    VDI_RECT32 n;
+    ULONG sax, say, sbx, sby;
+
+    n.x1 = clipped_side->x1 > clip->x1 ? clipped_side->x1 : clip->x1;
+    n.y1 = clipped_side->y1 > clip->y1 ? clipped_side->y1 : clip->y1;
+    n.x2 = clipped_side->x2 < clip->x2 ? clipped_side->x2 : clip->x2;
+    n.y2 = clipped_side->y2 < clip->y2 ? clipped_side->y2 : clip->y2;
+    if (n.x1 > n.x2 || n.y1 > n.y2)
+        return 0;
+    sax = span(clipped_side->x1, clipped_side->x2);
+    say = span(clipped_side->y1, clipped_side->y2);
+    sbx = span(other->x1, other->x2);
+    sby = span(other->y1, other->y2);
+    if (!sax || !say || !sbx || !sby)
+        return 0;
+
+    *out_clipped = n;
+    bring_along(clipped_side->x1, sax, n.x1, n.x2, other->x1, sbx, &out_other->x1, &out_other->x2);
+    bring_along(clipped_side->y1, say, n.y1, n.y2, other->y1, sby, &out_other->y1, &out_other->y2);
+    return 1;
+}

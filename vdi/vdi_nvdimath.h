@@ -46,4 +46,33 @@ LONG vdi_color_dist(const WORD *a, const WORD *b);
 #define VDI_DIST_FAR    0x7fffffffL
 WORD vdi_nearest_index(const WORD (*table)[3], WORD count, const WORD *rgb, LONG *best);
 
+/*
+ * a * b / c, rounded down, with a 64-bit product: for a >= 0, b > 0, c > 0.
+ * A quotient over 0x7fffffff gives 0x7fffffff; an operand outside those
+ * limits gives 0.
+ */
+LONG muldiv32(LONG a, LONG b, LONG c);
+
+/* a rectangle with 32-bit corners, both ends inclusive */
+typedef struct
+{
+    LONG x1;
+    LONG y1;
+    LONG x2;
+    LONG y2;
+} VDI_RECT32;
+
+/*
+ * vr_clip_rects: clip the side 'clipped_side' of a pair of rectangles to
+ * 'clip' and map the clipped part onto 'other', in proportion where the
+ * two differ in size (the discrete, inclusive form of fVDI's bring_along:
+ * m1 = b1 + (n1 - a1) * sb / sa, m2 = b1 + ((n2 - a1 + 1) * sb - 1) / sa).
+ * Returns 1 and the two results, or 0, and nothing is set, when the
+ * clipped part is empty or when a rectangle is upside down or spans more
+ * than 0x7fffffff.
+ */
+WORD clip_pair(const VDI_RECT32 *clip, const VDI_RECT32 *clipped_side,
+               const VDI_RECT32 *other, VDI_RECT32 *out_clipped,
+               VDI_RECT32 *out_other);
+
 #endif /* VDI_NVDIMATH_H */
