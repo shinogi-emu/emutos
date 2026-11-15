@@ -1024,6 +1024,84 @@ static __attribute__((noinline)) void swblit_rect_common_solid(const VwkAttrib *
     else
         fs_rows(wrt_mode, addr, rows, centre, kl, sl, kc, sc, kr, sr, 4);
 }
+
+/*
+ * Replace mode with a one plane pattern of up to 16 rows (a patterned
+ * fill): the same long word stores, with the pattern row of every scan
+ * line taken into the plane pairs as it comes.  The end masks keep the
+ * pixels outside the rectangle, as in swblit_rect_common_solid().
+ */
+static inline __attribute__((always_inline))
+void fs_pat_rows(UWORD *addr, WORD y, WORD rows, WORD centre,
+                 const VwkAttrib *attr, const ULONG *cm,
+                 ULONG lm, ULONG rm, const WORD np)
+{
+    const LONG rowbytes = v_lin_wr;
+    const UWORD patmsk = attr->patmsk;
+    const UWORD *patptr = attr->patptr;
+    WORD n;
+
+    do
+    {
+        const UWORD pat = patptr[patmsk & y];
+        const ULONG pair = ((ULONG)pat << 16) | pat;
+        ULONG sc[4];
+        ULONG_ALIAS *l = (ULONG_ALIAS *)addr;
+
+        FS_EACH(sc[i] = pair & cm[i]);
+        FS_EACH(l[i] = (l[i] & ~lm) | (sc[i] & lm));
+        l += np;
+        for (n = centre; n > 0; n--, l += np)
+            FS_EACH(l[i] = sc[i]);
+        FS_EACH(l[i] = (l[i] & ~rm) | (sc[i] & rm));
+
+        addr = (UWORD *)((UBYTE *)addr + rowbytes);
+        y++;
+    } while (--rows > 0);
+}
+
+/* can swblit_rect_common_pat() draw this? */
+static inline __attribute__((always_inline)) BOOL fs_pat_usable(const VwkAttrib *attr, const UWORD *addr, WORD width, WORD height)
+{
+    WORD vp = v_planes;
+    WORD mode = attr->wrt_mode;
+
+    return (vp == 2 || vp == 4 || vp == 8)
+        && mode != WM_ERASE && mode != WM_XOR && mode != WM_TRANS      /* replace, as stock */
+        && !attr->multifill
+        && width >= 2 && height >= 2
+        && ((((LONG)addr) | (LONG)v_lin_wr) & 3) == 0;
+}
+
+static __attribute__((noinline)) void swblit_rect_common_pat(const VwkAttrib *attr, const Rect *rect,
+                                                  UWORD *addr, WORD width,
+                                                  UWORD leftmask, UWORD rightmask)
+{
+    const WORD np = v_planes >> 1;
+    const WORD rows = rect->y2 - rect->y1 + 1;
+    const WORD centre = width - 2;
+    const ULONG lm = ((ULONG)leftmask << 16) | leftmask;
+    const ULONG rm = ((ULONG)rightmask << 16) | rightmask;
+    ULONG cm[4];
+    UWORD color = attr->color;
+    WORD i;
+
+    /* a plane takes the pattern if its bit of the colour is set, else zeros */
+    for (i = 0; i < np; i++, color >>= 2)
+    {
+        UWORD c0 = -(WORD)(color & 1);
+        UWORD c1 = -(WORD)((color >> 1) & 1);
+
+        cm[i] = ((ULONG)c0 << 16) | c1;
+    }
+
+    if (np == 1)
+        fs_pat_rows(addr, rect->y1, rows, centre, attr, cm, lm, rm, 1);
+    else if (np == 2)
+        fs_pat_rows(addr, rect->y1, rows, centre, attr, cm, lm, rm, 2);
+    else
+        fs_pat_rows(addr, rect->y1, rows, centre, attr, cm, lm, rm, 4);
+}
 #endif /* CONF_WITH_VDI_FASTDRAW */
 
 
@@ -1061,6 +1139,10 @@ static void OPTIMIZE_SMALL swblit_rect_common(const VwkAttrib *attr, const Rect 
 #if CONF_WITH_VDI_FASTDRAW
     if (fs_usable(attr, b.addr, b.width, rect->y2 - rect->y1 + 1)) {
         swblit_rect_common_solid(attr, rect, b.addr, b.width, b.leftmask, b.rightmask);
+        return;
+    }
+    if (fs_pat_usable(attr, b.addr, b.width, rect->y2 - rect->y1 + 1)) {
+        swblit_rect_common_pat(attr, rect, b.addr, b.width, b.leftmask, b.rightmask);
         return;
     }
 #endif
