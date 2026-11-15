@@ -1255,6 +1255,14 @@ void vdi_vqt_name(Vwk * vwk)
     while (i++ < FONT_NAME_LEN)
         *int_out++ = 0;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    /* as NVDI: word 33 is 1 for a vector font (gemlib passes it on as name[32]) */
+    if (tmp_font->flags & F_OUTLINE_FONT)
+    {
+        INTOUT[33] = 1;
+        CONTRL[4] = 34;
+    }
+#endif
 }
 
 
