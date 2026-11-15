@@ -439,9 +439,12 @@ void vdi_v_opnvwk(Vwk * vwk)
     /*
      * v_opnbm() (sub-opcode 1 with the 20 intin it has), v_resize_bm() (2)
      * and v_open_bm() (3) are opcode 100 too; any other sub-opcode is
-     * v_opnvwk(), as fVDI has it
+     * v_opnvwk(), as fVDI has it.  v_opnvwk() always has 11 intin, and
+     * the other two have fewer (4 and 6): a binding that leaves CONTRL[5]
+     * stale (the DRI one does) must still open its workstation.
      */
-    if (CONTRL[5] == 2 || CONTRL[5] == 3 || (CONTRL[5] == 1 && CONTRL[3] >= 20)) {
+    if (((CONTRL[5] == 2 || CONTRL[5] == 3) && CONTRL[3] < 11) ||
+        (CONTRL[5] == 1 && CONTRL[3] >= 20)) {
         vdi_bitmap_open();
         return;
     }
@@ -479,6 +482,17 @@ void vdi_v_opnvwk(Vwk * vwk)
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
     vwk = (Vwk *)vdi_os_mxalloc(size, MX_SUPER);    /* may sleep: see vdi_sleep.h */
+    if (vwk != NULL && vwk_ptr[handle] != NULL) {
+        /* another program took the handle while this one slept: find another */
+        for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
+            if (!*p)
+                break;
+        }
+        if (handle > LAST_VDI_HANDLE) {
+            vdi_os_mfree(vwk);
+            vwk = NULL;
+        }
+    }
 #else
     vwk = (Vwk *)Mxalloc(size, MX_SUPER);
 #endif
