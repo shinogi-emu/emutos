@@ -1808,7 +1808,7 @@
 #ifndef CONF_WITH_VDI_FASTDRAW
 # if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) \
   || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) \
-  || defined(TARGET_LISA_FLOPPY)
+  || defined(TARGET_AMIGA_ROM) || defined(TARGET_LISA_FLOPPY)
 #  define CONF_WITH_VDI_FASTDRAW 0
 # else
 #  define CONF_WITH_VDI_FASTDRAW 1
@@ -1837,7 +1837,7 @@
  * friends).  It is left out of the targets short of ROM space.
  */
 #ifndef CONF_WITH_VDI_NVDI_EXT
-# if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) || defined(TARGET_LISA_FLOPPY)
+# if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) || defined(TARGET_AMIGA_ROM) || defined(TARGET_LISA_FLOPPY)
 #  define CONF_WITH_VDI_NVDI_EXT 0
 # else
 #  define CONF_WITH_VDI_NVDI_EXT 1
