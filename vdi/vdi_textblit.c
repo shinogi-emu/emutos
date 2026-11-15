@@ -834,7 +834,9 @@ const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg)
  * destination.  the source words read are the ones the pixels need, so a
  * caller's row stride can assume 1 + ((bit + width - 1) >> 4) words.
  * a pair of pixels is one long store; what does not change from row to row
- * (alignment, plain or masked) is decided once.
+ * (alignment, plain or masked) is decided once.  the alignment is that of
+ * the first row, so the row pitch must be a multiple of 4 bytes (it is, in
+ * every 16-bit mode).
  */
 #define XP(t,off)   (*(const ULONG *)((const UBYTE *)(t) + (off)))
 #define PX(w,j)     (((w) >> (12 - 2*(j))) & 12)
@@ -860,7 +862,7 @@ const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg)
         }                                               \
     } while(0)
 
-void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
+static void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
                     LONG sstep, LONG dstep, const struct expand16 *e)
 {
     const ULONG *xt = e->x;
@@ -914,7 +916,7 @@ void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WO
     }
 }
 
-void expand_small16_masked(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
+static void expand_small16_masked(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
                            LONG sstep, LONG dstep, const struct expand16 *e)
 {
     UWORD px = (UWORD)e->x[e->mod];
@@ -1519,7 +1521,7 @@ static void screen_blit16(LOCALVARS *vars)
     }
     e = expand_tab16(kind, fgcol, bgcol);
 
-    if (!skew && bit + vars->width <= 16)  /* a glyph within one source word */
+    if (!skew && vars->width > 0 && bit + vars->width <= 16)  /* a glyph within one source word */
     {
         if (e->masked)
             expand_small16_masked((UWORD *)dst, (const UWORD *)src, bit, vars->width, vars->height,

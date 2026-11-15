@@ -454,10 +454,6 @@ struct expand16 {
 #define EXP16_XOR       2
 #define EXP16_ERASE     3
 const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg);
-void expand_small16_plain(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
-                          LONG sstep, LONG dstep, const struct expand16 *e);
-void expand_small16_masked(UWORD *dst, const UWORD *src, WORD bit, WORD width, WORD rows,
-                           LONG sstep, LONG dstep, const struct expand16 *e);
 void expand_rows16(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
                    LONG sstep, LONG dstep, const struct expand16 *e);
 #endif
