@@ -1123,9 +1123,14 @@ void vdi_vqt_extent(Vwk * vwk)
 {
     WORD height, width;
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
     /* the width first: measuring sizes a face kept while the engine was busy */
     width = calc_width(vwk, CONTRL[3], INTIN);
     height = calc_height(vwk);
+#else
+    height = calc_height(vwk);
+    width = calc_width(vwk, CONTRL[3], INTIN);
+#endif
 #if CONF_WITH_VDI_OUTLINE_FONTS
     if (measured_in_system_font)        /* and so is its height */
     {
