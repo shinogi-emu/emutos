@@ -835,8 +835,11 @@ const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg)
  * caller's row stride can assume 1 + ((bit + width - 1) >> 4) words.
  * a pair of pixels is one long store; what does not change from row to row
  * (alignment, plain or masked) is decided once.  the alignment is that of
- * the first row, so the row pitch must be a multiple of 4 bytes (it is, in
- * every 16-bit mode).
+ * the first row: with a row pitch that is a multiple of 4 bytes (the screen
+ * in every 16-bit mode) every row's long stores are aligned.  an off-screen
+ * bitmap in a program's memory can have a pitch of 2 mod 4 bytes; every
+ * other row's long stores are then misaligned, which only costs time on the
+ * 68020 and later, the only processors with 16-bit screens.
  */
 #define XP(t,off)   (*(const ULONG *)((const UBYTE *)(t) + (off)))
 #define PX(w,j)     (((w) >> (12 - 2*(j))) & 12)
