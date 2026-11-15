@@ -673,17 +673,30 @@ static void vq_scrninfo(Vwk *vwk)
     out[0] = 2;             /* packed pixels, not planes            */
     out[1] = 2;             /* software CLUT: hi/true colour        */
     out[2] = v_planes;      /* bits per pixel                       */
+#if CONF_WITH_VDI_NVDI_EXT
+    out[3] = 1;             /* colours, high word: 65536 = 0x10000  */
+    out[4] = 0;             /* low word                             */
+#else
     out[3] = 0;             /* colours, high word of the longword   */
     out[4] = 0x8000;        /* 32768: five bits each of r, g and b  */
+#endif
     out[5] = BYTES_LIN;
     *(UBYTE **)&out[6] = v_bas_ad;
     out[8] = 5;             /* red                                  */
+#if CONF_WITH_VDI_NVDI_EXT
+    out[9] = 6;             /* green: six bits, as fVDI's 16_bit.sys */
+#else
     out[9] = 5;             /* green                                */
+#endif
     out[10] = 5;            /* blue                                 */
     out[11] = 0;            /* no alpha                             */
     out[12] = 0;            /* no genlock                           */
+#if CONF_WITH_VDI_NVDI_EXT
+    out[13] = 0;            /* no unused bit: 5-6-5                 */
+#else
     out[13] = 1;            /* one unused bit                       */
-    out[14] = 1;            /* Falcon bit order                     */
+#endif
+    out[14] = 1;            /* organisation, as fVDI's 16_bit.sys   */
     out[15] = 0;
 
     /*
@@ -693,10 +706,25 @@ static void vq_scrninfo(Vwk *vwk)
     for (i = 0; i < 5; i++)
     {
         out[16 + i] = 11 + i;   /* red   -> bits 11..15 */
+#if CONF_WITH_VDI_NVDI_EXT
+        out[32 + i] = 5 + i;    /* green -> bits 5..9 (10 below)  */
+#else
         out[32 + i] = 6 + i;    /* green -> bits 6..10  */
+#endif
         out[48 + i] = i;        /* blue  -> bits 0..4   */
     }
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * Green has six bits, 5..10, as in fVDI's 16_bit.sys. The VDI's own
+     * colour packing (set_color16, vdi_pack16) leaves bit 5 clear, which
+     * is a green with a zero least significant bit and so agrees with
+     * this description to within one step of six bits.
+     */
+    out[32 + 5] = 10;
+    /* no spare bit: out[96] stays -1 */
+#else
     out[96] = 5;                /* the spare bit        */
+#endif
 
     CONTRL[4] = 128;
     CONTRL[2] = 0;
