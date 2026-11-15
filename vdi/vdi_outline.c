@@ -110,6 +110,12 @@ static VdiOutlineFont unsized;
  * overflow's reach, and the canary and a scratch buffer keep whatever the
  * linker puts below the stack (other variables of the VDI) at a distance.
  *
+ * The top of the stack is on a multiple of 16 bytes (stack_top()), and the
+ * functions on the way from switch_stack() to the engine take LONGs and
+ * pointers, or words in pairs: a lone WORD argument would leave the stack
+ * pointer at 2 mod 4, and every long that the engine pushes misaligned,
+ * which costs a 68020 or later.
+ *
  * The engine is not reentrant, and the font stack is used by one call at a
  * time.  Under EmuTOS's own GEMDOS nothing can come in while a call is on
  * it.  Under a multitasking GEMDOS, a program can sleep in a file read that
@@ -577,7 +583,7 @@ static LONG listed_point(VdiOutlineFont *face, LONG point)
 /*
  * size the current outline face in points; FALSE if it cannot be used
  */
-static BOOL set_point(Vwk *vwk, WORD point)
+static BOOL set_point(Vwk *vwk, LONG point)
 {
     VdiOutlineFont *face = current_face(vwk), *f;
     LONG pt;
@@ -689,7 +695,7 @@ static BOOL set_size(Vwk *vwk, LONG width)
  * this sizes it at the height, scales the em by what that gave, and then
  * steps a pixel at a time.  Each size tried stays with the engine.
  */
-static BOOL set_height(Vwk *vwk, WORD height)
+static BOOL set_height(Vwk *vwk, LONG height)
 {
     VdiOutlineFont *face = current_face(vwk), *f, *g;
     LONG want = height, em;
@@ -785,7 +791,7 @@ static LONG effects_of(const Vwk *vwk)
  * vqt_extent(), v_gtext(): the width of a string, effects included;
  * negative if the engine cannot measure it
  */
-static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
+static LONG text_width(Vwk *vwk, LONG count, const WORD *str)
 {
     VdiOutlineFont *f = sized_font(vwk);
     LONG width;
@@ -802,7 +808,7 @@ static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
 
 
 /* vqt_width(): the advance of a character; negative if the engine cannot tell */
-static LONG char_width(Vwk *vwk, WORD ch)
+static LONG char_width(Vwk *vwk, LONG ch)
 {
     VdiOutlineFont *f = sized_font(vwk);
     LONG advance[4];
@@ -905,7 +911,7 @@ static void blit(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LO
  * turn a bitmap counterclockwise by 90, 180 or 270 degrees, into a new
  * one to give back to vdi_ft_free(); NULL if there is no memory
  */
-static UWORD *turn(const VdiOutlineBitmap *bm, WORD angle, LONG *new_wdwidth)
+static UWORD *turn(const VdiOutlineBitmap *bm, LONG angle, LONG *new_wdwidth)
 {
     LONG w = bm->width, h = bm->height, nw, nh, nwd, x, y;
     UWORD *out;
@@ -977,7 +983,7 @@ static UWORD *turn(const VdiOutlineBitmap *bm, WORD angle, LONG *new_wdwidth)
  * Returns -1, having drawn nothing, if the engine cannot render the
  * string or there is no memory to turn it.
  */
-static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD count,
+static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, LONG count,
                      LONG x, LONG y, LONG u0, LONG v0)
 {
     VdiOutlineBitmap bm;
@@ -1035,7 +1041,7 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
  *
  * Returns FALSE, having drawn nothing, if the engine cannot draw it.
  */
-static BOOL draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified,
+static BOOL draw_text(Vwk *vwk, LONG count, const WORD *str, LONG width, JUSTINFO *justified,
                       LONG x, LONG y)
 {
     VdiOutlineFont *f = sized_font(vwk);
