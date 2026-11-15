@@ -458,8 +458,12 @@ static void solid_run16(UWORD *p, LONG n, UWORD pix)
     ULONG pair, *q;
     LONG pairs;
 
-    if (n <= 0)
+    if (n < 8)                  /* short runs: the setup below costs more than the pixels */
+    {
+        for ( ; n > 0; n--)
+            *p++ = pix;
         return;
+    }
 
     if ((LONG)p & 2)
     {
@@ -470,7 +474,15 @@ static void solid_run16(UWORD *p, LONG n, UWORD pix)
     pair = ((ULONG)pix << 16) | pix;
     q = (ULONG *)p;
 
-    for (pairs = n >> 4; pairs > 0; pairs--)
+    for (pairs = n >> 5; pairs > 0; pairs--)
+    {
+        q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
+        q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
+        q[8] = pair; q[9] = pair; q[10] = pair; q[11] = pair;
+        q[12] = pair; q[13] = pair; q[14] = pair; q[15] = pair;
+        q += 16;
+    }
+    if (n & 16)
     {
         q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
         q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
@@ -492,8 +504,12 @@ static void not_run16(UWORD *p, LONG n)
     ULONG *q;
     LONG pairs;
 
-    if (n <= 0)
+    if (n < 8)                  /* short runs: the setup below costs more than the pixels */
+    {
+        for ( ; n > 0; n--, p++)
+            *p = ~*p;
         return;
+    }
 
     if ((LONG)p & 2)
     {
@@ -504,7 +520,15 @@ static void not_run16(UWORD *p, LONG n)
 
     q = (ULONG *)p;
 
-    for (pairs = n >> 4; pairs > 0; pairs--)
+    for (pairs = n >> 5; pairs > 0; pairs--)
+    {
+        q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
+        q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
+        q[8] = ~q[8]; q[9] = ~q[9]; q[10] = ~q[10]; q[11] = ~q[11];
+        q[12] = ~q[12]; q[13] = ~q[13]; q[14] = ~q[14]; q[15] = ~q[15];
+        q += 16;
+    }
+    if (n & 16)
     {
         q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
         q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
