@@ -1559,6 +1559,24 @@ WORD outline_set_height(Vwk *vwk, WORD height)
 }
 
 
+static LONG size_pending_call(void *p)
+{
+    sized_font(p);
+    return 0;
+}
+
+
+/*
+ * vqt_fontinfo(), vqt_attributes(): a face kept while the engine was busy
+ * (keep_pending()) is sized now, if the engine can, for its metrics
+ */
+void outline_size_pending(Vwk *vwk)
+{
+    if ((vwk->cur_font == &vwk->outline_head) && (vwk->outline_font == &unsized))
+        outline_on_stack(size_pending_call, vwk, NULL);
+}
+
+
 /*
  * vqt_extent(), v_justified(): the width of a string, effects included;
  * FALSE if the engine cannot measure it now, for the system font to

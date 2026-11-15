@@ -625,6 +625,7 @@ const Fonthead *outline_face_number(const Vwk *vwk, WORD n);
 BOOL outline_face_selected(const Vwk *vwk);
 WORD outline_set_point(Vwk *vwk, WORD point);
 WORD outline_set_height(Vwk *vwk, WORD height);
+void outline_size_pending(Vwk *vwk);
 BOOL outline_font_selected(const Vwk *vwk);
 VdiOutlineFont *outline_current(Vwk *vwk);
 BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width);
