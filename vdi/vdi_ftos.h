@@ -27,4 +27,11 @@ void  vdi_font_file_free(void *data);
 LONG  vdi_font_dir_scan(const char *dir,
                         void (*found)(const char *path, void *ctx), void *ctx);
 
+/*
+ * TRUE when the VDI is called by the operating system itself (under MiNT, a
+ * process the kernel started: its parent is process 0), which must not get
+ * a GDOS answer or start the font scan
+ */
+LONG  vdi_caller_is_system(void);
+
 #endif /* VDI_FTOS_H */

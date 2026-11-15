@@ -1196,11 +1196,11 @@ static LONG rescan_call(void *p)
  *
  * Not from a process the MiNT kernel started itself (XaAES's AES thread):
  * walking the folder through GEMDOS from there makes XaAES fail (see
- * vdi_kernel_process()).  A later call from a program does the scan.
+ * vdi_caller_is_system()).  A later call from a program does the scan.
  */
 void outline_scan(void)
 {
-    if (!scan_begun && !vdi_kernel_process())
+    if (!scan_begun && !vdi_caller_is_system())
         outline_on_stack(scan_fonts_call, NULL, NULL);
 }
 
@@ -1462,7 +1462,7 @@ LONG outline_rescan(char **dirs, LONG count)
     OutlineCall c;
     LONG added;
 
-    if (vdi_kernel_process())       /* no folder walks from there */
+    if (vdi_caller_is_system())     /* no folder walks from there */
         return 0;
 
     c.p = dirs;

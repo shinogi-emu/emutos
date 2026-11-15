@@ -162,15 +162,16 @@ static BOOL other_gemdos(void)
 
 
 /*
- * TRUE when the VDI is called by a process that the MiNT kernel started
- * itself (its parent is process 0), such as XaAES's AES thread
+ * TRUE when the VDI is called by the operating system itself: under MiNT,
+ * a process that the kernel started (its parent is process 0), such as
+ * XaAES's AES thread
  *
  * Such a process must not search folders through GEMDOS: when XaAES's AES
  * thread scanned the fonts folder during XaAES's start, XaAES then read
  * its resource file wrongly and gave up.  Reading files and starting
  * FreeType there did not do it; the Fsfirst()/Fsnext() walk alone did.
  */
-BOOL vdi_kernel_process(void)
+LONG vdi_caller_is_system(void)
 {
     ULONG value;
 

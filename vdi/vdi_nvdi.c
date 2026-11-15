@@ -37,6 +37,7 @@
 #include "lineavars.h"
 #include "biosext.h"
 #include "vdi_ft2.h"
+#include "vdi_ftos.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 
@@ -99,12 +100,12 @@ LONG vdi_gdos_version(void)
  * before outline fonts: XaAES asks during its start, from its AES thread,
  * and keeps to the system font then.  Under MiNT the VDI is called from
  * inside the kernel, so the caller's mode does not tell the system from a
- * program; the parent does (vdi_kernel_process()).  That thread could not
- * scan the fonts folder anyway (vdi_outline.c).
+ * program; the OS glue tells (vdi_caller_is_system()).  That thread could
+ * not scan the fonts folder anyway (vdi_outline.c).
  */
 LONG vdi_trap_gdos_version(void)
 {
-    if (vdi_kernel_process())
+    if (vdi_caller_is_system())
         return -2L;
 
     return vdi_gdos_version();
