@@ -76,4 +76,8 @@ FreeType needs 32-bit int, while the rest of EmuTOS is built with -mshort.
 The Makefile therefore builds these sources, and vdi/vdi_ft2.c and
 vdi/vdi_ftlibc.c, without -mshort.  The two halves only meet through the
 functions declared in vdi/vdi_ft2.h and vdi/vdi_ftos.h.
+The Makefile also limits the TrueType bytecode interpreter to 50000
+instructions a run (TT_CONFIG_OPTION_MAX_RUNNABLE_OPCODES, 1000000 by
+default), so that a font whose glyph programs loop cannot freeze a slow
+machine for long.
 tools/check-ft-abi.sh checks this.

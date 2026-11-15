@@ -1344,12 +1344,16 @@ obj/%.o : %.S
 # symbols are renamed in the objects (vdi/vdi_ftlibc.syms), so that nothing
 # here links to the 16-bit int functions of the same name.
 # tools/check-ft-abi.sh checks the result.
+# The TrueType bytecode interpreter stops after 50000 instructions a run
+# (FreeType's default is a million), so that a font whose glyph programs
+# loop cannot freeze a slow machine for long.
 #
 
 FT_CFLAGS = $(TOOLCHAIN_CFLAGS) $(CPUFLAGS) $(OPTFLAGS) $(OTHERFLAGS) \
             -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
             -Ifreetype/config -Ifreetype/include -Ivdi $(INC) \
             -DFT2_BUILD_LIBRARY \
+            -DTT_CONFIG_OPTION_MAX_RUNNABLE_OPCODES=50000L \
             '-DFT_CONFIG_OPTIONS_H=<ftoption.h>' \
             '-DFT_CONFIG_MODULES_H=<ftmodule.h>' \
             '-DFT_CONFIG_STANDARD_LIBRARY_H=<vdi_ftstdlib.h>'
