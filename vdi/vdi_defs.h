@@ -555,6 +555,7 @@ void vdi_vq_fg_color(Vwk *);        /* 202 */
 void vdi_vq_bg_color(Vwk *);        /* 203 */
 void vdi_color_entry(Vwk *);        /* 204 */
 void vdi_vr_clip_rects(Vwk *);      /* 171 */
+void vdi_vq_ext_devinfo(Vwk *);     /* 248 sub 4242 */
 
 /* vdi_xfer.c: vr_transfer_bits and the scaled vro_cpyfm and vrt_cpyfm */
 void vdi_vr_transfer_bits(Vwk *);   /* 170 */
@@ -595,6 +596,10 @@ UWORD vdi_bg_index(const Vwk *vwk, WORD kind);
 void direct_screen_blit(WORD count, WORD *str);
 #endif
 
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+void vdi_vqt_real_extent(Vwk *);    /* 240 sub 4200, in vdi_text.c */
+#endif
+
 #if CONF_WITH_VDI_OUTLINE_FONTS
 /* vdi_outline.c: outline fonts on the workstations */
 #define OUTLINE_FIRST_ID    5000    /* the ids of outline faces are above (SpeedoGDOS's rule) */
@@ -633,7 +638,6 @@ void text_size_out(Vwk *vwk);
 const Fonthead *text_font_number(Vwk *vwk, WORD n);
 WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font);
 void vdi_v_ftext(Vwk *);            /* 241 */
-void vdi_vqt_real_extent(Vwk *);    /* 240 sub 4200 */
 
 /* vdi_nvdi.c: the NVDI and SpeedoGDOS text calls, the GDOS answer, the NVDI cookie */
 void nvdi_add_cookie(void);

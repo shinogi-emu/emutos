@@ -165,6 +165,10 @@ static const struct vdi_xjmptab jmptb3[] = {
     { 203, VDI_ANY_SUBOP, 0,  6, vdi_vq_bg_color },
     { 204, VDI_ANY_SUBOP, 0,  0, vdi_color_entry },         /* sets 2, 6, 6 or 4 of intout */
     { 207, VDI_ANY_SUBOP, 0,  1, vdi_vs_x_color },
+#if !CONF_WITH_VDI_OUTLINE_FONTS
+    { 240, 4200,          4,  0, vdi_vqt_real_extent },     /* in vdi_text.c */
+#endif
+    { 248, 4242,          0,  2, vdi_vq_ext_devinfo },      /* in vdi_nvdimisc.c */
     { 209, VDI_ANY_SUBOP, 0,  6, vdi_vq_x_color },
 #endif
     { 0,   VDI_ANY_SUBOP, 0,  0, NULL }                     /* end of table */

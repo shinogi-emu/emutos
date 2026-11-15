@@ -289,6 +289,60 @@ static BOOL ok_for_direct_blit(Vwk *vwk, WORD width, JUSTINFO *justified)
 #endif
 
 /*
+ * the offsets that the text alignment gives: delh back from the point along
+ * the text (what the horizontal alignment takes off, plus the skew
+ * adjustments d1 and d2 of the vertical alignment) and delv up from the
+ * point to the top of the cells; used by output_text() and, with no effects,
+ * by vqt_real_extent()
+ */
+static __inline__ __attribute__((always_inline)) void text_alignment(Vwk *vwk, const Fonthead *fnt_ptr, WORD width,
+                           WORD d1, WORD d2, WORD outline, WORD *pdelh, WORD *pdelv)
+{
+    WORD delh, delv;
+
+    switch(vwk->h_align) {
+    default:                /* normally case 0: left justified */
+        delh = 0;
+        break;
+    case 1:
+        delh = width / 2 - outline;
+        break;
+    case 2:
+        delh = width - (outline * 2);
+        break;
+    }
+
+    switch(vwk->v_align) {
+    default:                /* normally case 0: baseline */
+        delv = fnt_ptr->top;
+        delh += d1;
+        break;
+    case 1:
+        delv = fnt_ptr->top - fnt_ptr->half;
+        delh += (fnt_ptr->half * d2) / fnt_ptr->top;
+        break;
+    case 2:
+        delv = fnt_ptr->top - fnt_ptr->ascent;
+        delh += (fnt_ptr->ascent * d2) / fnt_ptr->top;
+        break;
+    case 3:
+        delv = fnt_ptr->top + fnt_ptr->bottom;
+        break;
+    case 4:
+        delv = fnt_ptr->top + fnt_ptr->descent;
+        delh += (fnt_ptr->descent * d1) / fnt_ptr->bottom;
+        break;
+    case 5:
+        delv = 0;
+        delh += d1 + d2;
+        break;
+    }
+
+    *pdelh = delh;
+    *pdelv = delv;
+}
+
+/*
  * output specified text string
  *
  * 'width' is the pre-calculated width of the text on the screen;
@@ -375,43 +429,7 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
      */
     outline = (vwk->style & F_OUTLINE) ? OUTLINE_THICKNESS : 0;
 
-    switch(vwk->h_align) {
-    default:                /* normally case 0: left justified */
-        delh = 0;
-        break;
-    case 1:
-        delh = width / 2 - outline;
-        break;
-    case 2:
-        delh = width - (outline * 2);
-        break;
-    }
-
-    switch(vwk->v_align) {
-    default:                /* normally case 0: baseline */
-        delv = fnt_ptr->top;
-        delh += d1;
-        break;
-    case 1:
-        delv = fnt_ptr->top - fnt_ptr->half;
-        delh += (fnt_ptr->half * d2) / fnt_ptr->top;
-        break;
-    case 2:
-        delv = fnt_ptr->top - fnt_ptr->ascent;
-        delh += (fnt_ptr->ascent * d2) / fnt_ptr->top;
-        break;
-    case 3:
-        delv = fnt_ptr->top + fnt_ptr->bottom;
-        break;
-    case 4:
-        delv = fnt_ptr->top + fnt_ptr->descent;
-        delh += (fnt_ptr->descent * d1) / fnt_ptr->bottom;
-        break;
-    case 5:
-        delv = 0;
-        delh += d1 + d2;
-        break;
-    }
+    text_alignment(vwk, fnt_ptr, width, d1, d2, outline, &delh, &delv);
 
     /*
      * like Atari TOS, we try to ensure that any underline will fall within
@@ -1520,13 +1538,7 @@ static UWORD clc_dda(Vwk * vwk, UWORD act, UWORD req)
 }
 
 
-#if CONF_WITH_VDI_OUTLINE_FONTS
-/*
- * ===========================================================================
- * For the NVDI calls (vdi_nvdi.c)
- * ===========================================================================
- */
-
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
 static WORD clamp_to_word(LONG value)
 {
     if (value > 32767L)
@@ -1536,7 +1548,14 @@ static WORD clamp_to_word(LONG value)
 
     return (WORD)value;
 }
+#endif
 
+#if CONF_WITH_VDI_OUTLINE_FONTS
+/*
+ * ===========================================================================
+ * For the NVDI calls (vdi_nvdi.c)
+ * ===========================================================================
+ */
 
 /* the character and cell sizes of the current font, as vst_point() gives them */
 void text_size_out(Vwk *vwk)
@@ -1693,6 +1712,9 @@ void vdi_v_ftext(Vwk * vwk)
 }
 
 
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS */
+
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
 /*
  * vqt_real_extent() (240 sub 4200): the box that the string drawn by
  * v_gtext() at PTSIN[0],PTSIN[1] covers, with the text alignment and
@@ -1705,48 +1727,22 @@ void vdi_v_ftext(Vwk * vwk)
 void vdi_vqt_real_extent(Vwk * vwk)
 {
     const Fonthead *fnt_ptr;
-    LONG width, left, right, top, bottom, base, u, v, x, y;
-    WORD i;
+    LONG width, left, right, top, bottom, u, v, x, y;
+    WORD i, delh, delv;
 
     width = calc_width(vwk, CONTRL[3], INTIN);
-    fnt_ptr = measured_in_system_font ? def_font : vwk->cur_font;
+    fnt_ptr = vwk->cur_font;
+#if CONF_WITH_VDI_OUTLINE_FONTS
+    if (measured_in_system_font)
+        fnt_ptr = def_font;
+#endif
 
-    switch(vwk->h_align) {
-    case 1:
-        left = -(width / 2);
-        break;
-    case 2:
-        left = -width;
-        break;
-    default:
-        left = 0;
-        break;
-    }
+    /* the alignment of output_text(): the box starts delh back and delv up */
+    text_alignment(vwk, fnt_ptr, (WORD)width, 0, 0, 0, &delh, &delv);
+    left = -(LONG)delh;
     right = left + width;
-
-    /* the baseline, from the line of the text at PTSIN[1] */
-    switch(vwk->v_align) {
-    case 1:
-        base = fnt_ptr->half;
-        break;
-    case 2:
-        base = fnt_ptr->ascent;
-        break;
-    case 3:
-        base = -(LONG)fnt_ptr->bottom;
-        break;
-    case 4:
-        base = -(LONG)fnt_ptr->descent;
-        break;
-    case 5:
-        base = fnt_ptr->top;
-        break;
-    default:
-        base = 0;
-        break;
-    }
-    top = base - fnt_ptr->top;
-    bottom = base + fnt_ptr->bottom;
+    top = -(LONG)delv;
+    bottom = top + fnt_ptr->top + fnt_ptr->bottom;
 
     for (i = 0; i < 4; i++) {
         u = ((i == 0) || (i == 3)) ? left : right;
@@ -1773,4 +1769,4 @@ void vdi_vqt_real_extent(Vwk * vwk)
         PTSOUT[2*i+1] = clamp_to_word(PTSIN[1] + y);
     }
 }
-#endif /* CONF_WITH_VDI_OUTLINE_FONTS */
+#endif /* CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT */

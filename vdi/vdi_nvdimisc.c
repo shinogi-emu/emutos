@@ -1,5 +1,5 @@
 /*
- * vdi_nvdimisc.c - vr_clip_rects (171)
+ * vdi_nvdimisc.c - vr_clip_rects (171), vq_ext_devinfo (248 sub 4242)
  *
  * vr_clip_rects_by_dst (sub-function 0) and vr_clip_rects_by_src (1) and
  * their forms with 32-bit coordinates (2 and 3): clip one of a source and a
@@ -12,6 +12,8 @@
  * ptsout: the clipped source and destination, 4 or 8 points; intout[0] is
  * 1, or 0 when nothing is left (the pair then comes back as it went in) or
  * when the call is not one this knows (no points out then).
+ *
+ * vq_ext_devinfo: see the function.
  *
  * v_bez_qual (escape 5, sub-function 99) is in vdi_bezier.c.
  *
@@ -118,6 +120,48 @@ void vdi_vr_clip_rects(Vwk *vwk)
     put_rect(PTSOUT + step, wide, &dst);
     CONTRL[2] = wide ? 8 : 4;
     INTOUT[0] = ok;
+}
+
+/*
+ * vq_ext_devinfo (248 sub 4242): intin[0] is a device number and
+ * intin[1..6] the addresses of three buffers: the driver's folder (128
+ * bytes), its file name (13) and its name (32).  intout[0] says whether a
+ * driver exists, intout[1] whether it is open.
+ *
+ * Device 1, the screen, is EmuTOS's own VDI: it exists and is open, has no
+ * driver file, so its folder and file name are empty, and is named "EmuTOS
+ * VDI".  No other device has a driver here: 0 and 0, the buffers untouched.
+ * A call with fewer than 7 intin words reads nothing and answers 0 and 0.
+ * A buffer address of 0 is skipped.
+ */
+void vdi_vq_ext_devinfo(Vwk *vwk)
+{
+    static const char driver_name[] = "EmuTOS VDI";
+    char *path, *file, *name;
+    UWORD i;
+
+    (void)vwk;
+    CONTRL[2] = 0;
+    CONTRL[4] = 2;
+    INTOUT[0] = 0;
+    INTOUT[1] = 0;
+    if (CONTRL[3] < 7 || INTIN[0] != 1)
+        return;
+
+    path = (char *)get_long(INTIN + 1);
+    file = (char *)get_long(INTIN + 3);
+    name = (char *)get_long(INTIN + 5);
+    if (path)
+        path[0] = '\0';
+    if (file)
+        file[0] = '\0';
+    if (name)
+    {
+        for (i = 0; i < sizeof(driver_name); i++)     /* with its NUL: 11 bytes */
+            name[i] = driver_name[i];
+    }
+    INTOUT[0] = 1;
+    INTOUT[1] = 1;
 }
 
 #endif /* CONF_WITH_VDI_NVDI_EXT */
