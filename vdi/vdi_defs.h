@@ -20,6 +20,9 @@
 #if CONF_WITH_VDI_NVDI_EXT
 #include "vdi_nvdiext.h"
 #endif
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+#include "vdi_sleep.h"
+#endif
 
 #define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
 /* the quality of Beziers is kept (v_bez_qual) when they are drawn or when NVDI calls are */
@@ -554,9 +557,11 @@ void vdi_color_entry(Vwk *);        /* 204 */
 void vdi_vr_clip_rects(Vwk *);      /* 171 */
 
 /* vdi_bitmap.c: off-screen bitmaps */
-void vdi_bitmap_open(void);         /* 100 with a sub-opcode of 1, 2 or 3; others are refused */
+void vdi_bitmap_open(void);         /* 100 with sub-opcode 1 (20 intin), 2 or 3 */
 void vdi_bitmap_release(Vwk *vwk);  /* free the memory the VDI gave a bitmap */
 BOOL vdi_bitmap_swap_in(Vwk *vwk);  /* draw in the bitmap of vwk (screen globals) */
+void vdi_bitmap_sleep_begin(VdiSleepState *state);  /* see vdi_sleep.h */
+void vdi_bitmap_sleep_end(VdiSleepState *state);
 void vdi_bitmap_swap_out(WORD opcode);  /* back to the screen (after the call of opcode) */
 BOOL vdi_acts_on_screen(WORD opcode);   /* opcodes that ignore the swap */
 void vdi_vs_x_color(Vwk *);         /* 207 */

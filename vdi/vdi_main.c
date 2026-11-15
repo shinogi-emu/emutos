@@ -12,6 +12,7 @@
 #include "vdi_defs.h"
 #include "lineavars.h"
 #include "asm.h"
+#include "string.h"
 
 /* forward prototypes */
 void screen(void);
@@ -177,6 +178,44 @@ static const struct vdi_xjmptab *find_xjmptab(UWORD opcode, UWORD subop)
             return x;
 
     return NULL;
+}
+#endif /* WITH_JMPTB3 */
+
+
+#if WITH_JMPTB3
+/*
+ * Around an OS call that can sleep: see vdi_sleep.h.  What another
+ * program's VDI call would overwrite is kept in the caller's state.
+ */
+void vdi_sleep_begin(VdiSleepState *state)
+{
+    state->pb[0] = CONTRL;
+    state->pb[1] = INTIN;
+    state->pb[2] = PTSIN;
+    state->pb[3] = INTOUT;
+    state->pb[4] = PTSOUT;
+    state->cur_work = CUR_WORK;
+    state->flip_y = flip_y;
+    memcpy(state->ptsin, vdishare.main.local_ptsin, sizeof(state->ptsin));
+    state->vwk = NULL;
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_bitmap_sleep_begin(state);
+#endif
+}
+
+void vdi_sleep_end(VdiSleepState *state)
+{
+    CONTRL = state->pb[0];
+    INTIN = state->pb[1];
+    PTSIN = state->pb[2];
+    INTOUT = state->pb[3];
+    PTSOUT = state->pb[4];
+    CUR_WORK = (Vwk *)state->cur_work;
+    flip_y = state->flip_y;
+    memcpy(vdishare.main.local_ptsin, state->ptsin, sizeof(state->ptsin));
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_bitmap_sleep_end(state);
+#endif
 }
 #endif /* WITH_JMPTB3 */
 

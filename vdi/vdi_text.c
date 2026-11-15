@@ -1607,6 +1607,10 @@ WORD text_font_index(Vwk *vwk, WORD id, const Fonthead **font)
  * without an offset are left out.  The horizontal alignment takes the
  * text from the point to the end of the last character.
  */
+#define FTEXT_MAX_OFFS  ((2*MAX_VERTICES - SCRATCHBUF_SIZE/(WORD)sizeof(WORD)) / 2)
+static WORD ftext_offs[2*FTEXT_MAX_OFFS];
+static BOOL ftext_offs_busy;
+
 void vdi_v_ftext(Vwk * vwk)
 {
     WORD count = CONTRL[3], offsets = CONTRL[1] - 1, i, h_align;
@@ -1621,16 +1625,22 @@ void vdi_v_ftext(Vwk * vwk)
         count = offsets;
 
     /*
-     * PTSIN is the VDI's copy of the points, which shares vdishare with
-     * the default text scratch buffer (vdishare.deftxbuf): text_blt()
-     * writes there for effects, rotation and scaling.  The offsets are
-     * moved past it before anything is drawn; a string too long for the
-     * room left is cut short.
+     * The offsets are kept in a buffer of this call's own: PTSIN is the
+     * VDI's copy of the points, which shares vdishare with other things
+     * (the text scratch buffer, and what another program's VDI call puts
+     * there while this one sleeps in the outline font engine).  If
+     * another call is using the buffer, the string is drawn as v_gtext()
+     * draws it; a string too long for it is cut short.
      */
-    if (count > (2*MAX_VERTICES - SCRATCHBUF_SIZE/(WORD)sizeof(WORD)) / 2)
-        count = (2*MAX_VERTICES - SCRATCHBUF_SIZE/(WORD)sizeof(WORD)) / 2;
-    off = PTSIN + SCRATCHBUF_SIZE/sizeof(WORD);
-    memmove(off, PTSIN + 2, count * 2 * sizeof(WORD));
+    if (ftext_offs_busy) {
+        output_text(vwk, count, INTIN, -1, NULL);
+        return;
+    }
+    if (count > FTEXT_MAX_OFFS)
+        count = FTEXT_MAX_OFFS;
+    off = ftext_offs;
+    memcpy(off, PTSIN + 2, count * 2 * sizeof(WORD));
+    ftext_offs_busy = TRUE;
 
     if (vwk->h_align) {
         for (i = 0, width = 0; i < count; i++)
@@ -1666,6 +1676,7 @@ void vdi_v_ftext(Vwk * vwk)
         output_text(vwk, 1, &INTIN[i], -1, NULL);
     }
     vwk->h_align = h_align;
+    ftext_offs_busy = FALSE;
 }
 
 

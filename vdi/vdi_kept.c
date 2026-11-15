@@ -11,7 +11,7 @@
 #include "gemdos.h"
 #include "cookie.h"
 #include "vdi_kept.h"
-#include "vdi_swap.h"
+#include "vdi_sleep.h"
 
 #define COOKIE_MINT     0x4d694e54L     /* 'MiNT' */
 #define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
@@ -35,9 +35,9 @@
 static LONG os_mxalloc(LONG size, WORD mode)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.w  %2,-(%%sp)\n\t"
      "move.l  %1,-(%%sp)\n\t"
@@ -50,7 +50,7 @@ static LONG os_mxalloc(LONG size, WORD mode)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
@@ -58,9 +58,9 @@ static LONG os_mxalloc(LONG size, WORD mode)
 static void os_mfree(void *block)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.l  %1,-(%%sp)\n\t"
      "move.w  #0x49,-(%%sp)\n\t"
@@ -68,6 +68,7 @@ static void os_mfree(void *block)
      "addq.l  #6,%%sp"
     : "=r"(ret) : "r"(block)
     : "d1", "d2", "a0", "a1", "a2", "cc", "memory");
+    vdi_sleep_end(&sw);
 }
 
 /*

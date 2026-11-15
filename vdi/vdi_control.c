@@ -472,7 +472,17 @@ void vdi_v_opnvwk(Vwk * vwk)
     if (TRUECOLOR_MODE)
         size += sizeof(VwkExt); /* for simplicity, allocate them together */
 #endif
+#if CONF_WITH_VDI_NVDI_EXT
+    {
+        VdiSleepState sw;
+
+        vdi_sleep_begin(&sw);       /* the call may sleep */
+        vwk = (Vwk *)Mxalloc(size, MX_SUPER);
+        vdi_sleep_end(&sw);
+    }
+#else
     vwk = (Vwk *)Mxalloc(size, MX_SUPER);
+#endif
     if (vwk == NULL) {
         CONTRL[6] = 0;  /* No memory available, exit */
         return;
@@ -528,8 +538,16 @@ void vdi_v_clsvwk(Vwk * vwk)
 
 #if CONF_WITH_VDI_NVDI_EXT
     vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
-#endif
+    {
+        VdiSleepState sw;
+
+        vdi_sleep_begin(&sw);       /* the call may sleep */
+        Mfree(vwk);
+        vdi_sleep_end(&sw);
+    }
+#else
     Mfree(vwk);
+#endif
 }
 
 
@@ -621,9 +639,17 @@ void vdi_v_clswk(Vwk * vwk)
     for (handle = VDI_PHYS_HANDLE+1, p = vwk_ptr+handle; handle <= LAST_VDI_HANDLE; handle++, p++) {
         if (*p) {
 #if CONF_WITH_VDI_NVDI_EXT
-            vdi_bitmap_release(*p);
-#endif
+            {
+                VdiSleepState sw;
+
+                vdi_bitmap_release(*p);
+                vdi_sleep_begin(&sw);       /* the call may sleep */
+                Mfree(*p);
+                vdi_sleep_end(&sw);
+            }
+#else
             Mfree(*p);
+#endif
             *p = NULL;
         }
     }

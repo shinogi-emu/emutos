@@ -19,9 +19,9 @@
  * read them in between: the mouse cursor is not drawn (mouse_flag is
  * raised), and the other readers look at vdi_screen_swapped.
  *
- * The calls (opcode 100 with a sub-opcode, and 101 with sub-opcode 1 in
- * vdi_control.c) are the EdDI v_opnbm and the NVDI v_open_bm and
- * v_resize_bm, as fVDI does them.
+ * The calls (opcode 100 with sub-opcode 1, 2 or 3 in vdi_control.c) are
+ * the EdDI v_opnbm and the NVDI v_open_bm and v_resize_bm, as fVDI does
+ * them; v_clsbm is v_clsvwk, which frees the memory of a bitmap.
  */
 
 #include "emutos.h"
@@ -33,7 +33,7 @@
 #include "string.h"
 #include "tosvars.h"
 #include "gsxdefs.h"
-#include "vdi_swap.h"
+#include "vdi_sleep.h"
 
 #if CONF_WITH_VDI_NVDI_EXT
 
@@ -64,14 +64,21 @@ WORD vdi_bm_xres, vdi_bm_yres;  /* the size of the bitmap in use, less one */
 static void *bm_alloc(LONG size)
 {
     LONG block;
+    VdiSleepState sw;
 
+    vdi_sleep_begin(&sw);
     block = Mxalloc(size, (HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM) | MX_READABLE);
+    vdi_sleep_end(&sw);
     return block ? (void *)block : NULL;
 }
 
 static void bm_free(void *block)
 {
+    VdiSleepState sw;
+
+    vdi_sleep_begin(&sw);
     Mfree(block);
+    vdi_sleep_end(&sw);
 }
 
 
@@ -224,8 +231,6 @@ static void open_eddi(void)
     Vwk *base, *vwk;
     VwkBitmap bm;
 
-    if (CONTRL[3] < 20)
-        { refuse(); return; }
     mfdb = (FDB *)long_at(&CONTRL[7]);
     base = get_vwk_by_handle(CONTRL[6]);
     if (mfdb == NULL || base == NULL)
@@ -621,16 +626,18 @@ BOOL vdi_bitmap_swap_in(Vwk *vwk)
 
 void vdi_bitmap_swap_out(WORD opcode)
 {
+    if (saved.vwk == NULL)      /* nothing applied: the swap was not resumed */
+        return;
     undo(opcode == VS_CLIP_OP);
 }
 
 
 /*
- * Before an OS call that can sleep (see vdi_swap.h): the screen's
- * variables back, the state of the swap kept in the caller's.  Another
- * program's VDI call may run meanwhile, and may swap itself.
+ * Before an OS call that can sleep (vdi_sleep_begin() in vdi_main.c): the
+ * screen's variables back, the state of the swap kept in the caller's.
+ * Another program's VDI call may run meanwhile, and may swap itself.
  */
-void vdi_swap_pause(VdiSwapState *state)
+void vdi_bitmap_sleep_begin(VdiSleepState *state)
 {
     if (!vdi_screen_swapped)
     {
@@ -646,9 +653,11 @@ void vdi_swap_pause(VdiSwapState *state)
 /*
  * After it: the swap again, over whatever the screen variables are now
  * (the swap of a program that was asleep too was undone before it slept).
- * The workstation may have been closed meanwhile: then nothing is done.
+ * The workstation may have been closed meanwhile: then nothing is applied,
+ * vdi_screen_swapped and mouse_flag stay as they are, and swap_out() at
+ * the end of the call does nothing.
  */
-void vdi_swap_resume(VdiSwapState *state)
+void vdi_bitmap_sleep_end(VdiSleepState *state)
 {
     if (state->vwk && get_vwk_by_handle(state->handle) == (Vwk *)state->vwk &&
         ((Vwk *)state->vwk)->bm.addr)

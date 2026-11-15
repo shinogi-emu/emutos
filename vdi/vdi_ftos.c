@@ -14,7 +14,7 @@
 #include "vdi_ftos.h"
 #include "vdi_ftmem.h"
 #include "vdi_kept.h"
-#include "vdi_swap.h"
+#include "vdi_sleep.h"
 #include "vdi_defs.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
@@ -41,9 +41,9 @@
 static LONG gemdos_w(WORD fn)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
@@ -53,7 +53,7 @@ static LONG gemdos_w(WORD fn)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
@@ -61,9 +61,9 @@ static LONG gemdos_w(WORD fn)
 static LONG gemdos_ww(WORD fn, WORD a)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.w  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
@@ -74,7 +74,7 @@ static LONG gemdos_ww(WORD fn, WORD a)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
@@ -82,9 +82,9 @@ static LONG gemdos_ww(WORD fn, WORD a)
 static LONG gemdos_wl(WORD fn, LONG a)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.l  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
@@ -95,7 +95,7 @@ static LONG gemdos_wl(WORD fn, LONG a)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
@@ -103,9 +103,9 @@ static LONG gemdos_wl(WORD fn, LONG a)
 static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.w  %3,-(%%sp)\n\t"
      "move.l  %2,-(%%sp)\n\t"
@@ -117,7 +117,7 @@ static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
@@ -125,9 +125,9 @@ static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
 static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.w  %4,-(%%sp)\n\t"
      "move.w  %3,-(%%sp)\n\t"
@@ -140,7 +140,7 @@ static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
@@ -148,9 +148,9 @@ static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
 static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
 {
     register LONG ret __asm__("d0");
-    VdiSwapState sw;
+    VdiSleepState sw;
 
-    vdi_swap_pause(&sw);
+    vdi_sleep_begin(&sw);
     __asm__ volatile
     ("move.l  %4,-(%%sp)\n\t"
      "move.l  %3,-(%%sp)\n\t"
@@ -163,7 +163,7 @@ static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
     {
         LONG r = ret;
 
-        vdi_swap_resume(&sw);
+        vdi_sleep_end(&sw);
         return r;
     }
 }
