@@ -1090,11 +1090,110 @@ extern ULONG mcpu;              /* processor type, see bios/processor.h */
         src += sw; dst += dw; \
     }
 
-#define ROP_CASES(LOOP, BLK, BLK3) \
+#ifndef __mcoldfire__
+/*
+ * the plain copy, a function of its own for each direction so that the
+ * values of the loop stay in registers.  Backwards the pointers are kept
+ * one past the pair that is next, as the pre-decrement moves want them,
+ * so no row has to move them to the other convention and back.
+ */
+static __attribute__((noinline)) void copy16_fwd(UWORD *src, UWORD *dst, LONG sw, LONG dw,
+                                      WORD rows, LONG n8, LONG n1, WORD lead, WORD trail)
+{
+    const LONG swb = sw * 2, dwb = dw * 2;
+    const WORD cnt0 = (WORD)(n8 - 1);
+
+    while (rows-- > 0) {
+        UWORD_ALIAS *p = src, *q = dst;
+        ULONG_ALIAS *ps, *qs;
+
+        if (lead) {
+            *q = *p;
+            p++; q++;
+        }
+        ps = (ULONG_ALIAS *)p; qs = (ULONG_ALIAS *)q;
+        if (n8 > 0) {
+            WORD cnt = cnt0;
+            __asm__ __volatile__(
+                "1:\n" COPY8 " dbra %[c],1b\n"
+                : [s]"+a"(ps), [d]"+a"(qs), [c]"+d"(cnt)
+                : : "cc", "memory");
+        }
+        if (n1 > 0) {
+            /* up to seven pairs: jump into a row of seven moves */
+            WORD skip = (WORD)((7 - n1) * 2);
+            __asm__ __volatile__(
+                "jmp (2f,%%pc,%[o].w)\n"
+                "2:\n"
+                " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n"
+                " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n"
+                " move.l (%[s])+,(%[d])+\n" " move.l (%[s])+,(%[d])+\n"
+                " move.l (%[s])+,(%[d])+\n"
+                : [s]"+a"(ps), [d]"+a"(qs)
+                : [o]"d"(skip)
+                : "memory");
+        }
+        if (trail)
+            *(UWORD_ALIAS *)qs = *(UWORD_ALIAS *)ps;
+        src = (UWORD *)((UBYTE *)src + swb);
+        dst = (UWORD *)((UBYTE *)dst + dwb);
+    }
+}
+
+static __attribute__((noinline)) void copy16_back(UWORD *src, UWORD *dst, LONG sw, LONG dw,
+                                       WORD rows, LONG n8, LONG n1, WORD lead, WORD trail)
+{
+    const LONG swb = sw * 2, dwb = dw * 2;
+    const WORD cnt0 = (WORD)(n8 - 1);
+
+    while (rows-- > 0) {
+        UWORD_ALIAS *p = src, *q = dst;
+        ULONG_ALIAS *ps, *qs;
+
+        if (lead) {
+            *q = *p;
+            p--; q--;
+        }
+        ps = (ULONG_ALIAS *)(p + 1); qs = (ULONG_ALIAS *)(q + 1);
+        if (n8 > 0) {
+            WORD cnt = cnt0;
+            __asm__ __volatile__(
+                "1:\n" COPY8B " dbra %[c],1b\n"
+                : [s]"+a"(ps), [d]"+a"(qs), [c]"+d"(cnt)
+                : : "cc", "memory");
+        }
+        if (n1 > 0) {
+            WORD skip = (WORD)((7 - n1) * 2);
+            __asm__ __volatile__(
+                "jmp (2f,%%pc,%[o].w)\n"
+                "2:\n"
+                " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n"
+                " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n"
+                " move.l -(%[s]),-(%[d])\n" " move.l -(%[s]),-(%[d])\n"
+                " move.l -(%[s]),-(%[d])\n"
+                : [s]"+a"(ps), [d]"+a"(qs)
+                : [o]"d"(skip)
+                : "memory");
+        }
+        if (trail)
+            *(UWORD_ALIAS *)((UBYTE *)qs - 2) = *(UWORD_ALIAS *)((UBYTE *)ps - 2);
+        src = (UWORD *)((UBYTE *)src + swb);
+        dst = (UWORD *)((UBYTE *)dst + dwb);
+    }
+}
+#define LOOP_F_COPY(OP, BLK)    copy16_fwd(src, dst, sw, dw, rows, n8, n1, lead, trail);
+#define LOOP_B_COPY(OP, BLK)    copy16_back(src, dst, sw, dw, rows, n8, n1, lead, trail);
+#else
+#define LOOP_F_COPY(OP, BLK)    LOOP_F(OP, BLK)
+#define LOOP_B_COPY(OP, BLK)    LOOP_B(OP, BLK)
+#endif
+
+#define ROP_CASES(LOOP, BLK, BLK3) ROP_CASES3(LOOP, BLK, LOOP, BLK3)
+#define ROP_CASES3(LOOP, BLK, LOOP3, BLK3) \
     switch(mode) { \
     case BM_S_AND_D:    LOOP(ROP_1, BLK) break; \
     case BM_S_AND_NOTD: LOOP(ROP_2, BLK) break; \
-    case BM_S_ONLY:     LOOP(ROP_3, BLK3) break; \
+    case BM_S_ONLY:     LOOP3(ROP_3, BLK3) break; \
     case BM_NOTS_AND_D: LOOP(ROP_4, BLK) break; \
     case BM_S_XOR_D:    LOOP(ROP_6, BLK) break; \
     case BM_S_OR_D:     LOOP(ROP_7, BLK) break; \
@@ -1148,9 +1247,9 @@ static BOOL cpyfm16_long(UWORD *src, UWORD *dst, LONG sw, LONG dw,
     trail = n & 1;
 
     if (backward) {
-        ROP_CASES(LOOP_B, BLOCKS_B, BLOCKS_B_ROP_3)
+        ROP_CASES3(LOOP_B, BLOCKS_B, LOOP_B_COPY, BLOCKS_B_ROP_3)
     } else {
-        ROP_CASES(LOOP_F, BLOCKS_F, BLOCKS_F_ROP_3)
+        ROP_CASES3(LOOP_F, BLOCKS_F, LOOP_F_COPY, BLOCKS_F_ROP_3)
     }
     return TRUE;
 }
