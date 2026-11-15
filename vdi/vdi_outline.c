@@ -88,7 +88,6 @@ typedef struct {
 static OutlineFace **face_tab;  /* the faces, in the engine's order */
 static WORD face_count;
 static BOOL scanned;            /* the faces are ready */
-static VdiXfntInfo xfnt;        /* too large for the stack */
 
 /* the outline_font of a workstation whose face is still to be sized; not for the engine */
 static VdiOutlineFont unsized;
@@ -107,7 +106,8 @@ static VdiOutlineFont unsized;
  * bottom, it overwrites the canary below it, which is checked after every
  * call: the engine is then turned off for good, as nothing it holds can
  * be trusted.  The flags are kept above the stack, out of an overflow's
- * reach, and the canary keeps what lies below the stack at a distance.
+ * reach, and the canary and a scratch buffer keep what lies below the
+ * stack (the allocator's state) at a distance.
  *
  * The engine is not reentrant, and the font stack is used by one call at a
  * time.  Under EmuTOS's own GEMDOS nothing can come in while a call is on
@@ -130,9 +130,9 @@ static VdiOutlineFont unsized;
  *   vdi_sleep.h).  A static that code off the font stack can set must not
  *   be set before a call into the engine and read after it, as another
  *   program's call can set it meanwhile.  One that only code on the font
- *   stack sets may be: listed_point() sets xfnt and reads it across a
- *   call into the engine, and runs only on the font stack, which one call
- *   uses at a time.
+ *   stack sets may be: listed_point() sets font_stack.xfnt and reads it
+ *   across a call into the engine, and runs only on the font stack, which
+ *   one call uses at a time.
  */
 #define FONT_STACK_SIZE VDI_FT_STACK_SIZE   /* bytes */
 #define CANARY_LONGS    64                  /* below the stack */
@@ -140,6 +140,7 @@ static VdiOutlineFont unsized;
 #define BUSY_WAIT       (3 * CLOCKS_PER_SEC)    /* without progress, at most */
 
 static struct {
+    VdiXfntInfo xfnt;           /* listed_point()'s, too large for the stack */
     LONG canary[CANARY_LONGS];  /* never used, unless the stack overflows */
     LONG stack[FONT_STACK_SIZE / sizeof(LONG)];
     BOOL canary_set;
@@ -548,23 +549,24 @@ static VdiOutlineFont *sized_font(Vwk *vwk);
  */
 static LONG listed_point(VdiOutlineFont *face, LONG point)
 {
+    VdiXfntInfo *xfnt = &font_stack.xfnt;
     LONG best = 0;
     WORD i;
 
-    xfnt.pt_cnt = 0;
-    vdi_ft_xfntinfo(face, VDI_XFNT_SIZES, &xfnt);
-    if ((xfnt.pt_cnt <= 0) || (xfnt.pt_cnt > 64))
+    xfnt->pt_cnt = 0;
+    vdi_ft_xfntinfo(face, VDI_XFNT_SIZES, xfnt);
+    if ((xfnt->pt_cnt <= 0) || (xfnt->pt_cnt > 64))
         return point;
 
-    for (i = 0; i < xfnt.pt_cnt; i++)
-        if ((xfnt.pt_sizes[i] <= point) && (xfnt.pt_sizes[i] > best))
-            best = xfnt.pt_sizes[i];
+    for (i = 0; i < xfnt->pt_cnt; i++)
+        if ((xfnt->pt_sizes[i] <= point) && (xfnt->pt_sizes[i] > best))
+            best = xfnt->pt_sizes[i];
     if (!best)
     {
-        best = xfnt.pt_sizes[0];
-        for (i = 1; i < xfnt.pt_cnt; i++)
-            if (xfnt.pt_sizes[i] < best)
-                best = xfnt.pt_sizes[i];
+        best = xfnt->pt_sizes[0];
+        for (i = 1; i < xfnt->pt_cnt; i++)
+            if (xfnt->pt_sizes[i] < best)
+                best = xfnt->pt_sizes[i];
     }
 
     return (best > 0) ? best : point;
