@@ -506,9 +506,6 @@ BOOL outline_fonts_present(void);
 LONG outline_rescan(char **dirs, LONG count);
 const char *outline_font_dir(void);
 
-/* vdi_ftos.c: a kept block that every program can read */
-void *vdi_alloc_readable(LONG size);
-
 /* vdi_text.c, for the NVDI calls */
 void text_size_out(Vwk *vwk);
 const Fonthead *text_font_number(Vwk *vwk, WORD n);
@@ -531,6 +528,16 @@ void vdi_vst_arbpt(Vwk *);          /* 246 */
 void vdi_vqt_advance(Vwk *);        /* 247 */
 void vdi_vst_setsize(Vwk *);        /* 252 */
 void vdi_vst_skew(Vwk *);           /* 253 */
+#endif
+
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
+/* vdi_misc.c: memory that outlives the program making the VDI call */
+#define COOKIE_MINT     0x4d694e54L     /* 'MiNT' */
+#define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
+BOOL vdi_other_gemdos(void);
+void *vdi_alloc_kept(LONG size);
+void vdi_free_kept(void *block);
+void *vdi_alloc_readable(LONG size);    /* every program can read it */
 #endif
 
 #if HAVE_BEZIER

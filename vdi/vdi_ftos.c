@@ -23,20 +23,6 @@
 /* room for the longest path built while scanning */
 #define SCAN_PATH_LEN   128
 
-#define COOKIE_MINT     0x4d694e54L     /* 'MiNT' */
-#define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
-
-/*
- * Mxalloc() mode used under MiNT and MagiC: prefer TT-RAM, keep the block
- * when its owner terminates (0x4000) and make it accessible from supervisor
- * mode only (0x30), as fVDI does for its own memory.
- */
-#define MX_KEEP_MODE    (MX_PREFTTRAM | 0x4030)
-
-/* the same, but readable by every program (0x40), as fVDI's cookie data */
-#define MX_READABLE_MODE (MX_PREFTTRAM | 0x4040)
-
-
 /*
  * GEMDOS with a trap of its own
  *
@@ -142,24 +128,8 @@ static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
 #define os_close(handle)            gemdos_ww(0x3e, handle)
 #define os_read(handle, count, buf) gemdos_wwll(0x3f, handle, count, (LONG)(buf))
 #define os_seek(offset, handle, mode) gemdos_wlww(0x42, offset, handle, mode)
-#define os_mxalloc(size, mode)      gemdos_wlw(0x44, size, mode)
-#define os_mfree(block)             gemdos_wl(0x49, (LONG)(block))
 #define os_sfirst(spec, attr)       gemdos_wlw(0x4e, (LONG)(spec), attr)
 #define os_snext()                  gemdos_w(0x4f)
-
-/*
- * the memory is shared by all programs: the engine keeps its caches (sized
- * fonts, glyphs, font files, FreeType internals) until vdi_ft_term(), so it
- * must not be freed when the program that happened to make the VDI call
- * terminates.
- */
-static BOOL other_gemdos(void)
-{
-    ULONG value;
-
-    return cookie_get(COOKIE_MINT, &value) || cookie_get(COOKIE_MAGX, &value);
-}
-
 
 /*
  * TRUE when the VDI is called by the operating system itself: under MiNT,
@@ -183,56 +153,6 @@ LONG vdi_caller_is_system(void)
 
 
 /*
- * allocate a block that lives until it is freed, whoever frees it
- *
- * Under MiNT or MagiC the mode of Mxalloc() does it.  EmuTOS's own GEMDOS
- * records the calling process as owner of every block and frees them when
- * it terminates, so the block is given to the initial process: that is
- * the one running before the first program starts, and it never terminates.
- * Mfree() does not check the owner, so any process can free the block.
- */
-static void *alloc_kept(LONG size)
-{
-    void *block;
-
-    if (other_gemdos())
-    {
-        block = (void *)os_mxalloc(size, MX_KEEP_MODE);
-        if ((LONG)block <= 0)
-            return NULL;
-        return block;
-    }
-
-    block = (void *)os_mxalloc(size, MX_PREFTTRAM);
-    if ((LONG)block <= 0)
-        return NULL;
-    bdos_keep_block(block);
-
-    return block;
-}
-
-
-/*
- * a block that lives until it is freed and that every program can read,
- * for data programs are given a pointer to (the NVDI cookie): under MiNT
- * with memory protection, the engine's blocks are for supervisor mode only
- */
-void *vdi_alloc_readable(LONG size)
-{
-    void *block;
-
-    if (!other_gemdos())
-        return alloc_kept(size);    /* EmuTOS's own GEMDOS protects nothing */
-
-    block = (void *)os_mxalloc(size, MX_READABLE_MODE);
-    if ((LONG)block <= 0)
-        return NULL;
-
-    return block;
-}
-
-
-/*
  * the system blocks of the allocator (vdi_ftmem.c), which carves the
  * engine's small blocks from them
  */
@@ -241,13 +161,13 @@ void *ftmem_os_alloc(ULONG size)
     if (size > 0x7fffffffUL)
         return NULL;
 
-    return alloc_kept((LONG)size);
+    return vdi_alloc_kept((LONG)size);
 }
 
 
 void ftmem_os_free(void *block)
 {
-    os_mfree(block);
+    vdi_free_kept(block);
 }
 
 

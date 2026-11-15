@@ -115,7 +115,7 @@ static struct vdi_jmptab const jmptb2[] = {
 #define JMPTB2_ENTRIES  ARRAY_SIZE(jmptb2)
 
 /* the opcodes outside the two tables above are served when this is 1 */
-#define WITH_JMPTB3     CONF_WITH_VDI_OUTLINE_FONTS
+#define WITH_JMPTB3     (CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT)
 
 #if WITH_JMPTB3
 /* opcodes outside 1-39 and 100-134; first matching row wins */
@@ -151,6 +151,10 @@ static const struct vdi_xjmptab jmptb3[] = {
     { 252, VDI_ANY_SUBOP, 2,  1, vdi_vst_setsize },         /* also vst_setsize32 */
     { 253, VDI_ANY_SUBOP, 0,  1, vdi_vst_skew },
 #endif
+#if CONF_WITH_VDI_NVDI_EXT
+    /* the NVDI colour, raster and bitmap calls are added here */
+#endif
+    { 0,   VDI_ANY_SUBOP, 0,  0, NULL }                     /* end of table */
 };
 
 /* the row of jmptb3 for an opcode and sub-opcode; NULL if there is none */
@@ -158,7 +162,7 @@ static const struct vdi_xjmptab *find_xjmptab(UWORD opcode, UWORD subop)
 {
     const struct vdi_xjmptab *x;
 
-    for (x = jmptb3; x < jmptb3 + ARRAY_SIZE(jmptb3); x++)
+    for (x = jmptb3; x->op; x++)
         if ((x->opcode == opcode) && ((x->subop == VDI_ANY_SUBOP) || (x->subop == subop)))
             return x;
 

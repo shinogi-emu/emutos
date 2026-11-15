@@ -352,7 +352,7 @@ void osinit_before_xmaddalt(void)
     umem_init();
 }
 
-#if CONF_WITH_VDI_OUTLINE_FONTS
+#if CONF_WITH_VDI_OUTLINE_FONTS || CONF_WITH_VDI_NVDI_EXT
 /*
  * make the initial process the owner of a block
  *
