@@ -968,6 +968,8 @@ setup_info (struct raster_t *raster, struct blit_frame * info)
 
 #if CONF_WITH_VDI_16BIT
 #if CONF_WITH_VDI_FASTDRAW
+extern ULONG mcpu;              /* processor type, see bios/processor.h */
+
 /*
  * long word copies for vro_cpyfm16()
  *
@@ -1047,35 +1049,35 @@ setup_info (struct raster_t *raster, struct blit_frame * info)
 
 #define LOOP_F(OP, BLK) \
     while (rows-- > 0) { \
-        UWORD *p = src, *q = dst; \
-        ULONG *ps, *qs; \
+        UWORD_ALIAS *p = src, *q = dst; \
+        ULONG_ALIAS *ps, *qs; \
         LONG k; \
         if (lead) { \
             *q = (UWORD)OP(*p, *q); \
             p++; q++; \
         } \
-        ps = (ULONG *)p; qs = (ULONG *)q; \
+        ps = (ULONG_ALIAS *)p; qs = (ULONG_ALIAS *)q; \
         BLK(OP) \
         for (k = n1; k > 0; k--) PAIR_F(OP) \
         if (trail) \
-            *(UWORD *)qs = (UWORD)OP(*(UWORD *)ps, *(UWORD *)qs); \
+            *(UWORD_ALIAS *)qs = (UWORD)OP(*(UWORD_ALIAS *)ps, *(UWORD_ALIAS *)qs); \
         src += sw; dst += dw; \
     }
 
 #define LOOP_B(OP, BLK) \
     while (rows-- > 0) { \
-        UWORD *p = src, *q = dst; \
-        ULONG *ps, *qs; \
+        UWORD_ALIAS *p = src, *q = dst; \
+        ULONG_ALIAS *ps, *qs; \
         LONG k; \
         if (lead) { \
             *q = (UWORD)OP(*p, *q); \
             p--; q--; \
         } \
-        ps = (ULONG *)(p - 1); qs = (ULONG *)(q - 1); \
+        ps = (ULONG_ALIAS *)(p - 1); qs = (ULONG_ALIAS *)(q - 1); \
         BLK(OP) \
         for (k = n1; k > 0; k--) PAIR_B(OP) \
         if (trail) { \
-            UWORD *pp = (UWORD *)ps + 1, *qq = (UWORD *)qs + 1; \
+            UWORD_ALIAS *pp = (UWORD_ALIAS *)ps + 1, *qq = (UWORD_ALIAS *)qs + 1; \
             *qq = (UWORD)OP(*pp, *qq); \
         } \
         src += sw; dst += dw; \
@@ -1115,11 +1117,22 @@ static BOOL cpyfm16_long(UWORD *src, UWORD *dst, LONG sw, LONG dw,
 
     if (cols <= 0 || rows <= 0)
         return FALSE;
+#ifndef __mcoldfire__
+    /*
+     * a 68020 or later reads the source as long words wherever it lies
+     * (never outside the source pixels: the pairs are the ones the pixel loop
+     * reads); only the destination has to be long aligned
+     */
+    if (mcpu >= 20) {
+        if (sw & 1)
+            return cpyfm16_words(src, dst, sw, dw, mode, rows, cols, backward);
+    } else
+#endif
     if ((((LONG)src ^ (LONG)dst) & 2) || ((sw | dw) & 1))
         return cpyfm16_words(src, dst, sw, dw, mode, rows, cols, backward);
 
     /* the pixel that is not the first (forward) or last (backward) of its long word */
-    lead = backward ? !((LONG)dst & 2) : (WORD)(((LONG)dst & 2) != 0);
+    lead = backward ? !((LONG)src & 2) : (WORD)(((LONG)src & 2) != 0);
     if (lead)
         cols--;
     n = cols;
