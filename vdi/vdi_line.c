@@ -865,6 +865,10 @@ static void OPTIMIZE_SMALL swblit_rect_common16(const VwkAttrib *attr, const Rec
 /*
  * keep and set longs for the plane pairs of one column type (end mask m);
  * the first plane of a pair is the high word
+ *
+ * The keep/set values per write mode must agree with LP_SETUP/LP_PAIRS
+ * (the line drawing).  This fill treats an out-of-range mode as replace,
+ * as stock does; lp_usable() rejects such modes for lines.
  */
 static void fs_masks(WORD wrt_mode, UWORD pat, UWORD m, UWORD color,
                      WORD np, ULONG *keep, ULONG *set)
@@ -911,6 +915,10 @@ static void fs_masks(WORD wrt_mode, UWORD pat, UWORD m, UWORD color,
         if (np >= 4) { { const WORD i = 2; stmt; } { const WORD i = 3; stmt; } } \
     } while (0)
 
+/*
+ * The per write mode handling here must agree with fs_masks() and with
+ * LP_SETUP/LP_PAIRS (lines); out-of-range modes are replace, as stock.
+ */
 static inline __attribute__((always_inline))
 void fs_rows(WORD wrt_mode, UWORD *addr, WORD rows, WORD centre,
              const ULONG *kl, const ULONG *sl, const ULONG *kc, const ULONG *sc,
@@ -2319,6 +2327,10 @@ static BOOL lp_usable(WORD wrt_mode)
 }
 
 /*
+ * The per write mode values here must agree with fs_masks()/fs_rows()
+ * (the planar solid fill); that treats out-of-range modes as replace, as
+ * stock, which lp_usable() rejects for lines.
+ *
  * set up the colour masks (cmu) and, from the writing mode, ca/cs: the
  * pixels cleared are (m & ca) ^ (s & cs), oa/os: the pixels set are
  * (m & oa) ^ (s & os)
