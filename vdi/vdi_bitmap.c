@@ -33,6 +33,7 @@
 #include "string.h"
 #include "tosvars.h"
 #include "gsxdefs.h"
+#include "vdi_swap.h"
 
 #if CONF_WITH_VDI_NVDI_EXT
 
@@ -272,6 +273,8 @@ static void open_eddi(void)
     INTOUT[1] = bm.height - 1;
     INTOUT[3] = bm.pixw;
     INTOUT[4] = bm.pixh;
+    CONTRL[2] = 6;
+    CONTRL[4] = 45;
 }
 
 
@@ -469,7 +472,8 @@ static void resize_bm(void)
 
 
 /*
- * 100 with a sub-opcode other than 0: the bitmap calls.  CUR_WORK is left
+ * 100 with sub-opcode 1 (CONTRL[3] >= 20), 2 or 3: the bitmap calls (any
+ * other sub-opcode opens a workstation, as v_opnvwk).  CUR_WORK is left
  * pointing at a valid workstation, as screen() reads it afterwards.
  */
 void vdi_bitmap_open(void)
@@ -483,10 +487,8 @@ void vdi_bitmap_open(void)
         open_eddi();
     else if (sub == 2)
         resize_bm();
-    else if (sub == 3)
-        open_bm();
     else
-        refuse();
+        open_bm();
 }
 
 
@@ -515,8 +517,11 @@ BOOL vdi_acts_on_screen(WORD opcode)
 }
 
 
-/* what swap_in() replaced */
+#define VS_CLIP_OP      129
+
+/* the swap now in force: what it replaced, and the workstation drawn in */
 static struct {
+    Vwk *vwk;
     UBYTE *bas_ad;
     UWORD lin_wr;
     UWORD bytes_lin;
@@ -524,27 +529,42 @@ static struct {
     UWORD rez_vt;
     WORD pixw;
     WORD pixh;
+    UBYTE *screenpt;
+    WORD clip;                  /* the caller's clipping flag */
 } saved;
+
+WORD vdi_bm_caller_clip;        /* the same, for vq_extnd */
+
+#define BARRIER() __asm__ volatile ("" : : : "memory")
 
 
 /*
- * draw in the bitmap of vwk from now until vdi_bitmap_swap_out(): the
- * variables that describe the screen describe it.  The mouse cursor is not
- * drawn meanwhile.  DEV_TAB[0] and [1] stay the screen's (the mouse
- * clips to them): xres and yres give the bitmap's.
+ * Put the screen variables to the bitmap of vwk.
+ *
+ * The mouse cursor is not drawn meanwhile (mouse_flag), and the blink and
+ * the GPU presentation stand by (vdi_screen_swapped).  The VBL must not
+ * copy screenpt to v_bas_ad: it is zero while swapped.  DEV_TAB[0] and [1]
+ * stay the screen's (the mouse clips to them): xres and yres give the
+ * bitmap's.  A call that draws with clipping off would write past the
+ * bitmap: it clips to the bitmap instead (the rectangle of a workstation
+ * with clipping off is the whole bitmap).
+ *
+ * Known limit: interrupt code that a program installed (a cursor routine
+ * of vex_curv called by the mouse interrupt, vblqueue entries, dump_vec,
+ * vex_timv) and that reads the Line-A screen variables sees the bitmap's
+ * values during the call.
  */
-BOOL vdi_bitmap_swap_in(Vwk *vwk)
+static void apply(Vwk *vwk)
 {
     const VwkBitmap *bm = &vwk->bm;
-
-    if (bm->addr == NULL)
-        return FALSE;
 
     mouse_flag++;
     vdi_bm_xres = bm->width - 1;
     vdi_bm_yres = bm->height - 1;
     vdi_screen_swapped = 1;
+    BARRIER();
 
+    saved.vwk = vwk;
     saved.bas_ad = v_bas_ad;
     saved.lin_wr = v_lin_wr;
     saved.bytes_lin = BYTES_LIN;
@@ -552,7 +572,11 @@ BOOL vdi_bitmap_swap_in(Vwk *vwk)
     saved.rez_vt = V_REZ_VT;
     saved.pixw = DEV_TAB[3];
     saved.pixh = DEV_TAB[4];
+    saved.screenpt = screenpt;
+    saved.clip = vwk->clip;
+    vdi_bm_caller_clip = vwk->clip;
 
+    screenpt = NULL;
     v_bas_ad = bm->addr;
     v_lin_wr = bm->wbytes;
     BYTES_LIN = bm->wbytes;
@@ -560,13 +584,15 @@ BOOL vdi_bitmap_swap_in(Vwk *vwk)
     V_REZ_VT = bm->height;
     DEV_TAB[3] = bm->pixw;
     DEV_TAB[4] = bm->pixh;
-
-    return TRUE;
+    vwk->clip = TRUE;
 }
 
 
-void vdi_bitmap_swap_out(void)
+/* the screen's again; the caller's clipping flag, unless the call set it */
+static void undo(BOOL keep_clip)
 {
+    if (!keep_clip)
+        saved.vwk->clip = saved.clip;
     v_bas_ad = saved.bas_ad;
     v_lin_wr = saved.lin_wr;
     BYTES_LIN = saved.bytes_lin;
@@ -574,9 +600,59 @@ void vdi_bitmap_swap_out(void)
     V_REZ_VT = saved.rez_vt;
     DEV_TAB[3] = saved.pixw;
     DEV_TAB[4] = saved.pixh;
+    if (screenpt == NULL)       /* unless something set a new one meanwhile */
+        screenpt = saved.screenpt;
 
+    BARRIER();
     vdi_screen_swapped = 0;
     mouse_flag--;
+    saved.vwk = NULL;
+}
+
+
+BOOL vdi_bitmap_swap_in(Vwk *vwk)
+{
+    if (vwk->bm.addr == NULL)
+        return FALSE;
+    apply(vwk);
+    return TRUE;
+}
+
+
+void vdi_bitmap_swap_out(WORD opcode)
+{
+    undo(opcode == VS_CLIP_OP);
+}
+
+
+/*
+ * Before an OS call that can sleep (see vdi_swap.h): the screen's
+ * variables back, the state of the swap kept in the caller's.  Another
+ * program's VDI call may run meanwhile, and may swap itself.
+ */
+void vdi_swap_pause(VdiSwapState *state)
+{
+    if (!vdi_screen_swapped)
+    {
+        state->vwk = NULL;
+        return;
+    }
+    state->vwk = saved.vwk;
+    state->handle = saved.vwk->handle;
+    undo(FALSE);
+}
+
+
+/*
+ * After it: the swap again, over whatever the screen variables are now
+ * (the swap of a program that was asleep too was undone before it slept).
+ * The workstation may have been closed meanwhile: then nothing is done.
+ */
+void vdi_swap_resume(VdiSwapState *state)
+{
+    if (state->vwk && get_vwk_by_handle(state->handle) == (Vwk *)state->vwk &&
+        ((Vwk *)state->vwk)->bm.addr)
+        apply((Vwk *)state->vwk);
 }
 
 #endif /* CONF_WITH_VDI_NVDI_EXT */

@@ -1105,6 +1105,12 @@ void vdi_v_get_pixel(Vwk * vwk)
     const WORD x = PTSIN[0];       /* fetch x coord. */
     const WORD y = PTSIN[1];       /* fetch y coord. */
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /* outside an off-screen bitmap there is nothing to read: pixel 0 */
+    if (vdi_screen_swapped && (x < 0 || y < 0 || x > vdi_bm_xres || y > vdi_bm_yres))
+        pel = 0;
+    else
+#endif
     /* Get the requested pixel */
     pel = (WORD)pixelread(x,y);
 

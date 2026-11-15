@@ -259,7 +259,7 @@ void screen(void)
 
 #if CONF_WITH_VDI_NVDI_EXT
     if (swapped)
-        vdi_bitmap_swap_out();
+        vdi_bitmap_swap_out(opcode);
 #endif
 
 #if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT

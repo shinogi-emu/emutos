@@ -110,6 +110,7 @@
  * the mouse interrupt clips the pointer to them
  */
 extern WORD vdi_bm_xres, vdi_bm_yres;
+extern WORD vdi_bm_caller_clip;     /* the clipping flag the caller set on the bitmap */
 #define xres        (vdi_screen_swapped ? vdi_bm_xres : DEV_TAB[0])
 #define yres        (vdi_screen_swapped ? vdi_bm_yres : DEV_TAB[1])
 #else
@@ -556,7 +557,7 @@ void vdi_vr_clip_rects(Vwk *);      /* 171 */
 void vdi_bitmap_open(void);         /* 100 with a sub-opcode of 1, 2 or 3; others are refused */
 void vdi_bitmap_release(Vwk *vwk);  /* free the memory the VDI gave a bitmap */
 BOOL vdi_bitmap_swap_in(Vwk *vwk);  /* draw in the bitmap of vwk (screen globals) */
-void vdi_bitmap_swap_out(void);     /* back to the screen */
+void vdi_bitmap_swap_out(WORD opcode);  /* back to the screen (after the call of opcode) */
 BOOL vdi_acts_on_screen(WORD opcode);   /* opcodes that ignore the swap */
 void vdi_vs_x_color(Vwk *);         /* 207 */
 void vdi_vq_x_color(Vwk *);         /* 209 */

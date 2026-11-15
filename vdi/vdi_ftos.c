@@ -14,6 +14,7 @@
 #include "vdi_ftos.h"
 #include "vdi_ftmem.h"
 #include "vdi_kept.h"
+#include "vdi_swap.h"
 #include "vdi_defs.h"
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
@@ -40,20 +41,29 @@
 static LONG gemdos_w(WORD fn)
 {
     register LONG ret __asm__("d0");
+    VdiSwapState sw;
 
+    vdi_swap_pause(&sw);
     __asm__ volatile
     ("move.w  %1,-(%%sp)\n\t"
      "trap    #1\n\t"
      "addq.l  #2,%%sp"
     : "=r"(ret) : "r"(fn) : GEMDOS_CLOBBERS);
 
-    return ret;
+    {
+        LONG r = ret;
+
+        vdi_swap_resume(&sw);
+        return r;
+    }
 }
 
 static LONG gemdos_ww(WORD fn, WORD a)
 {
     register LONG ret __asm__("d0");
+    VdiSwapState sw;
 
+    vdi_swap_pause(&sw);
     __asm__ volatile
     ("move.w  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
@@ -61,13 +71,20 @@ static LONG gemdos_ww(WORD fn, WORD a)
      "addq.l  #4,%%sp"
     : "=r"(ret) : "r"(fn), "r"(a) : GEMDOS_CLOBBERS);
 
-    return ret;
+    {
+        LONG r = ret;
+
+        vdi_swap_resume(&sw);
+        return r;
+    }
 }
 
 static LONG gemdos_wl(WORD fn, LONG a)
 {
     register LONG ret __asm__("d0");
+    VdiSwapState sw;
 
+    vdi_swap_pause(&sw);
     __asm__ volatile
     ("move.l  %2,-(%%sp)\n\t"
      "move.w  %1,-(%%sp)\n\t"
@@ -75,13 +92,20 @@ static LONG gemdos_wl(WORD fn, LONG a)
      "addq.l  #6,%%sp"
     : "=r"(ret) : "r"(fn), "r"(a) : GEMDOS_CLOBBERS);
 
-    return ret;
+    {
+        LONG r = ret;
+
+        vdi_swap_resume(&sw);
+        return r;
+    }
 }
 
 static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
 {
     register LONG ret __asm__("d0");
+    VdiSwapState sw;
 
+    vdi_swap_pause(&sw);
     __asm__ volatile
     ("move.w  %3,-(%%sp)\n\t"
      "move.l  %2,-(%%sp)\n\t"
@@ -90,13 +114,20 @@ static LONG gemdos_wlw(WORD fn, LONG a, WORD b)
      "addq.l  #8,%%sp"
     : "=r"(ret) : "r"(fn), "r"(a), "r"(b) : GEMDOS_CLOBBERS);
 
-    return ret;
+    {
+        LONG r = ret;
+
+        vdi_swap_resume(&sw);
+        return r;
+    }
 }
 
 static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
 {
     register LONG ret __asm__("d0");
+    VdiSwapState sw;
 
+    vdi_swap_pause(&sw);
     __asm__ volatile
     ("move.w  %4,-(%%sp)\n\t"
      "move.w  %3,-(%%sp)\n\t"
@@ -106,13 +137,20 @@ static LONG gemdos_wlww(WORD fn, LONG a, WORD b, WORD c)
      "lea     10(%%sp),%%sp"
     : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c) : GEMDOS_CLOBBERS);
 
-    return ret;
+    {
+        LONG r = ret;
+
+        vdi_swap_resume(&sw);
+        return r;
+    }
 }
 
 static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
 {
     register LONG ret __asm__("d0");
+    VdiSwapState sw;
 
+    vdi_swap_pause(&sw);
     __asm__ volatile
     ("move.l  %4,-(%%sp)\n\t"
      "move.l  %3,-(%%sp)\n\t"
@@ -122,7 +160,12 @@ static LONG gemdos_wwll(WORD fn, WORD a, LONG b, LONG c)
      "lea     12(%%sp),%%sp"
     : "=r"(ret) : "r"(fn), "r"(a), "r"(b), "r"(c) : GEMDOS_CLOBBERS);
 
-    return ret;
+    {
+        LONG r = ret;
+
+        vdi_swap_resume(&sw);
+        return r;
+    }
 }
 
 #define os_setdta(dta)              gemdos_wl(0x1a, (LONG)(dta))

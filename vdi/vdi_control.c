@@ -431,8 +431,12 @@ void vdi_v_opnvwk(Vwk * vwk)
     Vwk **p;
 
 #if CONF_WITH_VDI_NVDI_EXT
-    /* v_opnbm(), v_resize_bm() and v_open_bm() are opcode 100 too; no other sub-opcode is known */
-    if (CONTRL[5] != 0) {
+    /*
+     * v_opnbm() (sub-opcode 1 with the 20 intin it has), v_resize_bm() (2)
+     * and v_open_bm() (3) are opcode 100 too; any other sub-opcode is
+     * v_opnvwk(), as fVDI has it
+     */
+    if (CONTRL[5] == 2 || CONTRL[5] == 3 || (CONTRL[5] == 1 && CONTRL[3] >= 20)) {
         vdi_bitmap_open();
         return;
     }
@@ -497,15 +501,6 @@ void vdi_v_opnvwk(Vwk * vwk)
 void vdi_v_clsvwk(Vwk * vwk)
 {
     WORD handle;
-
-#if CONF_WITH_VDI_NVDI_EXT
-    /*
-     * v_clsbm() is opcode 101 with sub-opcode 1 and closes bitmaps only;
-     * any sub-opcode but 0 and 1 is unknown
-     */
-    if (CONTRL[5] != 0 && (CONTRL[5] != 1 || vwk->bm.addr == NULL))
-        return;
-#endif
 
     /* vwk points to workstation to deallocate */
     handle = vwk->handle;
@@ -802,7 +797,12 @@ void vdi_vq_extnd(Vwk * vwk)
             *dst++ = 0;
 
         src = INQ_TAB;
+#if CONF_WITH_VDI_NVDI_EXT
+        /* what the caller set, not the clipping a call on a bitmap forces */
+        INQ_TAB[19] = vdi_screen_swapped ? vdi_bm_caller_clip : vwk->clip;
+#else
         INQ_TAB[19] = vwk->clip;      /* now update INQTAB */
+#endif
     }
 
     /* copy DEV_TAB or INQ_TAB to INTOUT */
