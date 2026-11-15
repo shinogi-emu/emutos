@@ -378,6 +378,10 @@ endif
 # it has to be added by hand.
 VDI_OUTLINE_FONTS := $(shell echo CONF_WITH_VDI_OUTLINE_FONTS | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
 
+# the NVDI colour, raster and bitmap calls (see CONF_WITH_VDI_NVDI_EXT in
+# include/config.h), evaluated the same way
+VDI_NVDI_EXT := $(shell echo CONF_WITH_VDI_NVDI_EXT | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
+
 ifeq (1,$(VDI_OUTLINE_FONTS))
 vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
 endif

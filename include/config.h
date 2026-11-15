@@ -1814,6 +1814,20 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_NVDI_EXT to 1 to add the NVDI colour, raster and
+ * off-screen bitmap calls to the VDI (v_setrgb(), vr_clip_rects_by_dst(),
+ * v_color2value() and its relatives, vr_transfer_bits(), v_opnbm() and
+ * friends).  It is left out of the targets short of ROM space.
+ */
+#ifndef CONF_WITH_VDI_NVDI_EXT
+# if defined(TARGET_192) || defined(TARGET_256) || defined(TARGET_CART) || defined(TARGET_FLOPPY) || defined(TARGET_AMIGA_FLOPPY) || defined(TARGET_LISA_FLOPPY)
+#  define CONF_WITH_VDI_NVDI_EXT 0
+# else
+#  define CONF_WITH_VDI_NVDI_EXT 1
+# endif
+#endif
+
+/*
  * The VDI functions v_fillarea(), v_pline(), v_pmarker() can handle
  * up to MAX_VERTICES coordinates (MAX_VERTICES/2 points).
  * TOS2 allows 512 vertices, TOS3/TOS4 allow 1024.
