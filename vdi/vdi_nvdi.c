@@ -116,7 +116,7 @@ LONG vdi_trap_gdos_version(void)
 /* the NVDI cookie, if no VDI has added one yet; called by each workstation opened */
 void nvdi_add_cookie(void)
 {
-    NvdiCookie *c = own_cookie;
+    NvdiCookie *c;
     ULONG value;
 
     if (cookie_get(COOKIE_NVDI, &value))
@@ -126,21 +126,31 @@ void nvdi_add_cookie(void)
      * Programs read it in user mode, so it lives in a block that is kept
      * and that every program can read, as fVDI's (Mxalloc mode 0x4043)
      */
-    if (!c)
+    if (!own_cookie)
     {
         c = vdi_alloc_readable(sizeof(NvdiCookie));
         if (!c)
             return;
-        bzero(c, sizeof(NvdiCookie));
-        c->version = NVDI_VERSION;
-        c->date = NVDI_DATE;
-        c->flags = NVDI_FLAG_GDOS;
-        ULONG_AT((UBYTE *)c + NVDI_SCAN_FONTS) = (ULONG)nvdi_scan_fonts_entry;
-        ULONG_AT((UBYTE *)c + NVDI_GET_FONT_DIR) = (ULONG)nvdi_get_font_dir_entry;
-        own_cookie = c;
+        /* that can sleep, and another program's workstation may have made one meanwhile */
+        if (own_cookie)
+            vdi_free_kept(c);
+        else
+        {
+            bzero(c, sizeof(NvdiCookie));
+            c->version = NVDI_VERSION;
+            c->date = NVDI_DATE;
+            c->flags = NVDI_FLAG_GDOS;
+            ULONG_AT((UBYTE *)c + NVDI_SCAN_FONTS) = (ULONG)nvdi_scan_fonts_entry;
+            ULONG_AT((UBYTE *)c + NVDI_GET_FONT_DIR) = (ULONG)nvdi_get_font_dir_entry;
+            own_cookie = c;
+        }
+
+        /* and added it, or another VDI its own */
+        if (cookie_get(COOKIE_NVDI, &value))
+            return;
     }
 
-    cookie_add(COOKIE_NVDI, (ULONG)c);
+    cookie_add(COOKIE_NVDI, (ULONG)own_cookie);
 }
 
 
