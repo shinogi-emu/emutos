@@ -343,7 +343,7 @@ void vdi_v_setrgb(Vwk *vwk)
     COLOR_RGB c;
     WORD kind = CONTRL[5];
 
-    if (kind < 0 || kind >= VDI_COL_KINDS)
+    if (kind < 0 || kind >= VDI_COL_RASTER)     /* 0-3 only, as fVDI */
         return;
     c.reserved = 0;
     c.red = vdi_to_rgb16(INTIN[0]);

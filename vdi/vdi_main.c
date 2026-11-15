@@ -215,15 +215,6 @@ void screen(void)
             vwk->multifill = 0;
     }
 
-#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
-    /*
-     * the 16-bit drawing routines read the colours of CUR_WORK: it is this
-     * workstation while the call runs, not the one of the previous call
-     */
-    if (vwk && TRUECOLOR_MODE)
-        CUR_WORK = vwk;
-#endif
-
     if ((opcode >= V_OPNWK_OP) && (opcode < V_OPNWK_OP+JMPTB1_ENTRIES)) {
         jmptab = &jmptb1[opcode - V_OPNWK_OP];
     }
@@ -244,6 +235,15 @@ void screen(void)
     }
     contrl[2] = jmptab->nptsout;
     contrl[4] = jmptab->nintout;
+#if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+    /*
+     * the 16-bit drawing routines read the colours of CUR_WORK: it is this
+     * workstation while the call runs, not the one of the previous call
+     */
+    if (vwk && TRUECOLOR_MODE)
+        CUR_WORK = vwk;
+#endif
+
     (*jmptab->op) (vwk);
 
 #if CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
