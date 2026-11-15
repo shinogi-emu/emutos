@@ -34,4 +34,11 @@ LONG  vdi_font_dir_scan(const char *dir,
  */
 LONG  vdi_caller_is_system(void);
 
+/*
+ * let the other programs run for a moment (Syield() under MiNT or MagiC),
+ * while the VDI waits for one of them to be done with the font engine;
+ * FALSE, without waiting, if no other program can run
+ */
+LONG  vdi_yield(void);
+
 #endif /* VDI_FTOS_H */

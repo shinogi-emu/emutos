@@ -560,7 +560,8 @@ void vdi_vst_arbpt(Vwk * vwk)
     sized = FALSE;
     if (outline_face_selected(vwk)) {
         vwk->pts_mode = TRUE;
-        sized = outline_set_arbpt(vwk, point);
+        /* busy: the face stays, and is sized when it is next used */
+        sized = (outline_set_arbpt(vwk, point) != OUTLINE_FAILED);
         if (sized) {
             text_size_out(vwk);
             pt = vwk->cur_font->point;

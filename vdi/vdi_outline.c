@@ -48,6 +48,8 @@
 #include "vdi_defs.h"
 #include "vdistub.h"
 #include "lineavars.h"
+#include "tosvars.h"
+#include "biosdefs.h"
 #include "vdi_ft2.h"
 #include "vdi_ftos.h"
 
@@ -71,6 +73,12 @@
 /* the effects the engine draws: all that the VDI has */
 #define ENGINE_EFFECTS  (F_THICKEN | F_LIGHT | F_SKEW | F_UNDER | F_OUTLINE)
 
+/* the sizes asked for while the engine was busy (Vwk.outline_pending) */
+#define PENDING_NONE    0
+#define PENDING_POINT   1       /* vst_point() */
+#define PENDING_HEIGHT  2       /* vst_height() */
+#define PENDING_ARBPT   3       /* vst_arbpt() */
+
 /* an outline face, as vqt_name() and vst_font() see it */
 typedef struct {
     Fonthead head;              /* chained by next_font */
@@ -79,9 +87,11 @@ typedef struct {
 
 static OutlineFace **face_tab;  /* the faces, in the engine's order */
 static WORD face_count;
-static BOOL scan_begun;         /* the fonts folder is being or has been scanned */
 static BOOL scanned;            /* the faces are ready */
 static VdiXfntInfo xfnt;        /* too large for the stack */
+
+/* the outline_font of a workstation whose face is still to be sized; not for the engine */
+static VdiOutlineFont unsized;
 
 /*
  * The engine and FreeType run on a stack of their own: a VDI call comes
@@ -100,13 +110,13 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
  * reach, and the canary keeps what lies below the stack at a distance.
  *
  * The engine is not reentrant, and the font stack is used by one call at a
- * time.  While it is busy, outline_on_stack() refuses: the calls below then
- * report a failure, and the text is measured and drawn in the system font.
- *
- * Under EmuTOS's own GEMDOS nothing can come in while a call is on the font
- * stack.  Under a multitasking GEMDOS, a program can sleep in a file read
- * that the engine makes, and another can then call the VDI: that call gets
- * the system font.
+ * time.  Under EmuTOS's own GEMDOS nothing can come in while a call is on
+ * it.  Under a multitasking GEMDOS, a program can sleep in a file read that
+ * the engine makes, and another can then call the VDI: outline_on_stack()
+ * lets the other programs run until the stack is free (wait_for_stack()),
+ * and only then, or if that takes too long, says it is busy.  The calls
+ * that draw or measure then use the system font, and those that size a
+ * face keep it, to be sized by its next use (keep_pending()).
  *
  * Known limits:
  * - if a call never comes back (a program killed while it sleeps in the
@@ -127,12 +137,17 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
 #define FONT_STACK_SIZE VDI_FT_STACK_SIZE   /* bytes */
 #define CANARY_LONGS    64                  /* below the stack */
 #define CANARY          0xf0e1d2c3L
+#define BUSY_WAIT       (3 * CLOCKS_PER_SEC)    /* without progress, at most */
 
 static struct {
     LONG canary[CANARY_LONGS];  /* never used, unless the stack overflows */
     LONG stack[FONT_STACK_SIZE / sizeof(LONG)];
     BOOL canary_set;
-    BOOL busy;                  /* a call is on the stack, or it went past the bottom */
+    BOOL busy;                  /* a call is on the stack */
+    BOOL off;                   /* it went past the bottom: the engine is not called again */
+    BOOL given_up;              /* a wait gave up, and the stack has not been free since */
+    WORD waiting;               /* calls waiting for the stack */
+    LONG files_found;           /* by the scans, to tell a busy stack that gets on */
 } font_stack;
 
 
@@ -148,6 +163,7 @@ static void found_font(const char *path, void *ctx)
 
     /* a file that cannot be used adds no face, and the others go on */
     vdi_ft_register_file(path);
+    font_stack.files_found++;
 }
 
 
@@ -228,21 +244,21 @@ void outline_init_vwk(Vwk *vwk)
     vwk->outline_width = 0;
     vwk->outline_map = VDI_FT_MAP_ATARI;
     vwk->outline_skew = 0;
+    vwk->outline_pending = PENDING_NONE;
 
     /* this VDI serves outline fonts: say so to who looks for NVDI */
     nvdi_add_cookie();
 }
 
 
-/* scan the fonts folder, once: on the font stack */
+/*
+ * scan the fonts folder, once: on the font stack, which one call uses at a
+ * time, so that the scan is never made twice
+ */
 static void scan_fonts(void)
 {
-    scan_begun = TRUE;              /* before anything that can sleep */
-    if (vdi_ft_init() < 0)
-    {
-        scan_begun = FALSE;         /* no memory: maybe next time */
-        return;
-    }
+    if (scanned || (vdi_ft_init() < 0))
+        return;                     /* no memory: maybe next time */
     vdi_font_dir_scan(FONT_DIR, found_font, NULL);
     make_faces();
     scanned = TRUE;
@@ -258,6 +274,7 @@ void outline_unload_fonts(Vwk *vwk)
     }
     vwk->outline_face = NULL;
     vwk->outline_font = NULL;
+    vwk->outline_pending = PENDING_NONE;
     vwk->num_fonts -= vwk->outline_count;
     vwk->outline_count = 0;
 }
@@ -340,17 +357,26 @@ BOOL outline_face_selected(const Vwk *vwk)
 }
 
 
-/* an outline font is selected, and sized */
+/*
+ * an outline font is selected, and sized, or to be sized by its next use
+ * (keep_pending()); vdi_asm.S makes the same test
+ */
 BOOL outline_font_selected(const Vwk *vwk)
 {
     return (vwk->cur_font == &vwk->outline_head) && vwk->outline_font;
 }
 
 
-/* the selected sized font, for the calls that use the engine directly */
+/*
+ * the selected sized font, for the calls that use the engine directly;
+ * NULL while it is still to be sized
+ */
 VdiOutlineFont *outline_current(Vwk *vwk)
 {
-    return outline_font_selected(vwk) ? vwk->outline_font : NULL;
+    if (!outline_font_selected(vwk) || (vwk->outline_font == &unsized))
+        return NULL;
+
+    return vwk->outline_font;
 }
 
 
@@ -428,8 +454,58 @@ static void use_font(Vwk *vwk, VdiOutlineFont *face, VdiOutlineFont *f, LONG em,
     vwk->outline_font = f;
     vwk->outline_em = (WORD)em;
     vwk->outline_width = (WORD)width;
+    vwk->outline_pending = PENDING_NONE;
     vwk->cur_font = h;
     vwk->scaled = FALSE;
+}
+
+
+/*
+ * the engine is busy with another program's call: keep the current face
+ * selected, to be sized as asked (kind, value) by the next call that uses
+ * it (sized_font()).  Until then it has the metrics of the system font,
+ * which its text is drawn in while the engine stays busy.
+ *
+ * Returns FALSE if no outline face is selected.
+ */
+static BOOL keep_pending(Vwk *vwk, WORD kind, WORD value)
+{
+    VdiOutlineFont *face = current_face(vwk);
+    const Fonthead *sys = def_font;
+    Fonthead *h = &vwk->outline_head;
+
+    if (!face)
+        return FALSE;
+
+    bzero(h, sizeof(*h));
+    h->font_id = (WORD)face->id;
+    h->point = (kind == PENDING_HEIGHT) ? sys->point : value;
+    memcpy(h->name, face->name, FONT_NAME_LEN);
+    h->name[FONT_NAME_LEN-1] = '\0';
+    set_char_range(h, vwk->outline_map);
+    h->top = sys->top;
+    h->ascent = sys->ascent;
+    h->half = sys->half;
+    h->descent = sys->descent;
+    h->bottom = sys->bottom;
+    h->max_char_width = sys->max_char_width;
+    h->max_cell_width = sys->max_cell_width;
+    h->ul_size = sys->ul_size;
+    h->flags = F_OUTLINE_FONT;
+    if (face->flags & VDI_FT_MONOSPACE)
+        h->flags |= F_MONOSPACE;
+    h->form_height = sys->form_height;
+
+    vwk->outline_face = face;
+    vwk->outline_font = &unsized;
+    vwk->outline_em = 0;
+    vwk->outline_width = 0;
+    vwk->outline_pending = kind;
+    vwk->outline_asked = value;
+    vwk->cur_font = h;
+    vwk->scaled = FALSE;
+
+    return TRUE;
 }
 
 
@@ -461,6 +537,9 @@ static VdiOutlineFont *size_by_em(VdiOutlineFont *face, LONG em)
 
     return vdi_ft_size(face, (points > 0) ? points : 1, em, 0);
 }
+
+
+static VdiOutlineFont *sized_font(Vwk *vwk);
 
 
 /*
@@ -545,7 +624,7 @@ static BOOL set_arbpt(Vwk *vwk, LONG point)
  */
 static BOOL set_width(Vwk *vwk, LONG width)
 {
-    VdiOutlineFont *f = outline_current(vwk), *g;
+    VdiOutlineFont *f = sized_font(vwk), *g;
 
     if (!f || !(f->flags & VDI_FT_SCALABLE) || (width <= 0) || (width > MAX_VALUE))
         return FALSE;
@@ -565,7 +644,7 @@ static BOOL set_width(Vwk *vwk, LONG width)
  */
 static BOOL set_size(Vwk *vwk, LONG width)
 {
-    VdiOutlineFont *f = outline_current(vwk), *natural, *g;
+    VdiOutlineFont *f = sized_font(vwk), *natural, *g;
     LONG ratio, chars;
 
     if (!f || !(f->flags & VDI_FT_SCALABLE) || (width <= 0) || (f->points <= 0))
@@ -662,6 +741,32 @@ static BOOL set_height(Vwk *vwk, WORD height)
 
 
 /*
+ * on the font stack: the selected sized font, made first if it was asked
+ * for while the engine was busy (keep_pending()); NULL if there is none,
+ * or if the engine cannot make it now
+ */
+static VdiOutlineFont *sized_font(Vwk *vwk)
+{
+    if ((vwk->outline_font == &unsized) && (vwk->cur_font == &vwk->outline_head))
+    {
+        switch(vwk->outline_pending) {
+        case PENDING_POINT:
+            set_point(vwk, vwk->outline_asked);
+            break;
+        case PENDING_HEIGHT:
+            set_height(vwk, vwk->outline_asked);
+            break;
+        default:
+            set_arbpt(vwk, vwk->outline_asked);
+            break;
+        }
+    }
+
+    return outline_current(vwk);
+}
+
+
+/*
  * ===========================================================================
  * Measuring
  * ===========================================================================
@@ -679,7 +784,7 @@ static LONG effects_of(const Vwk *vwk)
  */
 static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
 {
-    VdiOutlineFont *f = outline_current(vwk);
+    VdiOutlineFont *f = sized_font(vwk);
     LONG width;
 
     if (!f)
@@ -696,7 +801,7 @@ static LONG text_width(Vwk *vwk, WORD count, const WORD *str)
 /* vqt_width(): the advance of a character; negative if the engine cannot tell */
 static LONG char_width(Vwk *vwk, WORD ch)
 {
-    VdiOutlineFont *f = outline_current(vwk);
+    VdiOutlineFont *f = sized_font(vwk);
     LONG advance[4];
 
     if (!f)
@@ -930,7 +1035,7 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, WORD co
 static BOOL draw_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *justified,
                       LONG x, LONG y)
 {
-    VdiOutlineFont *f = outline_current(vwk);
+    VdiOutlineFont *f = sized_font(vwk);
     LONG delh, delv, pen, dx, dy, advance;
     WORD j;
 
@@ -1111,20 +1216,71 @@ static BOOL canary_intact(void)
 
 
 /*
- * call fn(arg) on the font stack, and put what it returns in *result
+ * the font stack is busy: let the other programs run until it is free;
+ * TRUE once it is, FALSE if it is not after BUSY_WAIT, or with no other
+ * program that could free it (a single-tasking GEMDOS), or once *done
+ * (if done is not NULL) says that what was waited for is there anyway
  *
- * Returns FALSE, without calling fn, if the font stack is in use (see
- * font_stack.busy).  Whatever calls the engine (vdi_ft2.h) for a
- * workstation goes through here.  A call that went past the bottom of the
- * stack leaves it busy: the engine is not called again.
+ * The time counts from the last font file a scan on the stack has found,
+ * as a scan can take long.  Once a wait has given up, the next ones give
+ * up at once until the stack has been free again: a call that never comes
+ * back (see the known limits above) must not make every later call wait.
  */
-BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result)
+static BOOL wait_for_stack(const BOOL *done)
+{
+    LONG start, found;
+    BOOL got_it = TRUE;
+
+    if (font_stack.given_up)
+        return FALSE;
+
+    font_stack.waiting++;
+    start = hz_200;
+    found = font_stack.files_found;
+    while (font_stack.busy)
+    {
+        if (font_stack.files_found != found)
+        {
+            found = font_stack.files_found;
+            start = hz_200;
+        }
+        if (done && *done)
+        {
+            got_it = FALSE;
+            break;
+        }
+        if ((hz_200 - start > (LONG)BUSY_WAIT) || font_stack.off || !vdi_yield())
+        {
+            font_stack.given_up = TRUE;
+            got_it = FALSE;
+            break;
+        }
+    }
+    font_stack.waiting--;
+
+    return got_it;
+}
+
+
+/*
+ * call fn(arg) on the font stack, and put what it returns in *result;
+ * returns OUTLINE_DONE
+ *
+ * Returns OUTLINE_BUSY, without calling fn, if another program's call
+ * keeps the stack after wait_for_stack(), and OUTLINE_FAILED if the
+ * engine has been turned off (or is turned off by this call, which went
+ * past the bottom of the stack).  Whatever calls the engine (vdi_ft2.h)
+ * for a workstation goes through here.
+ */
+static WORD on_stack(LONG (*fn)(void *), void *arg, LONG *result, const BOOL *done)
 {
     LONG ret;
     WORD i;
 
-    if (font_stack.busy)
-        return FALSE;
+    if (font_stack.off)
+        return OUTLINE_FAILED;
+    if (font_stack.busy && !wait_for_stack(done))
+        return font_stack.off ? OUTLINE_FAILED : OUTLINE_BUSY;
 
     if (!font_stack.canary_set)
     {
@@ -1136,12 +1292,23 @@ BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result)
     font_stack.busy = TRUE;
     ret = switch_stack(fn, arg, stack_top());
     if (!canary_intact())
-        return FALSE;               /* and busy stays set */
+    {
+        font_stack.off = TRUE;      /* and busy stays set */
+        return OUTLINE_FAILED;
+    }
     font_stack.busy = FALSE;
+    font_stack.given_up = FALSE;
+    if (font_stack.waiting)
+        vdi_yield();                /* let a call that waits have it now */
 
     if (result)
         *result = ret;
-    return TRUE;
+    return OUTLINE_DONE;
+}
+
+WORD outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result)
+{
+    return on_stack(fn, arg, result, NULL);
 }
 
 
@@ -1223,7 +1390,7 @@ static LONG set_size_call(void *p)
 static LONG char_index_call(void *p)
 {
     OutlineCall *c = p;
-    VdiOutlineFont *f = outline_current(c->vwk);
+    VdiOutlineFont *f = sized_font(c->vwk);
 
     return f ? vdi_ft_char_index(f, (UWORD)c->value, c->a, c->b) : 0xffffL;
 }
@@ -1231,7 +1398,7 @@ static LONG char_index_call(void *p)
 static LONG get_outline_call(void *p)
 {
     OutlineCall *c = p;
-    VdiOutlineFont *f = outline_current(c->vwk);
+    VdiOutlineFont *f = sized_font(c->vwk);
 
     if (!f)
         return 0;
@@ -1270,8 +1437,7 @@ static LONG rescan_call(void *p)
     WORD before, handle;
     Vwk *vwk;
 
-    if (!scan_begun)
-        scan_fonts();               /* the first scan, of the fonts folder */
+    scan_fonts();                   /* the first scan, of the fonts folder */
     if (!scanned || !dirs)
         return 0;
 
@@ -1293,16 +1459,31 @@ static LONG rescan_call(void *p)
 
 /*
  * the first call scans the fonts folder: the first vst_load_fonts(), or
- * the first call that asks for an outline font by its id or name
+ * the first call that asks for an outline font by its id or name.  Returns
+ * OUTLINE_DONE once the faces are ready, OUTLINE_BUSY if another program's
+ * call kept the engine too long (that may be the scan, which is waited for
+ * as long as it finds files), OUTLINE_FAILED if there is no memory.
  *
  * Not from a process the MiNT kernel started itself (XaAES's AES thread):
  * walking the folder through GEMDOS from there makes XaAES fail (see
  * vdi_caller_is_system()).  A later call from a program does the scan.
  */
-void outline_scan(void)
+WORD outline_scan(void)
 {
-    if (!scan_begun && !vdi_caller_is_system())
-        outline_on_stack(scan_fonts_call, NULL, NULL);
+    WORD ret;
+
+    if (scanned)
+        return OUTLINE_DONE;
+    if (vdi_caller_is_system())
+        return OUTLINE_FAILED;
+
+    ret = on_stack(scan_fonts_call, NULL, NULL, &scanned);  /* no wait once another call has scanned */
+    if (scanned)
+        ret = OUTLINE_DONE;
+    else if (ret == OUTLINE_DONE)
+        ret = OUTLINE_FAILED;
+
+    return ret;
 }
 
 
@@ -1313,9 +1494,8 @@ void outline_scan(void)
  */
 WORD outline_load_fonts(Vwk *vwk)
 {
-    outline_scan();
-    if (!scanned)
-        return 0;                   /* no memory, or the scan is not over */
+    if (outline_scan() != OUTLINE_DONE)
+        return 0;                   /* no memory, or the engine stayed busy */
 
     if (!vwk->outline_count)
     {
@@ -1328,27 +1508,45 @@ WORD outline_load_fonts(Vwk *vwk)
 }
 
 
-/* vst_point(): size the current outline face; FALSE if it cannot be used */
-BOOL outline_set_point(Vwk *vwk, WORD point)
+/*
+ * size the current face with fn(c) on the font stack; returns OUTLINE_DONE,
+ * OUTLINE_BUSY (the face stays, to be sized as asked, kind and value, by
+ * its next use) or OUTLINE_FAILED (the face cannot be used)
+ */
+static WORD size_face(Vwk *vwk, LONG (*fn)(void *), OutlineCall *c, WORD kind, WORD value)
+{
+    LONG ok = FALSE;
+    WORD ret = outline_on_stack(fn, c, &ok);
+
+    if ((ret == OUTLINE_BUSY) && keep_pending(vwk, kind, value))
+        return OUTLINE_BUSY;
+    if ((ret == OUTLINE_DONE) && ok)
+        return OUTLINE_DONE;
+
+    vwk->outline_pending = PENDING_NONE;
+    return OUTLINE_FAILED;
+}
+
+
+/* vst_point(): size the current outline face */
+WORD outline_set_point(Vwk *vwk, WORD point)
 {
     OutlineCall c;
-    LONG ok;
 
     c.vwk = vwk;
     c.value = point;
-    return outline_on_stack(set_point_call, &c, &ok) && ok;
+    return size_face(vwk, set_point_call, &c, PENDING_POINT, (point > 0) ? point : 1);
 }
 
 
 /* vst_height(): the same for a character height */
-BOOL outline_set_height(Vwk *vwk, WORD height)
+WORD outline_set_height(Vwk *vwk, WORD height)
 {
     OutlineCall c;
-    LONG ok;
 
     c.vwk = vwk;
     c.value = height;
-    return outline_on_stack(set_height_call, &c, &ok) && ok;
+    return size_face(vwk, set_height_call, &c, PENDING_HEIGHT, height);
 }
 
 
@@ -1364,7 +1562,7 @@ BOOL outline_text_width(Vwk *vwk, WORD count, const WORD *str, WORD *width)
     c.vwk = vwk;
     c.count = count;
     c.str = str;
-    if (!outline_on_stack(text_width_call, &c, &w) || (w < 0))
+    if ((outline_on_stack(text_width_call, &c, &w) != OUTLINE_DONE) || (w < 0))
         return FALSE;
 
     *width = (WORD)w;
@@ -1380,7 +1578,7 @@ BOOL outline_char_width(Vwk *vwk, WORD ch, WORD *width)
 
     c.vwk = vwk;
     c.value = ch;
-    if (!outline_on_stack(char_width_call, &c, &w) || (w < 0))
+    if ((outline_on_stack(char_width_call, &c, &w) != OUTLINE_DONE) || (w < 0))
         return FALSE;
 
     *width = (WORD)w;
@@ -1405,7 +1603,7 @@ BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *j
     c.justified = justified;
     c.x = PTSIN[0];             /* before anything can sleep */
     c.y = PTSIN[1];
-    return outline_on_stack(draw_text_call, &c, &ok) && ok;
+    return (outline_on_stack(draw_text_call, &c, &ok) == OUTLINE_DONE) && ok;
 }
 
 
@@ -1415,15 +1613,19 @@ BOOL outline_text(Vwk *vwk, WORD count, const WORD *str, WORD width, JUSTINFO *j
  * ===========================================================================
  */
 
-/* vst_arbpt(): size the current outline face in points; FALSE if it cannot be used */
-BOOL outline_set_arbpt(Vwk *vwk, LONG point)
+/* vst_arbpt(): size the current outline face in points, as outline_set_point() */
+WORD outline_set_arbpt(Vwk *vwk, LONG point)
 {
     OutlineCall c;
-    LONG ok;
+
+    if (point < 1)
+        point = 1;
+    if (point > MAX_VALUE)
+        point = MAX_VALUE;
 
     c.vwk = vwk;
     c.a = point;
-    return outline_on_stack(set_arbpt_call, &c, &ok) && ok;
+    return size_face(vwk, set_arbpt_call, &c, PENDING_ARBPT, (WORD)point);
 }
 
 
@@ -1435,7 +1637,7 @@ BOOL outline_set_width(Vwk *vwk, WORD width)
 
     c.vwk = vwk;
     c.a = width;
-    return outline_on_stack(set_width_call, &c, &ok) && ok;
+    return (outline_on_stack(set_width_call, &c, &ok) == OUTLINE_DONE) && ok;
 }
 
 
@@ -1447,7 +1649,7 @@ BOOL outline_set_size(Vwk *vwk, LONG width)
 
     c.vwk = vwk;
     c.a = width;
-    return outline_on_stack(set_size_call, &c, &ok) && ok;
+    return (outline_on_stack(set_size_call, &c, &ok) == OUTLINE_DONE) && ok;
 }
 
 
@@ -1491,7 +1693,7 @@ WORD outline_char_index(Vwk *vwk, UWORD ch, WORD from_map, WORD to_map)
     c.value = ch;
     c.a = from_map;
     c.b = to_map;
-    if (!outline_on_stack(char_index_call, &c, &index))
+    if (outline_on_stack(char_index_call, &c, &index) != OUTLINE_DONE)
         return -1;
 
     return (WORD)index;
@@ -1513,7 +1715,7 @@ WORD outline_get_outline(Vwk *vwk, UWORD ch, WORD *xy, BYTE *flags, WORD max_poi
     c.p = xy;
     c.q = flags;
     c.a = max_points;
-    if (!outline_on_stack(get_outline_call, &c, &n))
+    if (outline_on_stack(get_outline_call, &c, &n) != OUTLINE_DONE)
         return 0;
 
     return (WORD)n;
@@ -1528,7 +1730,7 @@ BOOL outline_xfntinfo(VdiOutlineFont *face, WORD flags, VdiXfntInfo *info)
     c.p = face;
     c.q = info;
     c.a = (UWORD)flags;
-    return outline_on_stack(xfntinfo_call, &c, NULL);
+    return outline_on_stack(xfntinfo_call, &c, NULL) == OUTLINE_DONE;
 }
 
 
@@ -1540,7 +1742,7 @@ BOOL outline_fontheader(Vwk *vwk, VdiFontHeader *fhdr)
 
     c.vwk = vwk;
     c.p = fhdr;
-    return outline_on_stack(fontheader_call, &c, &ok) && ok;
+    return (outline_on_stack(fontheader_call, &c, &ok) == OUTLINE_DONE) && ok;
 }
 
 
@@ -1568,7 +1770,7 @@ LONG outline_rescan(char **dirs, LONG count)
 
     c.p = dirs;
     c.a = count;
-    if (!outline_on_stack(rescan_call, &c, &added))
+    if (outline_on_stack(rescan_call, &c, &added) != OUTLINE_DONE)
         return 0;
 
     return added;

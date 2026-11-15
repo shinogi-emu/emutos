@@ -237,6 +237,15 @@ LONG vdi_caller_is_system(void)
 }
 
 
+LONG vdi_yield(void)
+{
+    if (!vdi_other_gemdos())
+        return FALSE;                   /* EmuTOS's own GEMDOS: nothing else runs */
+
+    gemdos_w(0xff);                     /* Syield() */
+    return TRUE;
+}
+
 
 /*
  * the system blocks of the allocator (vdi_ftmem.c), which carves the
