@@ -217,8 +217,16 @@ void ftmem_os_free(void *block)
 }
 
 
+/*
+ * The engine's memory.  Close to the bottom of the font stack, nothing is
+ * given (see VDI_FT_STACK_GUARD in vdi_ft2.h): the glyph being loaded is
+ * nested too deep, and fails as for want of memory.
+ */
 void *vdi_ft_alloc(ULONG size)
 {
+    if (outline_stack_low())
+        return NULL;
+
     return ftmem_alloc(size);
 }
 
@@ -231,6 +239,9 @@ void vdi_ft_free(void *block)
 
 void *vdi_ft_realloc(void *block, ULONG size)
 {
+    if (outline_stack_low())
+        return NULL;                    /* the old block stays */
+
     return ftmem_realloc(block, size);
 }
 

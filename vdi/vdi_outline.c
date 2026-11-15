@@ -87,12 +87,18 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
  * The engine and FreeType run on a stack of their own: a VDI call comes
  * on the caller's supervisor stack, which under EmuTOS's own AES is the
  * process's AES stack (AES_STACK_SIZE), far too small for FreeType.
- * fVDI does the same, for the same reason.  Drawing and sizing the faces
- * of C:\GEMSYS\FONTS were measured to use 18.5 KB of it.
- */
-#define FONT_STACK_SIZE 32768L  /* bytes */
-
-/*
+ * fVDI does the same, for the same reason.  Drawing and sizing TrueType
+ * faces was measured to use 18.5 KB of it, and a CFF glyph built of two
+ * others (seac) about 35 KB.
+ *
+ * FreeType does not bound such nesting, so vdi_ft_alloc() gives nothing
+ * to a call that comes within VDI_FT_STACK_GUARD bytes of the bottom (see
+ * vdi_ft2.h and outline_stack_low()).  Should a call still go past the
+ * bottom, it overwrites the canary below it, which is checked after every
+ * call: the engine is then turned off for good, as nothing it holds can
+ * be trusted.  The flags are kept above the stack, out of an overflow's
+ * reach, and the canary keeps what lies below the stack at a distance.
+ *
  * The engine is not reentrant, and the font stack is used by one call at a
  * time.  While it is busy, outline_on_stack() refuses: the calls below then
  * report a failure, and the text is measured and drawn in the system font.
@@ -118,9 +124,16 @@ static VdiXfntInfo xfnt;        /* too large for the stack */
  *   call into the engine, and runs only on the font stack, which one call
  *   uses at a time.
  */
+#define FONT_STACK_SIZE VDI_FT_STACK_SIZE   /* bytes */
+#define CANARY_LONGS    64                  /* below the stack */
+#define CANARY          0xf0e1d2c3L
 
-static LONG font_stack[FONT_STACK_SIZE / sizeof(LONG)];
-static BOOL font_stack_busy;
+static struct {
+    LONG canary[CANARY_LONGS];  /* never used, unless the stack overflows */
+    LONG stack[FONT_STACK_SIZE / sizeof(LONG)];
+    BOOL canary_set;
+    BOOL busy;                  /* a call is on the stack, or it went past the bottom */
+} font_stack;
 
 
 /*
@@ -1037,22 +1050,72 @@ static LONG switch_stack(LONG (*fn)(void *), void *arg, void *top)
 
 
 /*
+ * the top of the font stack, on a multiple of 16 bytes: the linker keeps
+ * the variables of EmuTOS only 2-aligned, and a 68020 or later is slower
+ * with longs that are not aligned
+ */
+static LONG *stack_top(void)
+{
+    return (LONG *)((ULONG)(font_stack.stack + ARRAY_SIZE(font_stack.stack)) & ~15UL);
+}
+
+
+/*
+ * TRUE when the call on the font stack has come within VDI_FT_STACK_GUARD
+ * bytes of its bottom, where vdi_ft_alloc() gives no more memory; FALSE
+ * off the font stack
+ */
+BOOL outline_stack_low(void)
+{
+    char here;
+    ULONG sp = (ULONG)&here;
+
+    return (sp >= (ULONG)font_stack.canary)
+        && (sp < (ULONG)font_stack.stack + VDI_FT_STACK_GUARD);
+}
+
+
+/* the canary below the font stack is as it was put there */
+static BOOL canary_intact(void)
+{
+    WORD i;
+
+    for (i = 0; i < CANARY_LONGS; i++)
+        if (font_stack.canary[i] != CANARY)
+            return FALSE;
+
+    return TRUE;
+}
+
+
+/*
  * call fn(arg) on the font stack, and put what it returns in *result
  *
  * Returns FALSE, without calling fn, if the font stack is in use (see
- * font_stack_busy).  Whatever calls the engine (vdi_ft2.h) for a
- * workstation goes through here.
+ * font_stack.busy).  Whatever calls the engine (vdi_ft2.h) for a
+ * workstation goes through here.  A call that went past the bottom of the
+ * stack leaves it busy: the engine is not called again.
  */
 BOOL outline_on_stack(LONG (*fn)(void *), void *arg, LONG *result)
 {
     LONG ret;
+    WORD i;
 
-    if (font_stack_busy)
+    if (font_stack.busy)
         return FALSE;
 
-    font_stack_busy = TRUE;
-    ret = switch_stack(fn, arg, font_stack + FONT_STACK_SIZE / sizeof(LONG));
-    font_stack_busy = FALSE;
+    if (!font_stack.canary_set)
+    {
+        for (i = 0; i < CANARY_LONGS; i++)
+            font_stack.canary[i] = CANARY;
+        font_stack.canary_set = TRUE;
+    }
+
+    font_stack.busy = TRUE;
+    ret = switch_stack(fn, arg, stack_top());
+    if (!canary_intact())
+        return FALSE;               /* and busy stays set */
+    font_stack.busy = FALSE;
 
     if (result)
         *result = ret;

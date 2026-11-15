@@ -28,6 +28,18 @@
 typedef signed char BYTE;
 #endif
 
+/*
+ * The engine and FreeType need a stack of VDI_FT_STACK_SIZE bytes.
+ * FreeType bounds neither the nesting of TrueType composite glyphs nor
+ * that of CFF glyphs built of others (seac), but it allocates memory at
+ * every level: vdi_ft_alloc() and vdi_ft_realloc() refuse a block when
+ * fewer than VDI_FT_STACK_GUARD bytes of that stack are left, so that a
+ * glyph nested too deep fails as one would for want of memory, instead
+ * of overflowing the stack.
+ */
+#define VDI_FT_STACK_SIZE   65536L
+#define VDI_FT_STACK_GUARD  20480L
+
 /* values for VdiOutlineFont.flags */
 #define VDI_FT_MONOSPACE    0x00000001L
 #define VDI_FT_SCALABLE     0x00000002L

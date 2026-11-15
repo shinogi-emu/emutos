@@ -53,7 +53,10 @@ config/     the configuration used by the EmuTOS build; the Makefile puts
                                TT_CONFIG_OPTION_BDF
                              and this one turned on:
                                FT_CONFIG_OPTION_DISABLE_STREAM_SUPPORT
-                             (fonts are always loaded into memory first).
+                             (fonts are always loaded into memory first),
+                             and FT_RENDER_POOL_SIZE halved to 8192: the
+                             rasterizers keep that pool on the stack, and
+                             draw the same pixels with the smaller one.
               ftmodule.h       the modules listed above: autofit, truetype,
                                cff, psaux, psnames, pshinter, sfnt, smooth,
                                raster.
