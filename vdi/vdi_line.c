@@ -2056,6 +2056,253 @@ static void draw_line16(const Line *line, WORD wrt_mode, UWORD color)
 #endif
 
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * Lines on four and eight planes, all planes in one pass
+ *
+ * The old code walks the line once per plane.  This one walks it once and
+ * gathers the pixels that fall in one word of one row into two masks: m,
+ * every pixel there, and s, the pixels the line style draws.  Then every
+ * plane word of that row and word is changed as
+ *
+ *      new = (old & keep) ^ (on & cm[plane])
+ *
+ * where cm[plane] is all ones if the plane's bit of the colour is set (in
+ * xor mode always: the colour does not matter there).  keep and on follow
+ * from the writing mode:
+ *
+ *      replace: keep = ~m, on = s      transparent: keep = ~s, on = s
+ *      xor:     keep = ~0, on = s      erase:       keep = ~(m^s), on = m^s
+ *
+ * which is what the single plane loops do pixel by pixel.  The line style
+ * rotates once per pixel as before, so LN_MASK ends up where it did.
+ *
+ * The words of the planes of one 16 pixel group are neighbours, so two
+ * planes are handled as one long word.  The screen is long word aligned for
+ * that (checked once per line); else the old loops draw.
+ */
+#define LP_REP(x)   ((((ULONG)(UWORD)(x)) << 16) | (UWORD)(x))
+
+static inline __attribute__((always_inline))
+void lp_flush(UWORD *a, ULONG keep, ULONG on, const ULONG *cml, const WORD kind)
+{
+    ULONG_ALIAS *l = (ULONG_ALIAS *)a;
+
+    l[0] = (l[0] & keep) ^ (on & cml[0]);
+    l[1] = (l[1] & keep) ^ (on & cml[1]);
+    if (kind == 8) {
+        l[2] = (l[2] & keep) ^ (on & cml[2]);
+        l[3] = (l[3] & keep) ^ (on & cml[3]);
+    }
+}
+
+/* the same, for the places that run once per line: not copied into every loop */
+static __attribute__((noinline))
+void lp_flush_once(UWORD *a, ULONG keep, ULONG on, const ULONG *cml, WORD kind)
+{
+    lp_flush(a, keep, on, cml, kind);
+}
+
+/* can draw_line_planes() / vertical_line_planes() draw this? */
+static BOOL lp_usable(WORD wrt_mode)
+{
+    return (v_planes == 4 || v_planes == 8)
+        && (UWORD)wrt_mode <= WM_ERASE
+        && ((((LONG)v_bas_ad) | (LONG)v_lin_wr) & 3) == 0;
+}
+
+/*
+ * set up the colour masks (cmu) and, from the writing mode, ca/cs: the
+ * pixels cleared are (m & ca) ^ (s & cs), oa/os: the pixels set are
+ * (m & oa) ^ (s & os)
+ */
+#define LP_SETUP(color_, wrt_mode_) \
+    do { \
+        WORD k_; \
+        for (k_ = 0; k_ < kind; k_++) \
+            cmu.w[k_] = (UWORD)-(WORD)(((wrt_mode_) == WM_XOR) | (((color_) >> k_) & 1)); \
+        switch (wrt_mode_) { \
+        case WM_REPLACE:    ca = 0xffff; cs = 0;      oa = 0;      os = 0xffff; break; \
+        case WM_TRANS:      ca = 0;      cs = 0xffff; oa = 0;      os = 0xffff; break; \
+        case WM_XOR:        ca = 0;      cs = 0;      oa = 0;      os = 0xffff; break; \
+        default:            ca = 0xffff; cs = 0xffff; oa = 0xffff; os = 0xffff; break; \
+        } \
+    } while (0)
+
+/* what one pixel at bit does: keep/on with the style bit set (1) and clear (0) */
+#define LP_PAIRS(bit_) \
+    do { \
+        ULONG b_ = LP_REP(bit_); \
+        keep1 = ~(b_ & ccl); \
+        on1 = b_ & ool; \
+        keep0 = ~(b_ & cal); \
+        on0 = b_ & oal; \
+    } while (0)
+
+#define LP_CONSTS \
+    do { \
+        ccl = LP_REP(ca ^ cs); \
+        ool = LP_REP(oa ^ os); \
+        cal = LP_REP(ca); \
+        oal = LP_REP(oa); \
+    } while (0)
+
+static inline __attribute__((always_inline))
+void draw_line_body(const Line *line, WORD wrt_mode, UWORD color, const WORD kind)
+{
+    UWORD *addr;
+    WORD dx;                    /* width of rectangle around line */
+    WORD dy;                    /* height of rectangle around line */
+    WORD yinc;                  /* in/decrease for each y step */
+    const WORD xinc = kind;     /* positive increase for each x step, planes WORDS */
+    WORD  eps;                  /* epsilon */
+    WORD  e1;                   /* epsilon 1 */
+    WORD  e2;                   /* epsilon 2 */
+    WORD  loopcnt;
+    UWORD bit, m, s;
+    UWORD ca, cs, oa, os;
+    union { UWORD w[8]; ULONG l[4]; } cmu;
+    UWORD linemask = LN_MASK;   /* linestyle bits */
+
+    dx = line->x2 - line->x1;
+    dy = line->y2 - line->y1;
+
+    if (dy < 0) {
+        dy = -dy;                       /* make dy absolute */
+        yinc = (LONG) -1 * v_lin_wr / 2; /* sub one line of words */
+    } else {
+        yinc = (LONG) v_lin_wr / 2;     /* add one line of words */
+    }
+
+    addr = get_start_addr(line->x1, line->y1);  /* init address counter */
+    bit = 0x8000 >> (line->x1&0xf);             /* initial bit position in WORD */
+
+    LP_SETUP(color, wrt_mode);
+
+    if (dx >= dy) {
+        e1 = 2*dy;
+        eps = -dx;
+        e2 = 2*dx;
+        m = s = 0;
+
+        if (linemask == 0xffff) {
+            /* a solid line: every pixel is drawn, s is m */
+            const UWORD cc = ca ^ cs;
+            const UWORD oo = oa ^ os;
+
+            for (loopcnt = dx; loopcnt >= 0; loopcnt--) {
+                m |= bit;
+                rorw1(bit);
+                eps += e1;
+                if (eps >= 0 || (bit&0x8000)) {
+                    lp_flush(addr, LP_REP(~(m & cc)), LP_REP(m & oo), cmu.l, kind);
+                    m = 0;
+                    if (bit&0x8000)
+                        addr += xinc;
+                    if (eps >= 0) {
+                        eps -= e2;
+                        addr += yinc;   /* increment y */
+                    }
+                }
+            }
+            if (m)
+                lp_flush_once(addr, LP_REP(~(m & cc)), LP_REP(m & oo), cmu.l, kind);
+        } else {
+            for (loopcnt = dx; loopcnt >= 0; loopcnt--) {
+                rolw1(linemask);        /* get next bit of line style */
+                m |= bit;
+                if (linemask&0x0001)
+                    s |= bit;
+                rorw1(bit);
+                eps += e1;
+                if (eps >= 0 || (bit&0x8000)) {
+                    lp_flush(addr, LP_REP(~((m & ca) ^ (s & cs))),
+                             LP_REP((m & oa) ^ (s & os)), cmu.l, kind);
+                    m = s = 0;
+                    if (bit&0x8000)
+                        addr += xinc;
+                    if (eps >= 0) {
+                        eps -= e2;
+                        addr += yinc;   /* increment y */
+                    }
+                }
+            }
+            if (m)
+                lp_flush_once(addr, LP_REP(~((m & ca) ^ (s & cs))),
+                              LP_REP((m & oa) ^ (s & os)), cmu.l, kind);
+        }
+    } else {
+        /* every row has one pixel; what it does depends on the style bit only */
+        ULONG ccl, ool, cal, oal;
+        ULONG keep1, on1, keep0, on0;
+
+        e1 = 2*dx;
+        eps = -dy;
+        e2 = 2*dy;
+
+        LP_CONSTS;
+        LP_PAIRS(bit);
+        if (linemask == 0xffff) {
+            if (wrt_mode != WM_ERASE) {         /* erase draws nothing */
+                for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+                    lp_flush(addr, keep1, on1, cmu.l, kind);
+                    addr += yinc;
+                    eps += e1;
+                    if (eps >= 0) {
+                        eps -= e2;
+                        rorw1(bit);
+                        if (bit&0x8000)
+                            addr += xinc;
+                        LP_PAIRS(bit);
+                    }
+                }
+            }
+        } else {
+            /* a pixel the style does not draw does nothing, but in replace and erase mode */
+            const BOOL skip1 = (wrt_mode == WM_ERASE);
+            const BOOL skip0 = (wrt_mode == WM_TRANS || wrt_mode == WM_XOR);
+            ULONG keep, on;
+            BOOL skip;
+
+            for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+                rolw1(linemask);        /* get next bit of line style */
+                if (linemask&0x0001) {
+                    keep = keep1;
+                    on = on1;
+                    skip = skip1;
+                } else {
+                    keep = keep0;
+                    on = on0;
+                    skip = skip0;
+                }
+                if (!skip)
+                    lp_flush(addr, keep, on, cmu.l, kind);
+                addr += yinc;
+                eps += e1;
+                if (eps >= 0) {
+                    eps -= e2;
+                    rorw1(bit);
+                    if (bit&0x8000)
+                        addr += xinc;
+                    LP_PAIRS(bit);
+                }
+            }
+        }
+    }
+    LN_MASK = linemask;
+}
+
+static void draw_line_planes4(const Line *line, WORD wrt_mode, UWORD color)
+{
+    draw_line_body(line, wrt_mode, color, 4);
+}
+
+static void draw_line_planes8(const Line *line, WORD wrt_mode, UWORD color)
+{
+    draw_line_body(line, wrt_mode, color, 8);
+}
+#endif
+
 /*
  * draw_line - draw a line (general purpose)
  *
@@ -2093,6 +2340,17 @@ static void draw_line(const Line *line, WORD wrt_mode, UWORD color)
     UWORD msk;
     int plane;
     UWORD linemask = LN_MASK;   /* linestyle bits */
+
+#if CONF_WITH_VDI_FASTDRAW
+    /* four or eight planes: one pass over the line, not one per plane */
+    if (lp_usable(wrt_mode)) {
+        if (v_planes == 8)
+            draw_line_planes8(line, wrt_mode, color);
+        else
+            draw_line_planes4(line, wrt_mode, color);
+        return;
+    }
+#endif
 
     dx = line->x2 - line->x1;
     dy = line->y2 - line->y1;
@@ -2474,6 +2732,76 @@ static void swblit_vertical_line16(const Line *line, WORD wrt_mode, UWORD color)
 }
 #endif
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * a vertical line on four or eight planes: every plane word of a row in one
+ * step, see draw_line_body()
+ */
+static inline __attribute__((always_inline))
+void vertical_line_body(const Line *line, WORD wrt_mode, UWORD color, const WORD kind)
+{
+    UWORD *addr;
+    WORD dy;                    /* length of line */
+    WORD yinc;                  /* in/decrease for each y step */
+    WORD loopcnt;
+    UWORD ca, cs, oa, os;
+    ULONG ccl, ool, cal, oal;
+    ULONG keep1, on1, keep0, on0;
+    union { UWORD w[8]; ULONG l[4]; } cmu;
+    UWORD linemask = LN_MASK;
+
+    /* calculate increase value for y to add to actual address */
+    dy = line->y2 - line->y1;
+    yinc = v_lin_wr / 2;        /* one line of words */
+
+    if (dy < 0) {
+        dy = -dy;               /* make dy absolute */
+        yinc = -yinc;           /* sub one line of words */
+    }
+
+    addr = get_start_addr(line->x1, line->y1);  /* init address counter */
+
+    LP_SETUP(color, wrt_mode);
+    LP_CONSTS;
+    LP_PAIRS(0x8000 >> (line->x1&0xf));
+
+    if (linemask == 0xffff) {
+        if (wrt_mode != WM_ERASE) {             /* erase draws nothing */
+            for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+                lp_flush(addr, keep1, on1, cmu.l, kind);
+                addr += yinc;
+            }
+        }
+    } else {
+        const BOOL skip1 = (wrt_mode == WM_ERASE);
+        const BOOL skip0 = (wrt_mode == WM_TRANS || wrt_mode == WM_XOR);
+
+        for (loopcnt = dy; loopcnt >= 0; loopcnt--) {
+            rolw1(linemask);            /* get next bit of line style */
+            if (linemask&0x0001) {
+                if (!skip1)
+                    lp_flush(addr, keep1, on1, cmu.l, kind);
+            } else {
+                if (!skip0)
+                    lp_flush(addr, keep0, on0, cmu.l, kind);
+            }
+            addr += yinc;
+        }
+    }
+    LN_MASK = linemask;
+}
+
+static void vertical_line_planes4(const Line *line, WORD wrt_mode, UWORD color)
+{
+    vertical_line_body(line, wrt_mode, color, 4);
+}
+
+static void vertical_line_planes8(const Line *line, WORD wrt_mode, UWORD color)
+{
+    vertical_line_body(line, wrt_mode, color, 8);
+}
+#endif
+
 /*
  * vertical_line - draw a vertical line
  *
@@ -2487,6 +2815,16 @@ static void vertical_line(const Line *line, WORD wrt_mode, UWORD color)
     UWORD bit, bitcomp;
     WORD plane, loopcnt;
     UWORD linemask = LN_MASK;
+
+#if CONF_WITH_VDI_FASTDRAW
+    if (lp_usable(wrt_mode)) {
+        if (v_planes == 8)
+            vertical_line_planes8(line, wrt_mode, color);
+        else
+            vertical_line_planes4(line, wrt_mode, color);
+        return;
+    }
+#endif
 
     /* calculate increase value for y to add to actual address */
     dy = line->y2 - line->y1;
