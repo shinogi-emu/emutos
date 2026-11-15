@@ -10,6 +10,7 @@
 #include "emutos.h"
 #include "gemdos.h"
 #include "cookie.h"
+#include "has.h"
 #include "vdi_kept.h"
 #include "vdi_sleep.h"
 
@@ -17,11 +18,12 @@
 #define COOKIE_MAGX     0x4d616758L     /* 'MagX' */
 
 /*
- * Mxalloc() mode used under MiNT and MagiC: prefer TT-RAM, keep the block
+ * Mxalloc() mode used under MiNT and MagiC, in the kind of RAM given (the
+ * usual one prefers TT-RAM): keep the block
  * when its owner terminates (0x4000) and make it accessible from supervisor
  * mode only (0x30), as fVDI does for its own memory.
  */
-#define MX_KEEP_MODE    (MX_PREFTTRAM | 0x4030)
+#define MX_KEEP_MODE_OF(ram)    ((ram) | 0x4030)
 
 /* the same, but readable by every program (0x40), as fVDI's cookie data */
 #define MX_READABLE_MODE (MX_PREFTTRAM | 0x4040)
@@ -96,24 +98,39 @@ BOOL vdi_other_gemdos(void)
  * the one running before the first program starts, and it never terminates.
  * Mfree() does not check the owner, so any process can free the block.
  */
-void *vdi_alloc_kept(LONG size)
+static void *alloc_kept(LONG size, WORD ram)
 {
     void *block;
 
     if (vdi_other_gemdos())
     {
-        block = (void *)vdi_os_mxalloc(size, MX_KEEP_MODE);
+        block = (void *)vdi_os_mxalloc(size, MX_KEEP_MODE_OF(ram));
         if ((LONG)block <= 0)
             return NULL;
         return block;
     }
 
-    block = (void *)vdi_os_mxalloc(size, MX_PREFTTRAM);
+    block = (void *)vdi_os_mxalloc(size, ram);
     if ((LONG)block <= 0)
         return NULL;
     bdos_keep_block(block);
 
     return block;
+}
+
+void *vdi_alloc_kept(LONG size)
+{
+    return alloc_kept(size, MX_PREFTTRAM);
+}
+
+
+/*
+ * the same for a buffer that the blitter reads or writes: ST-RAM when
+ * there is a hardware blitter, which cannot reach TT-RAM
+ */
+void *vdi_alloc_kept_blit(LONG size)
+{
+    return alloc_kept(size, HAS_BLITTER ? MX_STRAM : MX_PREFTTRAM);
 }
 
 

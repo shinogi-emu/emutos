@@ -18,6 +18,7 @@
  */
 BOOL vdi_other_gemdos(void);
 void *vdi_alloc_kept(LONG size);
+void *vdi_alloc_kept_blit(LONG size);   /* in ST-RAM if a blitter has to reach it */
 void vdi_free_kept(void *block);
 void *vdi_alloc_readable(LONG size);    /* every program can read it */
 

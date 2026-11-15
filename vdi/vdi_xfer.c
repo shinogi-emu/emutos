@@ -554,7 +554,7 @@ void vdi_raster_scaled(void *raster, void *info, void (*copy)(void *, void *),
     dh = (LONG)pts[7] - pts[5] + 1;
     width = xmax - xmin + 1;
     bytes = ((width + 15) / 16) * 2 * splanes;
-    buffer = (UBYTE *)vdi_alloc_kept(bytes);
+    buffer = (UBYTE *)vdi_alloc_kept_blit(bytes);   /* the copy may use the blitter */
     if (!buffer)
         return;
 
