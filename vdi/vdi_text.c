@@ -342,6 +342,300 @@ static __inline__ __attribute__((always_inline)) void text_alignment(Vwk *vwk, c
     *pdelv = delv;
 }
 
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * a bitmap-font string in one blit
+ *
+ * A string with no effect but underline, no rotation, scaling or
+ * justification, in a font without a horizontal offset table, is the
+ * font's cells side by side.  Instead of one text_blt() for every
+ * character, the cells are gathered into a one-plane form, as wide as the
+ * string, and that goes to text_blt() as one cell, the way the outline
+ * fonts' bitmaps do.  Writing modes act on a pixel at a time and the cells
+ * are contiguous, so the pixels equal those of the per-character loop.
+ *
+ * The form is built in vdishare.main.fill_buffer, which only the polygon
+ * fill and contourfill() use (and they use the whole of vdishare: see
+ * vdiext.h).  A VDI call that is drawing a string makes no OS call that can
+ * sleep (vdi_sleep.h), so no other VDI call runs between the filling of the
+ * buffer and its use by text_blt().  A string wider than the buffer goes in
+ * chunks of whole characters.
+ */
+#define STRBUF_SIZE     (sizeof(vdishare.main.fill_buffer) - 2) /* bytes; 2 are left for a blit that reads one word on */
+
+#define STR_XLIMIT      16000   /* beyond this the blit's arithmetic and the loop's differ */
+
+#if !defined(__mcoldfire__)
+/* vdi_tblit.S */
+void text_gather8(UBYTE *dst, const UBYTE *base, const WORD *str, LONG stride, LONG fwidth,
+                  LONG count, LONG rows);
+#endif
+
+/*
+ * the index in the font's tables of the character that the per-character
+ * loop draws for code
+ */
+static __inline__ WORD cell_index(const Fonthead *fnt_ptr, WORD code)
+{
+    WORD temp = code;
+
+    /* If the character is out of range for this font make it a ? */
+    if ((temp < fnt_ptr->first_ade) || (temp > fnt_ptr->last_ade))
+        temp = '?';
+    return temp - fnt_ptr->first_ade;
+}
+
+/*
+ * draw one character, as the per-character loop of output_text() does
+ * (DESTX moves on)
+ */
+static void text_char(const Fonthead *fnt_ptr, WORD code)
+{
+    WORD temp = cell_index(fnt_ptr, code);
+
+    SOURCEX = fnt_ptr->off_table[temp];
+    DELX = fnt_ptr->off_table[temp + 1] - SOURCEX;
+    SOURCEY = 0;
+    DELY = fnt_ptr->form_height;
+    FBASE = fnt_ptr->dat_table;
+    FWIDTH = fnt_ptr->form_width;
+    text_blt();
+}
+
+/* how text_gather() has to copy the cells */
+#define GATHER_BITS     0       /* any cells: bits */
+#define GATHER_BYTES    1       /* cells start on a byte and are whole bytes wide */
+#define GATHER_8        2       /* cell c of the string is byte c of a font's row */
+
+/*
+ * TRUE for a font whose cell for code c is the byte c - first_ade of every
+ * row of its form: a monospaced font, as its flags say, of cells of 8
+ * pixels, as the offset table (checked at both ends) says; the codes of
+ * the font are then offsets, and the string need only be checked to lie in
+ * the font (the test direct_screen_blit() makes of its font as well)
+ */
+static BOOL font8(const Fonthead *fnt_ptr)
+{
+    UWORD cells = fnt_ptr->last_ade - fnt_ptr->first_ade + 1;
+
+    return (fnt_ptr->flags & F_MONOSPACE) && (fnt_ptr->first_ade <= fnt_ptr->last_ade)
+        && (fnt_ptr->last_ade <= 32767) && (fnt_ptr->off_table[0] == 0)
+        && (fnt_ptr->off_table[1] == 8) && (fnt_ptr->off_table[cells] == cells * 8);
+}
+
+/*
+ * how many of the characters fit into the buffer, as cells side by side
+ *
+ *  in:     the characters, the most bits in a row of the buffer
+ *  out:    *pwidth the width of those cells in pixels, *pkind how to copy
+ *          them (GATHER_*)
+ *  returns the number of characters; 0 if the first cannot be used (a cell
+ *          too wide or a bad index or offset table, or for GATHER_8 a code
+ *          outside the font, which only the per-character loop knows what
+ *          to do with)
+ */
+static WORD text_cells(const Fonthead *fnt_ptr, WORD count, const WORD *str, WORD maxbits,
+                       WORD *pwidth, WORD *pkind)
+{
+    WORD n, width, sx, dx, temp;
+    WORD kind = GATHER_BYTES;
+
+#if !defined(__mcoldfire__)
+    if (font8(fnt_ptr))
+    {
+        UWORD range = fnt_ptr->last_ade - fnt_ptr->first_ade;
+        UWORD first = fnt_ptr->first_ade;
+
+        if (count > maxbits / 8)
+            count = maxbits / 8;
+        for (n = 0; n < count; n++)
+        {
+            if ((UWORD)(str[n] - first) > range)
+                break;
+        }
+        *pwidth = n * 8;
+        *pkind = GATHER_8;
+        return n;
+    }
+#endif
+    for (n = 0, width = 0; n < count; n++)
+    {
+        temp = cell_index(fnt_ptr, str[n]);
+        if ((UWORD)temp > fnt_ptr->last_ade - fnt_ptr->first_ade)
+            break;
+        sx = fnt_ptr->off_table[temp];
+        dx = fnt_ptr->off_table[temp + 1] - sx;
+        if ((dx < 0) || (dx > maxbits - width))
+            break;
+        if ((sx | dx) & 7)
+            kind = GATHER_BITS;
+        width += dx;
+    }
+    *pwidth = width;
+    *pkind = kind;
+    return n;
+}
+
+/*
+ * copy width bits from the row at src, starting at bit sx, to the zeroed row
+ * at dst, starting at bit dx; no byte outside those of the two ranges is read
+ */
+static void text_bits(UBYTE *dst, WORD dx, const UBYTE *src, WORD sx, WORD width)
+{
+    WORD bits, shift;
+    UWORD v;
+
+    src += sx >> 3;
+    sx &= 7;
+    dst += dx >> 3;
+    dx &= 7;
+    while (width > 0)
+    {
+        bits = (width > 8) ? 8 : width;
+
+        v = (UWORD)*src << 8;
+        if (sx + bits > 8)
+            v |= src[1];
+        v = ((v << sx) >> 8) & (0xff00 >> bits);        /* bits bits at the top of a byte */
+        dst[0] |= v >> dx;
+        shift = 8 - dx;
+        if (bits > shift)
+            dst[1] |= (v << shift) & 0xff;
+
+        width -= bits;
+        sx += bits;
+        src += sx >> 3;
+        sx &= 7;
+        dx += bits;
+        dst += dx >> 3;
+        dx &= 7;
+    }
+}
+
+/*
+ * gather the cells of n characters into the buffer, stride bytes a row,
+ * width pixels
+ */
+static void text_gather(UBYTE *buf, WORD stride, const Fonthead *fnt_ptr, WORD n, const WORD *str,
+                        WORD width, WORD kind)
+{
+    const UBYTE *form = (const UBYTE *)fnt_ptr->dat_table;
+    WORD fwidth = fnt_ptr->form_width;
+    WORD height = fnt_ptr->form_height;
+    WORD i, row, temp, sx, dx, nbytes;
+    LONG xoff;
+    const UBYTE *src;
+    UBYTE *dst;
+
+    if (kind != GATHER_BITS)
+    {
+        /* whole bytes: the row is a byte longer than the cells if their number is odd */
+        nbytes = (width + 7) >> 3;
+        if (nbytes < stride)
+        {
+            for (row = height, dst = buf + nbytes; row > 0; row--, dst += stride)
+                *dst = 0;
+        }
+#if !defined(__mcoldfire__)
+        if (kind == GATHER_8)
+        {
+            text_gather8(buf, form - fnt_ptr->first_ade, str, stride, fwidth, n, height);
+            return;
+        }
+#endif
+        for (i = 0, xoff = 0; i < n; i++)
+        {
+            temp = cell_index(fnt_ptr, str[i]);
+            sx = fnt_ptr->off_table[temp];
+            dx = fnt_ptr->off_table[temp + 1] - sx;
+            nbytes = dx >> 3;
+            src = form + (sx >> 3);
+            dst = buf + xoff;
+            xoff += nbytes;
+            if (nbytes == 1)
+            {
+                for (row = height; row > 0; row--, src += fwidth, dst += stride)
+                    *dst = *src;
+            }
+            else
+            {
+                for (row = height; row > 0; row--, src += fwidth, dst += stride)
+                    memcpy(dst, src, nbytes);
+            }
+        }
+        return;
+    }
+
+    memset(buf, 0, (LONG)stride * height);
+    for (i = 0, xoff = 0; i < n; i++)
+    {
+        temp = cell_index(fnt_ptr, str[i]);
+        sx = fnt_ptr->off_table[temp];
+        dx = fnt_ptr->off_table[temp + 1] - sx;
+        src = form;
+        dst = buf;
+        for (row = height; row > 0; row--, src += fwidth, dst += stride)
+            text_bits(dst, (WORD)xoff, src, sx, dx);
+        xoff += dx;
+    }
+}
+
+/*
+ * draw the string: DESTX moves to the end of it, as the per-character loop
+ * leaves it
+ */
+static void text_string(const Fonthead *fnt_ptr, WORD count, const WORD *str)
+{
+    UBYTE *buf = (UBYTE *)vdishare.main.fill_buffer;
+    WORD height = fnt_ptr->form_height;
+    WORD stride, maxbits, n, width, kind;
+    LONG x, bits;
+
+    maxbits = 0;
+    if (height > 0)
+    {
+        bits = (LONG)((STRBUF_SIZE / height) & ~1) * 8;
+        maxbits = (bits > 8192) ? 8192 : (WORD)bits;
+    }
+
+    while (count > 0)
+    {
+        n = 0;
+        if (maxbits > 0)
+            n = text_cells(fnt_ptr, count, str, maxbits, &width, &kind);
+
+        /*
+         * stock behaviour for what the form cannot hold; and for text that
+         * starts or ends where the blit's arithmetic is not the same as the
+         * per-character loop's: left of the screen without a clip rectangle
+         * (the screen address wraps differently), or near the limits of a WORD
+         */
+        x = DESTX;
+        if ((n == 0) || (x < -STR_XLIMIT) || (x + width > STR_XLIMIT) || (!CLIP && x < 0))
+        {
+            text_char(fnt_ptr, *str);
+            n = 1;
+        }
+        else
+        {
+            stride = ((width + 15) >> 4) << 1;
+            text_gather(buf, stride, fnt_ptr, n, str, width, kind);
+            FBASE = (const UWORD *)buf;
+            FWIDTH = stride;
+            SOURCEX = 0;
+            SOURCEY = 0;
+            DELX = width;
+            DELY = height;
+            text_blt();
+        }
+        str += n;
+        count -= n;
+    }
+    FBASE = fnt_ptr->dat_table;
+    FWIDTH = fnt_ptr->form_width;
+}
+#endif /* CONF_WITH_VDI_FASTDRAW */
+
 /*
  * output specified text string
  *
@@ -501,7 +795,21 @@ static void output_text(Vwk *vwk, WORD count, WORD *str, WORD width, JUSTINFO *j
 
     XDDA = 32767;       /* init the horizontal dda */
 
-    for (j = 0; j < count; j++) {
+    j = 0;
+#if CONF_WITH_VDI_FASTDRAW
+    /*
+     * (one character: the loop is quicker than the form; from two on the
+     * form is, at every screen depth)
+     */
+    if ((count > 1) && !(vwk->style & ~F_UNDER) && !vwk->chup && !vwk->scaled && !justified
+        && !(fnt_ptr->flags & F_HORZ_OFF))
+    {
+        text_string(fnt_ptr, count, str);
+        j = count;
+    }
+#endif
+
+    for (; j < count; j++) {
 
         temp = str[j];
 

@@ -48,7 +48,11 @@ typedef struct {
 typedef union {
     struct vsmain {
         WORD local_ptsin[2*MAX_VERTICES];   /* used by GSX_ENTRY() - must be at offset 0 */
-        WORD fill_buffer[MAX_VERTICES];     /* used by clc_flit() */
+        WORD fill_buffer[MAX_VERTICES];     /* used by clc_flit() and, as the one-plane
+                                             * form of a bitmap-font string, by
+                                             * output_text() (see text_string() in
+                                             * vdi_text.c): never at the same time, as
+                                             * neither is live across an OS call */
     } main;
     SEGMENT queue[QSIZE];       /* storage for contourfill() seed points  */
     WORD deftxbuf[SCRATCHBUF_SIZE/sizeof(WORD)];    /* text scratch buffer */

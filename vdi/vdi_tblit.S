@@ -268,13 +268,17 @@ nb_done:
 
 //
 // text_cols - a plain glyph on 4 to 8 interleaved planes, a column of
-//             planes at a time
+//             planes at a time; on 1 or 2 planes a form of TC_WIDE pixels
+//             or more (a string: output_text() in vdi_text.c draws its
+//             bitmap-font strings in one blit)
 //
 // Takes the glyph when it has no skew, thickening, lightening or outline,
 // is not rotated or scaled, and is a rectangle of at least one pixel;
 // then colblt (vdi_blit.S) does every plane of a destination column
 // together, building the glyph's 16 source bits for the column once,
 // where norm_blt/plane_loop shift and mask them again for every plane.
+// In the four writing modes of the VDI with a background of zero (all that
+// the VDI draws text with) colblt has loops that know the mode.
 // Anything else is left to norm_blt, nothing having been changed.
 //
 // The glyph is whatever norm_blt would get: the same frame, a0 and a1, so
@@ -298,18 +302,26 @@ nb_done:
 #define CB_DSTEP        4
 #define CB_ROWS         24
 #define CB_PAIRS        28
+#define CB_MODE         38
 #define CB_OPS          40
-#define CB_SIZE         112
+#define CB_F            112
+#define CB_SIZE         128
+#define TC_WIDE         32              // narrowest form that takes 1 or 2 planes
 
         .text
         .even
 text_cols:
         move.w  nbrplane(a6),d1
-        subq.w  #4,d1
+        subq.w  #1,d1
+        jeq     tc_p2                   // 1 or 2 planes: a wide form only
+        subq.w  #1,d1
+        jeq     tc_p2
+        subq.w  #2,d1
         cmpi.w  #4,d1
-        jhi     tc_no                   // not 4 to 8 planes: at 1 and 2 the
-        btst    #0,d1                   // plane loop of norm_blt is quicker
-        jne     tc_no                   // odd
+        jhi     tc_no                   // not 4 to 8 planes: at 1 plane there
+        btst    #0,d1                   // is no pair, and for a glyph the
+        jne     tc_no                   // plane loop of norm_blt is quicker
+tc_p0:
         move.w  STYLE(a6),d0
         andi.w  #(1<<THICKEN)+(1<<LIGHT)+(1<<SKEW)+(1<<OUTLINE),d0
         jne     tc_no
@@ -363,8 +375,41 @@ tc_op:  move.w  d0,d1
         lsr.w   #1,d4
         subq.w  #1,d4
         move.w  d4,CB_PAIRS(a5)
+
+//   the four writing modes of text have loops of their own for the whole
+//   columns; they take the foreground bits of the planes as masks
+
+        clr.w   CB_MODE(a5)
+        tst.w   CB_PAIRS(a5)
+        jmi     tc_gen                  // one plane: colblt has no mode loops for it
+        cmpi.w  #TC_WIDE,d2
+        jlt     tc_gen                  // a glyph: no whole columns to speak of
+        tst.w   ambient(a6)
+        jne     tc_gen                  // a background colour: generic
+        move.w  WRT_MOD(a6),d0
+        cmpi.w  #3,d0
+        jhi     tc_gen
+        addq.w  #1,d0
+        move.w  d0,CB_MODE(a5)
+        lea     CB_F(a5),a2
+        move.w  forecol(a6),d4
+        move.w  nbrplane(a6),d7
+        lsr.w   #1,d7
+        subq.w  #1,d7
+tc_f:   moveq   #0,d1
+        lsr.w   #1,d4
+        subx.w  d1,d1                   // d1.w <- ones if the plane's bit is 1
+        swap    d1                      // first plane: high word
+        moveq   #0,d2
+        lsr.w   #1,d4
+        subx.w  d2,d2
+        move.w  d2,d1
+        move.l  d1,(a2)+
+        dbra    d7,tc_f
+tc_gen:
         move.w  tsdad(a6),d0
         move.w  tddad(a6),d1
+        move.w  width(a6),d2
         move.l  a5,a6
         jbsr    colblt
         lea     CB_SIZE(sp),sp
@@ -372,6 +417,78 @@ tc_op:  move.w  d0,d1
         rts
 
 tc_no:  moveq   #1,d0
+        rts
+
+//   one or two planes: the column loop costs more to set up than it saves
+//   for a glyph, and less than the plane loop for a whole string's form
+
+tc_p2:  cmpi.w  #TC_WIDE,width(a6)
+        jlt     tc_no
+        jra     tc_p0
+
+//
+// text_gather8 - the glyph columns of a string in a font whose cells are
+//                one byte wide, side by side in a one-plane form
+//
+// For every row of the font form, for every code of the string, copies the
+// byte of the font's row that holds the code's cell to the next byte of the
+// form's row; output_text() in vdi_text.c has made sure that the cell of
+// code c is the byte c of the font's row (first_ade is taken off in base),
+// that no code is outside the font, and that the form's rows are long
+// enough (it clears what is left of a row after the last byte).
+//
+//  void text_gather8(UBYTE *dst, const UBYTE *base, const WORD *str,
+//                    LONG stride, LONG fwidth, LONG count, LONG rows);
+//
+//      dst     the form's first row
+//      base    the font's first row, minus first_ade
+//      str     the codes, count of them, count >= 1
+//      stride  bytes from a row of the form to the next
+//      fwidth  bytes from a row of the font to the next
+//      rows    rows, >= 1
+//
+        .globl  _text_gather8
+        .even
+_text_gather8:
+        movem.l d2-d7/a2-a5,-(sp)
+        move.l  40+4(sp),a4             // a4 -> the form's row
+        move.l  40+8(sp),a5             // a5 -> the font's row
+        move.l  40+12(sp),a3            // a3 -> the codes
+        move.l  40+16(sp),d3            // d3 <- stride
+        move.l  40+20(sp),d4            // d4 <- fwidth
+        move.l  40+24(sp),d5            // d5 <- count
+        move.l  40+28(sp),d6            // d6 <- rows
+        subq.w  #1,d6
+        move.w  d5,d7
+        lsr.w   #2,d7
+        subq.w  #1,d7                   // d7 <- groups of four codes - 1
+        andi.w  #3,d5
+        subq.w  #1,d5                   // d5 <- codes left over - 1
+tg_row: move.l  a3,a2
+        move.l  a4,a1
+        move.l  a5,a0
+        move.w  d7,d2
+        jmi     tg_rem
+tg_four:
+        move.w  (a2)+,d0
+        move.b  0(a0,d0.w),(a1)+
+        move.w  (a2)+,d0
+        move.b  0(a0,d0.w),(a1)+
+        move.w  (a2)+,d0
+        move.b  0(a0,d0.w),(a1)+
+        move.w  (a2)+,d0
+        move.b  0(a0,d0.w),(a1)+
+        dbra    d2,tg_four
+tg_rem: move.w  d5,d2
+        jmi     tg_next
+tg_one: move.w  (a2)+,d0
+        move.b  0(a0,d0.w),(a1)+
+        dbra    d2,tg_one
+tg_next:
+        adda.l  d3,a4
+        adda.l  d4,a5
+        dbra    d6,tg_row
+        movem.l (sp)+,d2-d7/a2-a5
         rts
 
 #endif
