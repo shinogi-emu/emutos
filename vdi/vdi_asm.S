@@ -140,6 +140,78 @@ _nvdi_get_font_dir_entry:
         .text
 
         .globl  _GSX_ENTRY
+#if CONF_WITH_VDI_FASTDRAW
+/*
+ * The registers the C code of the VDI leaves alone (d2-d7, a2-a6) are
+ * not saved here: the compiler keeps them, and every assembler routine
+ * the VDI calls does (see fast_bit_blt, normal_blit, protect_*).  Only
+ * what C may change, and this routine uses, is kept for the caller.
+ */
+_GSX_ENTRY:
+#ifdef __mcoldfire__
+        lea     -16(sp),sp
+        movem.l d1/a0-a2,(sp)           //Save the registers this routine changes
+#else
+        movem.l d1/a0-a2,-(sp)          //Save the registers this routine changes
+#endif
+
+/* Make a local copy of the array pointers in the user's parameter block. */
+
+        movea.l d1,a1           // get address of user's parameter block
+        lea     _local_pb, a0    // get address of local storage area
+        movea.l (a1)+,a2        // get address of user's CONTRL array
+        move.l  a2,(a0)+        // save address of user's CONTRL array
+        move.l  (a1)+,(a0)+     // save address of user's INTIN  array
+        move.l  #lcl_ptsin,(a0)+ // save address of local PTSIN array
+        move.l  (a1)+,d1        // get address of user's PTSIN array
+        move.l  (a1)+,(a0)+     // save address of user's INTOUT array
+        move.l  (a1),(a0)       // save address of user's PTSOUT array
+
+/* Save a copy of the user's CONTRL[1] element on the stack, in case we change it. */
+#ifdef __mcoldfire__
+        moveq   #0,d0
+#endif
+        move.w  2(a2),d0        // get number of PTSIN entries from CONTRL[1]
+
+/* Validate the number of entries in user's PTSIN array. */
+        move.w  d0,-(sp)        // save number of PTSIN entries from CONTRL[1]
+        jeq     no_ptsin        // for number of vertices = 0
+        cmpi.w  #MAX_VERTICES,d0  // # of user vertices > # of allowable vertices?
+        jle     ptsin_ok        // for user vertices =< # of allowable vertices
+        move.w  #MAX_VERTICES,d0  // user vertices > # of allowable vertices
+        move.w  d0,2(a2)        // put max # of vertices in user's CONTRL[1]
+ptsin_ok:
+        movea.l d1,a0           // user's PTSIN array
+        lea     lcl_ptsin,a1    // shared area used for local copy of PTSIN array
+        subq.l  #1,d0           // adjust coordinate count for loop
+save_ptsin:
+        move.l  (a0)+,(a1)+     // save x,y coordinate pair
+#ifdef __mcoldfire__
+        subq.l  #1,d0
+        jpl     save_ptsin      // point to next x,y coordinate pair
+#else
+        dbra    d0,save_ptsin   // point to next x,y coordinate pair
+#endif
+
+no_ptsin:
+/* Call screen which contains all the C routines for the SCREEN DRIVER. */
+        jsr     _screen
+
+/* Restore user's CONTRL[1] element from the stack. */
+        movea.l _CONTRL,a0      // get address of user's CONTRL array
+        move.w  (sp)+,2(a0)     // original # of PTSIN entries to CONTRL[1]
+
+#ifdef __mcoldfire__
+        movem.l (sp), d1/a0-a2  // restore the caller's registers
+        lea     16(sp), sp
+#else
+        movem.l (sp)+, d1/a0-a2 // restore the caller's registers
+#endif
+        moveq   #0,d0
+        move.w  _flip_y,d0      // set d0 to indicate magnitude/coordinate
+
+        rts
+#else
 _GSX_ENTRY:
 #ifdef __mcoldfire__
         lea     -56(sp),sp
@@ -204,6 +276,7 @@ no_ptsin:
         move.w  _flip_y,d0      // set d0 to indicate magnitude/coordinate
 
         rts
+#endif /* CONF_WITH_VDI_FASTDRAW */
 
 #define F_SAVRDY        0               // save buffer status flag: 0:empty  1:full
 #define F_SAVWID        1               // saved line width        0:word   1:longword
