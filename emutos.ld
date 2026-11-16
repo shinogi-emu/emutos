@@ -124,7 +124,17 @@ SECTIONS
     /* The TEXT segment contains EmuTOS executable code and read-only data.
      * It is always read-only, so it can safely live in ROM.
      */
+#ifdef TARGET_QEMU_VIRT
+    /* QEMU treats every store to a page that holds translated code as a
+     * possible self-modifying write, and takes a slow path for it (hundreds
+     * of ns per store).  The VDI and the BIOS store to .low_stram and .bss
+     * on every call, so keep the code on pages of its own: start .text on a
+     * page boundary and end it on one (the next section starts there).
+     */
+    .text ALIGN(0x1000) : SUBALIGN(2)
+#else
     .text : SUBALIGN(2)
+#endif
     {
         CREATE_OBJECT_SYMBOLS
         __text = .;
@@ -133,6 +143,9 @@ SECTIONS
          * We mix .text and .rodata to keep critical parts (such as BIOS
          * and fonts) at the beginning of the ROM.
          */
+#ifdef TARGET_QEMU_VIRT
+        . = ALIGN(0x1000);
+#endif
         __etext = .;
     } >REGION_READ_ONLY =0x4afc
 
