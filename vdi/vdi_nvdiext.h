@@ -106,16 +106,20 @@ struct VdiItab_
 
 /*
  * A colour table of a workstation (see vdi_ctab.c): one a program made with
- * v_create_ctab (it has the pointer to 'table'), or a snapshot the VDI keeps
- * of the workstation's colours, with the inverse table made for it.
+ * v_create_ctab, or a snapshot the VDI keeps of the workstation's colours,
+ * with the inverse table made for it.  The node is the VDI's own memory;
+ * the table of one a program made is a block of its own, which the program
+ * has the pointer to and may write all of (only as many colours as
+ * no_colors are allocated); a snapshot's table follows its node.
  */
 typedef struct VdiCtab_ VdiCtab;
 struct VdiCtab_
 {
     VdiCtab *next;
-    WORD kind;                  /* VDI_CTAB_CREATED, _CURRENT or _PENS */
+    COLOR_TAB *table;
     VdiItab *inverse;           /* the snapshots: the inverse table of 'table', or NULL */
-    COLOR_TAB table;            /* only as many colours as no_colors are allocated */
+    WORD kind;                  /* VDI_CTAB_CREATED, _CURRENT or _PENS */
+    WORD pad;                   /* the table after the node stays long aligned */
 };
 
 #define VDI_CTAB_CREATED    0   /* made by v_create_ctab */

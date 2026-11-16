@@ -18,11 +18,13 @@
  * used; a change gives the first one a new id.  Each keeps the inverse
  * table made for it, at 4 bits a component, until the colours change.
  *
- * Tables a program makes with v_create_ctab are its to read and write
- * (they are in memory every program can reach); inverse tables are the
- * VDI's, the program only gets a number for one, never the same twice.
- * Both kinds belong to the workstation and go when it is closed (see
- * vdi_main.c), or with v_delete_ctab and v_delete_itab.
+ * Tables a program makes with v_create_ctab are its to read and write:
+ * each is a block of its own, in memory every program can reach, holding
+ * the table only (the VDI's record of it is elsewhere, in its own memory).
+ * Inverse tables are the VDI's, the program only gets a number for one,
+ * never the same twice.  Both kinds belong to the workstation and go when
+ * it is closed (see vdi_main.c), or with v_delete_ctab and v_delete_itab;
+ * the program's pointer to a table is no good after either.
  *
  * Copyright (C) 2026 The EmuTOS development team
  *
@@ -226,11 +228,13 @@ static void unlink_ctab(Vwk *vwk, VdiCtab *node)
 }
 
 
-/* free an unlinked table and its inverse table (may sleep) */
+/* free an unlinked table, its inverse table and, for one a program made, its block (may sleep) */
 static void free_ctab(VdiCtab *node)
 {
     if (node->inverse)
         vdi_free_kept(node->inverse);
+    if (node->kind == VDI_CTAB_CREATED && node->table)
+        vdi_free_kept(node->table);
     vdi_free_kept(node);
 }
 
@@ -258,22 +262,43 @@ void vdi_ctab_release(Vwk *vwk)
 }
 
 
-/* a table node of 'count' colours, not linked (may sleep) */
+/*
+ * a table node of 'count' colours, not linked (may sleep): a snapshot's table
+ * follows the node, in the VDI's memory; one a program made is a block of
+ * its own that every program can write (the program writes nothing of the
+ * VDI's then, whatever it writes in its block)
+ */
 static VdiCtab *alloc_ctab(WORD count, WORD kind)
 {
-    LONG size = (LONG)offsetof(VdiCtab, table) + COLOR_TAB_BYTES(count);
     VdiCtab *node;
+    COLOR_TAB *table;
 
     if (kind == VDI_CTAB_CREATED)
-        node = (VdiCtab *)vdi_alloc_kept_mode(size, CTAB_SHARED_MODE);
+    {
+        node = (VdiCtab *)vdi_alloc_kept(sizeof(VdiCtab));
+        table = (COLOR_TAB *)vdi_alloc_kept_mode(COLOR_TAB_BYTES(count), CTAB_SHARED_MODE);
+        if (!node || !table)
+        {
+            if (node)
+                vdi_free_kept(node);
+            if (table)
+                vdi_free_kept(table);
+            return NULL;
+        }
+    }
     else
-        node = (VdiCtab *)vdi_alloc_kept(size);
-    if (!node)
-        return NULL;
+    {
+        node = (VdiCtab *)vdi_alloc_kept((LONG)sizeof(VdiCtab) + COLOR_TAB_BYTES(count));
+        if (!node)
+            return NULL;
+        table = (COLOR_TAB *)(node + 1);
+    }
     node->next = NULL;
-    node->kind = kind;
+    node->table = table;
     node->inverse = NULL;
-    ctab_header(&node->table, count, 0);
+    node->kind = kind;
+    node->pad = 0;
+    ctab_header(table, count, 0);
     return node;
 }
 
@@ -292,7 +317,7 @@ static VdiCtab *find_kind(Vwk *vwk, WORD kind)
 /* bring a snapshot up to the pens; a changed table by pixel value gets a new id */
 static void refresh(Vwk *vwk, VdiCtab *node)
 {
-    COLOR_TAB *t = &node->table;
+    COLOR_TAB *t = node->table;
     COLOR_ENTRY e;
     WORD i, count = (WORD)t->no_colors;
     BOOL changed = FALSE;
@@ -321,7 +346,7 @@ static VdiCtab *snapshot(Vwk *vwk, WORD kind, BOOL make)
     VdiCtab *node, *fresh;
 
     node = find_kind(vwk, kind);
-    if (node && node->table.no_colors == count)
+    if (node && node->table->no_colors == count)
     {
         refresh(vwk, node);
         return node;
@@ -393,15 +418,15 @@ BOOL vdi_ctab_prepare(Vwk *vwk, WORD kind, BOOL inverse)
 
     if (!node)
         return FALSE;
-    if (!inverse || itab_fits(node->inverse, &node->table))
+    if (!inverse || itab_fits(node->inverse, node->table))
         return TRUE;
-    count = (WORD)node->table.no_colors;
+    count = (WORD)node->table->no_colors;
     t = alloc_itab(count, CTAB_ITAB_BITS);
     work = vdi_alloc_kept(XFER_ITAB_WORK(count));
     node = snapshot(vwk, kind, FALSE);
-    if (node && t && work && node->table.no_colors == count)
+    if (node && t && work && node->table->no_colors == count)
     {
-        fill_itab(t, node->table.colors, work);
+        fill_itab(t, node->table->colors, work);
         old = node->inverse;
         node->inverse = t;
         t = old;            /* freed below */
@@ -425,7 +450,7 @@ const VdiCtab *vdi_ctab_get(Vwk *vwk, WORD kind, BOOL inverse)
 {
     VdiCtab *node = snapshot(vwk, kind, FALSE);
 
-    if (!node || (inverse && !itab_fits(node->inverse, &node->table)))
+    if (!node || (inverse && !itab_fits(node->inverse, node->table)))
         return NULL;
     return node;
 }
@@ -563,7 +588,7 @@ void vdi_vq_ctab(Vwk *vwk)
             node = snapshot(vwk, VDI_CTAB_CURRENT, TRUE);  /* may sleep */
             if (!node)
                 break;
-            memcpy(INTOUT, &node->table, length);
+            memcpy(INTOUT, node->table, length);
         }
         else
         {
@@ -592,7 +617,7 @@ void vdi_vq_ctab(Vwk *vwk)
         break;
     case 2:
         node = snapshot(vwk, VDI_CTAB_CURRENT, TRUE);  /* may sleep */
-        put_long(INTOUT, node ? node->table.map_id : 0);
+        put_long(INTOUT, node ? node->table->map_id : 0);
         n = 2;
         break;
     case 3:
@@ -632,15 +657,15 @@ void vdi_vq_ctab(Vwk *vwk)
                 c = alloc_ctab(default_count(bits), VDI_CTAB_CREATED);     /* may sleep */
                 if (c)
                 {
-                    default_table(&c->table, bits);
+                    default_table(c->table, bits);
                     id = new_id();
-                    c->table.map_id = id;
+                    c->table->map_id = id;
                     c->next = vwk->ctabs;
                     vwk->ctabs = c;
                 }
             }
         }
-        put_long(INTOUT, c ? (LONG)&c->table : 0L);
+        put_long(INTOUT, c ? (LONG)c->table : 0L);
         n = 2;
         break;
     case 9:
@@ -651,7 +676,7 @@ void vdi_vq_ctab(Vwk *vwk)
             for (c = vwk->ctabs; c; c = c->next)
             {
                 /* the pointer is compared, never read through */
-                if (c->kind == VDI_CTAB_CREATED && (LONG)&c->table == value)
+                if (c->kind == VDI_CTAB_CREATED && (LONG)c->table == value)
                 {
                     unlink_ctab(vwk, c);
                     free_ctab(c);                   /* may sleep */

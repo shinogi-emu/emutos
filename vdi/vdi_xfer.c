@@ -197,7 +197,7 @@ static BOOL index_tables(Vwk *vwk, const COLOR_TAB *sctab, WORD scount,
         node = vdi_ctab_get(vwk, ckind, inverse);
         if (!node)
             return FALSE;
-        t->itab = inverse ? node->inverse : vdi_itab_find(vwk, ditab, &node->table);
+        t->itab = inverse ? node->inverse : vdi_itab_find(vwk, ditab, node->table);
     }
     if (!t->itab)
         return FALSE;
@@ -206,8 +206,8 @@ static BOOL index_tables(Vwk *vwk, const COLOR_TAB *sctab, WORD scount,
         node = vdi_ctab_get(vwk, VDI_CTAB_PENS, FALSE);
         if (!node)
             return FALSE;
-        t->scol = node->table.colors;
-        t->scount = (WORD)node->table.no_colors;
+        t->scol = node->table->colors;
+        t->scount = (WORD)node->table->no_colors;
     }
     else if (sctab)
     {
