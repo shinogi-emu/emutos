@@ -168,21 +168,9 @@ static BOOL default_table(COLOR_TAB *t, LONG bits)
 
 
 /*
- * TRUE if a program's colour table can be read as one: aligned, the magic,
- * format 0, RGB, 1-256 colours, long enough for them
- */
-BOOL vdi_ctab_valid(const COLOR_TAB *ctab)
-{
-    return ctab && !((ULONG)ctab & 1) &&
-           ctab->magic == COLOR_TAB_MAGIC && ctab->format == 0 &&
-           ctab->color_space == 1 && ctab->no_colors > 0 && ctab->no_colors <= 256 &&
-           ctab->length >= COLOR_TAB_BYTES(ctab->no_colors);
-}
-
-
-/*
  * Copy the header of a program's colour table once, and say whether the
- * copy describes a table that can be read (as vdi_ctab_valid()).  The
+ * copy describes a table that can be read: an even address, the magic,
+ * format 0, RGB, 1-256 colours, a length that holds them.  The
  * program may change its table at any time: only the copy is looked at,
  * and the colours are read as far as the copy's count says.  A NULL or odd
  * pointer is not read (the copy then has no colours).
@@ -511,15 +499,17 @@ static WORD set_entries(Vwk *vwk, WORD first, LONG count, const COLOR_ENTRY *col
 void vdi_vs_ctab(Vwk *vwk)
 {
     const COLOR_TAB *t = (const COLOR_TAB *)INTIN;
-    LONG space;
+    COLOR_TAB_HEAD head;
+    LONG space, nintin = CONTRL[3];
     WORD done = 0, i, rgb[3];
 
     switch (CONTRL[5])
     {
     case 0:
-        if (CONTRL[3] >= COLOR_TAB_HEADER / 2 && vdi_ctab_valid(t) &&
-            (LONG)CONTRL[3] * 2 >= COLOR_TAB_BYTES(t->no_colors))
-            done = set_entries(vwk, 0, t->no_colors, t->colors);
+        /* the header once, then the colours it says (no more than intin holds), once each */
+        if (nintin >= COLOR_TAB_HEADER / 2 && vdi_ctab_head(t, &head) &&
+            nintin * 2 >= COLOR_TAB_BYTES(head.no_colors))
+            done = set_entries(vwk, 0, head.no_colors, t->colors);
         break;
     case 1:
         if (CONTRL[3] >= 7)
