@@ -17,6 +17,12 @@
  * no table, see vdi_xfer.c).  Each is compared with the pens when it is
  * used; a change gives the first one a new id.  Each keeps the inverse
  * table made for it, at 4 bits a component, until the colours change.
+ * Making one takes 4096 searches of the palette: at 256 colours about 2 s
+ * on a Falcon (as fVDI, which searches the same way, only slower).  It is
+ * made by the first dithered transfer onto planes of a workstation, by the
+ * first transfer into 8-bit indices without an inverse table of their own,
+ * and again after the colours change: a program that cycles colours and
+ * dithers between the changes pays it each time.
  *
  * Tables a program makes with v_create_ctab are its to read and write:
  * each is a block of its own, in memory every program can reach, holding
@@ -24,7 +30,10 @@
  * Inverse tables are the VDI's, the program only gets a number for one,
  * never the same twice.  Both kinds belong to the workstation and go when
  * it is closed (see vdi_main.c), or with v_delete_ctab and v_delete_itab;
- * the program's pointer to a table is no good after either.
+ * the program's pointer to a table is no good after either.  Like the
+ * workstation itself, they stay if a program ends without closing it
+ * (the two snapshots and their inverse tables come to about 8 KB at 256
+ * colours).
  *
  * Copyright (C) 2026 The EmuTOS development team
  *
@@ -230,7 +239,9 @@ static void free_ctab(VdiCtab *node)
 /*
  * Free the tables of a workstation that is closed.  Each is unlinked before
  * it is freed (the free may sleep), so a release that has to be done again
- * (vdi_main.c) finds only what is left.
+ * (vdi_main.c) finds only what is left.  The close that waits for sleeping
+ * programs (vdi_release_vwk()) comes here through the same release_vwk()
+ * as the immediate one.
  */
 void vdi_ctab_release(Vwk *vwk)
 {
