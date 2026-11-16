@@ -107,7 +107,11 @@ static const WORD INQ_TAB_rom[45] = {
     0,                  /* 25 -  */
     0,                  /* 26 -  */
     0,                  /* 27 -  */
+#if HAVE_BEZIER
+    2,                  /* 28 - bezier flag (bit 1) */
+#else
     0,                  /* 28 - bezier flag (bit 1) */
+#endif
     0,                  /* 29 -  */
 #if CONF_WITH_VDI_NVDI_EXT
     4,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling?; bit 2: vr_clip_rects */
@@ -385,17 +389,10 @@ static void init_wk(Vwk * vwk)
 #endif
 
 #if WITH_BEZ_QUAL
-    vwk->bez_qual = 7;
+    vwk->bez_qual = 0;          /* fVDI's depth scale: the finest (see vdi_bezier.c) */
 #endif
 #if HAVE_BEZIER
-    /* setup initial bezier values */
-#if 0
-    vwk->bezier.available = 1;
-    vwk->bezier.depth_scale.min = 9;
-    vwk->bezier.depth_scale.max = 0;
-    vwk->bezier.depth.min = 2;
-    vwk->bezier.depth.max = 7;
-#endif
+    vwk->bez_on = 0;
 #endif
 
     vwk->next_work = NULL;  /* neatness */

@@ -1,631 +1,669 @@
 /*
- * vdi_bezier.c - implementation of Bézier functions for EmuTOS VDI
+ * vdi_bezier.c - Bezier curves: v_bez(), v_bez_fill(), v_bez_on()/v_bez_off()
+ * and v_bez_qual()
  *
- * These use a fast Bézier approximation using four control points.
- * Note: At this time (August 2020), all Bézier functions are disabled;
- * none have been tested recently.
+ * The curves are made as fVDI makes them (engine/bezier.c): each section is
+ * divided in two until it is small enough, to a depth that depends on its
+ * size and on the quality asked for (a depth scale, 0 the finest, 9 the
+ * coarsest), less finely where it lies outside the clipping rectangle.  The
+ * points then go to the ordinary line and fill code: a move point starts a
+ * new polyline, or a new contour of the filled area.  The contours are filled
+ * at once, even-odd, as the outlines of one polygon: with v_fillarea()'s rule
+ * for the rows (the top row of the whole area is left out, as v_fillarea()
+ * leaves out a polygon's) and for the ends of the edges.
  *
- * Copyright 1998-2002, Trevor Blight
- * Copyright 2004-2020 The EmuTOS development team
+ * The arithmetic of the curves (bez_depth(), do_bez4(), the point counting
+ * and copying of calc_bez()) is fVDI's.  Differences:
+ * - a curve must have its four points: fVDI also takes one that starts on
+ *   the third last point, and reads a point beyond the array for it;
+ * - the flags of the points are read only as far as CONTRL[3] reaches;
+ * - intout[1] is the number of move points (fVDI answers 1 when anything was
+ *   made of curves or moves); the extent covers exactly the points made;
+ * - each polyline is drawn as v_pline() draws one (width, ends), and a
+ *   filled area as v_fillarea() fills (fVDI's own fill also fills the top
+ *   row), with its perimeter when vsf_perimeter() asks for one;
+ * - at most MAX_VERTICES points are made (fVDI: 1024), in a buffer of the
+ *   VDI's: the drawing makes no OS call, so it cannot be needed twice at once.
+ *
+ * Copyright 1999-2001/2003, Johan Klockars (fVDI)
+ * Copyright 1999, Caldera Thin Clients, Inc.
+ * Copyright (C) 2004-2026 The EmuTOS development team
  *
  * This file is distributed under the GPL, version 2 or at your
  * option any later version.  See doc/license.txt for details.
  */
 
+/*
+ * The method, from fVDI's bezier.c:
+ *
+ *   Description       : Fast Bezier approximation using
+ *                       four control points.
+ *
+ *   Original Author   : William D. Herndon, CCP Software, 29.04.88
+ *                       See also the best book so far on beziers:
+ *                        Algorithms for graphics & image processing,
+ *                        Theo Pavlidis, Bell Labs,
+ *                        Computer Science Press ISBN 0-914894-65-X.
+ */
+
 #include "emutos.h"
 #include "vdi_defs.h"
-#include "biosbind.h"
-#include "asm.h"        /* for malloc */
-#include "aesext.h"
+#include "intmath.h"
+#include "lineavars.h"
+#include "string.h"
 
 #if HAVE_BEZIER
 
-/*
- * We conform to the PC-GEM/3 file standard with the inclusion of bezier
- * curve rendering capability with the v_bez() and v_bez_fill() calls.
- *
- * In 2D geometry, a vertex is a corner of a polygon (where two sides meet)
- *
- * Quadratic Bézier curves
- *
- * A quadratic Bézier curve is the path traced by the function P(t). For
- * points A, B, and C.
- *
- * Points on a quadratic Bézier curve can be computed recursively:
- *
- * 1. Let A, B and C be the startpoint, control point and endpoint of the curve.
- * 2. Let D be the midpoint of the line AB.
- * 3. Let E be the midpoint of the line BC.
- * 4. Let F be the midpoint of the line DE. F is a point on the curve.
- * 5. Recurse with A = A, B = D and C = F.
- * 6. Recurse with A = F, B = E and C = C.
- *
- * You can easily try this out on a piece of paper.
- */
+#define BEZ_START       0x01    /* the point and the next three are a curve */
+#define BEZ_MOVE        0x02    /* the point starts a new polyline */
 
-#define MIN_QUAL 0
-#define IS_BEZ(f) ((f&1)!=0)
-#define IS_JUMP(f) ((f&2)!=0)
+#define BEZ_MIN_DEPTH       2       /* a curve is never made of fewer than 3 << 1 lines */
+#define BEZ_MAX_DEPTH       7
+#define COARSEST_SCALE  9       /* the depth scale: 0 the finest, 9 the coarsest */
+#define MAX_POINTS      MAX_VERTICES
+
+/* the points made, and a bit for each that starts a new polyline or contour */
+static Point bez_pts[MAX_POINTS + 1];
+static UBYTE bez_break[(MAX_POINTS + 8) / 8];
+
+#define SET_BREAK(i)    (bez_break[(i) >> 3] |= (UBYTE)(0x80 >> ((i) & 7)))
+#define IS_BREAK(i)     (bez_break[(i) >> 3] & (0x80 >> ((i) & 7)))
 
 
-
-/*
- * labs - absolute for LONG
- */
-static LONG
-labs(LONG x)
+/* the flags of point i: intin is in the byte order of the PC (point 0 is the low byte of intin[0]) */
+static WORD bez_flags(WORD i)
 {
-    if (x < 0)
-        return(-x);
-    else
-        return(x);
+    UWORD w = (UWORD)INTIN[i >> 1];
+
+    return (i & 1) ? (WORD)(w >> 8) : (WORD)(w & 0xff);
 }
 
 
-
-/*
- * gen_segs -  compute bezier function by difference method
- *
- * last point is included
- * one dimension only, so use alternate elements of array & px
- * array[0] : anchor 1
- * array[2] : control 1
- * array[4] : control 2
- * array[6] : anchor 2
- */
-static void
-gen_segs(WORD *const array, WORD *px, const int bez_qual,
-         WORD * pmin, WORD * pmax, WORD fill)
+/* the largest of the distances of the coordinates b - v1, b - v2, b - v3 */
+static WORD max3(WORD b, WORD v1, WORD v2, WORD v3)
 {
-    LONG d3x, d2x, d1x;
-    LONG x0;
-    int q = 3 * bez_qual;
-    int qd = 0;
-    int i;
-    WORD x;
+    WORD m = b - v1, t;
 
-    /*** calculate 1st, 2nd & 3rd order differences ***/
-    d1x = (LONG)array[2]-array[0];
-    d2x = (LONG)array[4]-array[2];
-    d3x = -array[0] - 3*d2x + array[6];
-    d2x -= d1x;
-
-    if (!fill && q >= 3) {
-        d1x>>=1;
-        d2x>>=1;
-        d3x>>=1;
-        q--;
-    }
-
-    d1x = ((3L * d1x) << (2 * bez_qual)) + ((3L * d2x) << bez_qual) + d3x;
-    /* assert( d1x <=  0x5f408000 ); */
-    /* assert( d1x >= -0x5f408000 ); */
-
-    d3x = 6L*d3x;
-    /* assert( d3x <=  0xbffe8 ); */
-    /* assert( d3x >= -0xbffe8 ); */
-
-    d2x = ((6L*d2x)<<bez_qual) + d3x;
-    /* assert( d2x <=  0x2f6fa12 ); */
-    /* assert( d2x >= -0x2f6fa12 ); */
-
-    x0 = labs(array[0]);
-    while( x0 >= (0x7fffffffL>>q) )
-        q--, qd++;
-
-    x0 = (((LONG)array[0]) << q) + (1L << (q - 1));
-
-    for(i = 1 << bez_qual; i > 0; i--) {
-        x = (WORD)(x0 >> q);
-        *px = x;
-        if ( x < *pmin )
-            *pmin = x;
-        if ( x > *pmax )
-            *pmax = x;
-        px+=2;
-
-        if (labs( (x0 >> 1) + (d1x >> (qd + 1)) ) >= 0x3ffffffeL) {
-            /** halve scale to avoid overflow **/
-            x0 >>= 1;
-            q--;
-            qd++;
-            /* assert( labs(x0+(d1x>>qd)) >= 0x40000000L ); */
-        }
-
-        x0 += d1x >> qd;
-        if ( qd > 0 && labs(x0) < 0x40000000L ) {
-            /** double scale to maximise accuracy **/
-            x0 = (x0 << 1)|1;
-            q++, qd--;
-        }
-
-        /* assert( d2x<0 || d1x <=  0x7fffffff-d2x ); */
-        /* assert( d2x>0 || d1x >= -0x7fffffff-d2x ); */
-        d1x += d2x;
-        d2x += d3x;
-        /* assert( d2x <=  0x30bf9e8 ); */
-        /* assert( d2x >= -0x30bf9e8 ); */
-    }
-
-    /** add the last point .. */
-    *px = x = array[6];
-    if ( x < *pmin )
-        *pmin = x;
-    if ( x > *pmax )
-        *pmax = x;
+    if (m < 0)
+        m = -m;
+    t = b - v2;
+    if (t < 0)
+        t = -t;
+    if (t > m)
+        m = t;
+    t = b - v3;
+    if (t < 0)
+        t = -t;
+    if (t > m)
+        m = t;
+    return m;
 }
 
 
+/*
+ * bez_depth - the depth of division a curve needs to look smooth, from an
+ * estimate of its area (rather too much than too little)
+ */
+static WORD bez_depth(const Point *p, WORD depth_scale)
+{
+    WORD xdiff, ydiff, depth;
+    LONG bez_size;
+
+    xdiff = max3(p[0].x, p[1].x, p[2].x, p[3].x);
+    ydiff = max3(p[0].y, p[1].y, p[2].y, p[3].y);
+
+    bez_size = (LONG)xdiff * ydiff;
+
+    if (!(bez_size >>= 4 * BEZ_MIN_DEPTH + depth_scale - 2))
+        return BEZ_MIN_DEPTH;
+
+    for (depth = BEZ_MIN_DEPTH + 1; depth < BEZ_MAX_DEPTH; depth++)
+        if (!(bez_size >>= 4))
+            return depth;
+
+    return BEZ_MAX_DEPTH;
+}
+
 
 /*
- * draw_segs - draw segments in xptsin array
- *
- * do piece-wise if input array is too big
- * not guaranteed to work if FILL, but still better than anything else
+ * One section of a curve: its end point (the start is the anchor of the
+ * next node), the direction points of the end and of the start, whether it
+ * is entirely inside the clipping rectangle, and how much more it is divided.
+ * Coordinates are fixed point: the pixel times 2^15, with half a pixel added.
  */
-
-/* mode values for draw_segs() */
-#define FILL    9       /* v_pline() */
-#define NO_FILL 6       /* v_fill_area() */
-
-static void
-draw_segs(Vwk * vwk, WORD nr_vertices, Point * point, WORD mode)
+struct coords
 {
-    if ( nr_vertices >= 2 ) {
-        if (nr_vertices > INQ_TAB[14])
-            nr_vertices = INQ_TAB[14];
+    LONG x;
+    LONG y;
+};
 
-        /* output to driver, converting ndc if necessary */
-        if (mode == FILL) {
-            polygon(vwk, point, nr_vertices);
+struct node
+{
+    struct coords anchor;
+    struct coords in;
+    struct coords out;
+    WORD onscreen;
+    WORD level;
+};
+
+#define BEZ_HI(v)   ((WORD)((v) >> 16))
+#define FIXED(c)    ((((LONG)(c)) << 15) + 0x4000)
+
+/* sort two pairs and widen min/max by the second */
+#define MINMAX(min, max, v3, v4)    \
+    do {                            \
+        WORD tmp_;                  \
+        if (min > max) {            \
+            tmp_ = min; min = max; max = tmp_; \
+        }                           \
+        if (v3 > v4) {              \
+            tmp_ = v3; v3 = v4; v4 = tmp_; \
+        }                           \
+        if (v4 > max)               \
+            max = v4;               \
+        if (v3 < min)               \
+            min = v3;               \
+    } while (0)
+
+
+/*
+ * do_bez4 - the points of a curve of four control points, to 'depth'
+ *
+ * The first point is already there and the last one is added by the caller;
+ * returns the number of points written to 'out' plus one.
+ */
+static WORD do_bez4(const Point *in, WORD depth, Point *out, const WORD *clip)
+{
+    WORD count = 0;
+    struct coords mid;
+    struct node *current;
+    struct node bez[BEZ_MAX_DEPTH + 1];
+
+    current = bez;
+    current->onscreen = FALSE;
+    current->level = depth - 1;     /* the last step has a hidden half depth */
+    /* back to front, so that the points come out in the right order */
+    current->anchor.x = FIXED(in[3].x);
+    current->anchor.y = FIXED(in[3].y);
+    current->in.x = FIXED(in[2].x);
+    current->in.y = FIXED(in[2].y);
+    current->out.x = FIXED(in[1].x);
+    current->out.y = FIXED(in[1].y);
+    (current + 1)->anchor.x = FIXED(in[0].x);
+    (current + 1)->anchor.y = FIXED(in[0].y);
+
+    for (;;)
+    {
+        if (!current->onscreen)
+        {
+            WORD xmin, xmax, ymin, ymax, v3, v4;
+
+            xmin = BEZ_HI(current->anchor.x);
+            xmax = BEZ_HI(current->in.x);
+            v3 = BEZ_HI(current->out.x);
+            v4 = BEZ_HI((current + 1)->anchor.x);
+            MINMAX(xmin, xmax, v3, v4);
+
+            ymin = BEZ_HI(current->anchor.y);
+            ymax = BEZ_HI(current->in.y);
+            v3 = BEZ_HI(current->out.y);
+            v4 = BEZ_HI((current + 1)->anchor.y);
+            MINMAX(ymin, ymax, v3, v4);
+
+            xmin = xmin * 2 - 16;       /* room for the thickness of the line */
+            ymin = ymin * 2 - 16;
+            xmax = xmax * 2 + 1 + 16;
+            ymax = ymax * 2 + 1 + 16;
+            if ((xmax < clip[0]) || (xmin > clip[2]) || (ymax < clip[1]) || (ymin > clip[3]))
+                current->level = 0;     /* outside: no further division */
+            else if ((xmin >= clip[0]) && (xmax <= clip[2]) && (ymin >= clip[1]) && (ymax <= clip[3]))
+                current->onscreen = TRUE;
+        }
+
+        if (current->level <= 0)
+        {
+            /* the last stage: the section as three lines */
+            out->x = (WORD)(((((current + 1)->anchor.x + current->in.x) >> 1) + current->out.x) >> 16);
+            out->y = (WORD)(((((current + 1)->anchor.y + current->in.y) >> 1) + current->out.y) >> 16);
+            out++;
+            out->x = (WORD)((((current->anchor.x + current->out.x) >> 1) + current->in.x) >> 16);
+            out->y = (WORD)((((current->anchor.y + current->out.y) >> 1) + current->in.y) >> 16);
+            out++;
+            count += 3;
+            if (current == bez)
+                break;
+            out->x = (WORD)((current->anchor.x << 1) >> 16);
+            out->y = (WORD)((current->anchor.y << 1) >> 16);
+            out++;
+            current--;
         }
         else
         {
-            short i;
-            Line line;
+            /* divide the section in two */
+            mid.x = (current->in.x + current->out.x) >> 1;
+            mid.y = (current->in.y + current->out.y) >> 1;
+            (current + 2)->anchor.x = (current + 1)->anchor.x;
+            (current + 2)->anchor.y = (current + 1)->anchor.y;
+            (current + 1)->out.x = (current->out.x + (current + 1)->anchor.x) >> 1;
+            (current + 1)->out.y = (current->out.y + (current + 1)->anchor.y) >> 1;
+            (current + 1)->in.x = (mid.x + (current + 1)->out.x) >> 1;
+            (current + 1)->in.y = (mid.y + (current + 1)->out.y) >> 1;
+            current->in.x = (current->in.x + current->anchor.x) >> 1;
+            current->in.y = (current->in.y + current->anchor.y) >> 1;
+            current->out.x = (current->in.x + mid.x) >> 1;
+            current->out.y = (current->in.y + mid.y) >> 1;
+            (current + 1)->anchor.x = ((current + 1)->in.x + current->out.x) >> 1;
+            (current + 1)->anchor.y = ((current + 1)->in.y + current->out.y) >> 1;
 
-            LSTLIN = FALSE;
-            for(i = nr_vertices - 1; i > 0; i--) {
-                line.x1 = point->x;
-                line.y1 = point->y;
-                point++;                /* advance point by point */
-                line.x2 = point->x;
-                line.y2 = point->y;
+            current->level--;
+            (current + 1)->level = current->level;
+            (current + 1)->onscreen = current->onscreen;
+            current++;
+        }
+    }
 
-                if (!vwk->clip || clip_line(vwk, &line))
-                    abline(&line, vwk->wrt_mode, vwk->line_color);
+    return count;
+}
+
+
+/*
+ * calc_bez - the points of the curves, lines and moves of PTSIN at a depth
+ * scale, into bez_pts (with bez_break)
+ *
+ * 'close': each contour gets its first point again at its end (for filling).
+ * Returns the number of points made, or -1 if they would be too many or if
+ * there are neither curves nor moves ('*used' then tells which); '*moves'
+ * is the number of move points.
+ */
+static WORD calc_bez(const Point *points, WORD count, WORD depth_scale, BOOL close,
+                     const WORD *clip, WORD *moves, BOOL *used)
+{
+    WORD maxin, i, flags, out, first;
+    LONG maxpnt = count;
+
+    *moves = 0;
+    *used = FALSE;
+
+    /* the flags of the last point are not looked at; nor are those intin does not hold */
+    maxin = count - 1;
+    if (maxin > 2 * CONTRL[3])
+        maxin = 2 * CONTRL[3];
+
+    if (close)
+        maxpnt++;
+    for (i = 0; i < maxin; i++)
+    {
+        flags = bez_flags(i);
+        if (flags & BEZ_MOVE)
+        {
+            (*moves)++;
+            *used = TRUE;
+        }
+        if (flags & BEZ_START)
+        {
+            if (i >= maxin - 2)
+                break;                  /* a curve needs its four points */
+            *used = TRUE;
+            maxpnt += (3L << (bez_depth(points + i, depth_scale) - 1)) - 3;
+            i += 2;
+        }
+    }
+    if (close)
+        maxpnt += *moves;
+    if (maxpnt > MAX_POINTS || !*used)
+        return -1;
+
+    memset(bez_break, 0, sizeof(bez_break));
+    out = 0;
+    first = 0;                          /* the first point of the contour, in PTSIN */
+    for (i = 0; i < count; i++)
+    {
+        if (i < maxin)
+        {
+            flags = bez_flags(i);
+            if (flags & BEZ_MOVE)
+            {
+                if (close)
+                    bez_pts[out++] = points[first];
+                first = i;
+                SET_BREAK(out);
+            }
+            bez_pts[out++] = points[i];
+            if (flags & BEZ_START)
+            {
+                if (i >= maxin - 2)
+                    break;
+                out += do_bez4(points + i, bez_depth(points + i, depth_scale), bez_pts + out, clip) - 1;
+                i += 2;
             }
         }
+        else
+            bez_pts[out++] = points[i];
+    }
+    if (close)
+        bez_pts[out++] = points[first];
+
+    return out;
+}
+
+
+/* the clipping rectangle (x1, y1, x2, y2) the division looks at */
+static void bez_clip(const Vwk *vwk, WORD *clip)
+{
+    if (vwk->clip)
+    {
+        clip[0] = vwk->xmn_clip;
+        clip[1] = vwk->ymn_clip;
+        clip[2] = vwk->xmx_clip;
+        clip[3] = vwk->ymx_clip;
+    }
+    else
+    {
+        clip[0] = clip[1] = 0;
+        clip[2] = xres;
+        clip[3] = yres;
     }
 }
 
 
 /*
- * v_bez - draw a bezier curve
- *
- * outputs a (possibly disjoint) series of bezier curves & polylines.
- *
- * Each element in bezarr[] is a flag that controls the behaviour of the
- * corresponding input point.
- *
- * If bit 0 (ie ls bit) of the flag is set to one, the corresponding
- * point and the next three points define a bezier curve:
- *         1. start point
- *         2. 1st control point
- *         3. 2nd control point
- *         4. end point
- *
- * If bit 0 is zero, the corresponding point is part of a polyline.
- *
- * If bit 1 is set, the corresponding point starts a new disconnected
- * bezier curve.
- *
- * Note: The C function calls are as described here, but internally the C
- * libraries byte swap bezarr[] for intel compatible format.
- * If you are not using the C library, but directly programming the VDI
- * interface, you need to do the byte swapping yourself.
+ * Make the points at the workstation's quality, or coarser where they would
+ * be too many; -1 if they cannot be made (or there is nothing to make)
  */
-void
-v_bez(Vwk * vwk, Point * ptsget, int nr_ptsin)
+static WORD make_points(Vwk *vwk, BOOL close, WORD *moves, BOOL *used)
 {
-    int i;
-    /* WORD  const nr_ptsin = CONTRL[1]; */
-    UBYTE * bezarr = (UBYTE*)INTIN;
-    WORD bez_qual;
-    WORD xmin, xmax, ymin, ymax;
-    WORD total_vertices = nr_ptsin;
-    WORD total_jumps = 0;
-    UWORD vertices_per_bez;
-    Point ptsbuf[MAX_VERTICES];
-    /* Point * ptsget = (Point*)PTSIN; */
-    Point * ptsput = ptsbuf;
+    WORD clip[4], scale, n = -1;
 
-    bez_qual = vwk->bez_qual;
-    vertices_per_bez = 1 << bez_qual;
-    xmin = ymin = 32767;
-    xmax = ymax = 0;
+    bez_clip(vwk, clip);
+    for (scale = vwk->bez_qual; scale <= COARSEST_SCALE; scale++)
+    {
+        n = calc_bez((const Point *)PTSIN, CONTRL[1], scale, close, clip, moves, used);
+        if (n >= 0 || !*used)
+            break;
+    }
+    return n;
+}
 
-    i = 0;
-    while(i < nr_ptsin) {
-        int flag = bezarr[i^1];         /* index with xor 1 to byte swap !! */
 
-        if (IS_BEZ(flag)) {
-            /* bezier start point found */
-            if (i+3 >= nr_ptsin)
-                break;                  /* incomlete curve, omit it */
+/* intout[0] the points, [1] the moves, [2-5] 0; ptsout the extent of the points */
+static void bez_answer(const Point *p, WORD n, WORD moves)
+{
+    WORD i, xmin, ymin, xmax, ymax;
 
-            if (IS_JUMP(flag))
-                total_jumps++;          /* count jump point */
-
-            /* generate line segments from bez points */
-            gen_segs(&ptsget->x, &ptsput->x, bez_qual, &xmin, &xmax, vwk->xfm_mode);    /* x coords */
-            gen_segs(&ptsget->y, &ptsput->y, bez_qual, &ymin, &ymax, vwk->xfm_mode);    /* y coords */
-
-            /* skip to coord pairs at end of bez curve */
-            i += 3;
-            ptsget += 3;
-            total_vertices += vertices_per_bez-3;
-            draw_segs(vwk, vertices_per_bez+1, ptsbuf, NO_FILL );
-        }
-        else {
-            /* polyline */
-            WORD output_vertices = 0;
-            Point * point = ptsget;
-            do {
-                int t;
-
-                t = point->x;
-                if ( t < xmin )
-                    xmin = t;
-                if ( t > xmax )
-                    xmax = t;
-
-                t = point->y;
-                if ( t < ymin )
-                    ymin = t;
-                if ( t > ymax )
-                    ymax = t;
-
-                output_vertices++;
-                if ( IS_BEZ(flag) )
-                    break;              /* stop if a jump point is next */
-
-                /* continue polyline */
-                i++;
-                if (i >= nr_ptsin)
-                    break;
-
-                ptsget += 1;
-                {
-                    int old_flag = flag;
-                    flag = bezarr[i^1];
-                    if (!IS_JUMP(old_flag) && IS_JUMP(flag))
-                        total_jumps++;   /* count jump point */
-                }
-            } while( !IS_JUMP(flag) );
-            draw_segs(vwk, output_vertices, point, NO_FILL);
+    xmin = xmax = ymin = ymax = 0;
+    if (n > 0)
+    {
+        xmin = xmax = p->x;
+        ymin = ymax = p->y;
+        for (i = 1; i < n; i++)
+        {
+            p++;
+            if (p->x < xmin)
+                xmin = p->x;
+            else if (p->x > xmax)
+                xmax = p->x;
+            if (p->y < ymin)
+                ymin = p->y;
+            else if (p->y > ymax)
+                ymax = p->y;
         }
     }
-
-    INTOUT[0] = total_vertices; /* total nr points */
-    INTOUT[1] = total_jumps;    /* total moves */
-    CONTRL[4] = 2;
-    CONTRL[2] = 2;
     PTSOUT[0] = xmin;
     PTSOUT[1] = ymin;
     PTSOUT[2] = xmax;
     PTSOUT[3] = ymax;
+    INTOUT[0] = n;
+    INTOUT[1] = moves;
+    INTOUT[2] = INTOUT[3] = INTOUT[4] = INTOUT[5] = 0;
+    CONTRL[2] = 2;
+    CONTRL[4] = 6;
+}
 
-    return;
+
+/* a polyline as v_pline() draws one */
+static void bez_polyline(Vwk *vwk, Point *p, WORD n)
+{
+    if (vwk->line_width == 1)
+    {
+        polyline(vwk, p, n, vwk->line_color);
+        if ((vwk->line_beg | vwk->line_end) & ARROWED)
+            arrow(vwk, p, n);
+    }
+    else
+        wideline(vwk, p, n);
 }
 
 
 /*
- * v_bez_fill - draw a filled bezier curve
+ * v_bez - v_pline() with sub-opcode 13 (or after v_bez_on()) and intin
  *
- * It is similar to v_bez(), but it forms a closed contour and fills
- * it with the current fill pattern.
+ * ptsin the points; intin their flags, a byte each in the byte order of the
+ * PC: bit 0, the point and the next three are a curve (start, two direction
+ * points, end); bit 1, the point starts a new polyline.
  */
-#if 1
-void
-v_bez_fill(Vwk * vwk, Point * ptsget, int nr_ptsin)
+void v_bez(Vwk *vwk)
 {
-    int i;
-    /* WORD  const nr_ptsin = CONTRL[1]; */
-    UBYTE * bezarr = (UBYTE*)INTIN;
-    WORD bez_qual;
-    WORD xmin, xmax, ymin, ymax;
-    WORD total_vertices = nr_ptsin;
-    WORD total_jumps = 0;
-    UWORD vertices_per_bez;
-    WORD output_vertices = 0;
-    Point ptsbuf[MAX_VERTICES];
-    /* Point * ptsget = (Point*)PTSIN; */
-    Point * ptsput = ptsbuf;
+    WORD n, moves, i, start;
+    BOOL used;
 
-    bez_qual = vwk->bez_qual;
-    vertices_per_bez = 1 << bez_qual;
-    xmin = ymin = 32767;
-    xmax = ymax = 0;
+    n = make_points(vwk, FALSE, &moves, &used);
+    if (n < 0)
+    {
+        /* nothing to make of it: a polyline, as fVDI; too many points: nothing */
+        if (!used)
+        {
+            bez_polyline(vwk, (Point *)PTSIN, CONTRL[1]);
+            moves = 0;
+        }
+        bez_answer((const Point *)PTSIN, CONTRL[1], moves);
+        return;
+    }
 
-    i = 0;
-    while(i < nr_ptsin) {
-        int flag = bezarr[i^1]; /* index with xor 1 to byte swap !! */
+    for (i = 1, start = 0; i <= n; i++)
+    {
+        if (i == n || IS_BREAK(i))
+        {
+            if (i - start >= 2)
+                bez_polyline(vwk, bez_pts + start, i - start);
+            start = i;
+        }
+    }
+    bez_answer(bez_pts, n, moves);
+}
 
-        if (IS_BEZ(flag)) {
-            /* bezier start point found */
-            if (i+3 >= nr_ptsin)
+
+/* sort the x of the intersections */
+static void sort_words(WORD *buf, WORD count)
+{
+    WORD i, j, v;
+
+    for (i = 1; i < count; i++)
+    {
+        v = buf[i];
+        for (j = i; j > 0 && buf[j - 1] > v; j--)
+            buf[j] = buf[j - 1];
+        buf[j] = v;
+    }
+}
+
+
+/*
+ * fill the contours of bez_pts (each closed, separated by the breaks) even-odd,
+ * as clc_flit() fills a polygon
+ */
+static void bez_fill_contours(Vwk *vwk, WORD n)
+{
+    const VwkClip *clipper = VDI_CLIP(vwk);
+    WORD maxy, miny, y, i, intersections;
+    WORD *buf;
+    VwkAttrib attr;
+    Rect rect;
+
+    maxy = miny = bez_pts[0].y;
+    for (i = 1; i < n; i++)
+    {
+        if (bez_pts[i].y < miny)
+            miny = bez_pts[i].y;
+        else if (bez_pts[i].y > maxy)
+            maxy = bez_pts[i].y;
+    }
+    if (vwk->clip)
+    {
+        if (maxy < clipper->ymn_clip || miny > clipper->ymx_clip)
+            return;
+        if (miny < clipper->ymn_clip)
+            miny = clipper->ymn_clip - 1;
+        if (maxy > clipper->ymx_clip)
+            maxy = clipper->ymx_clip;
+    }
+    Vwk2Attrib(vwk, &attr, vwk->fill_color);
+
+    for (y = maxy; y > miny; y--)
+    {
+        intersections = 0;
+        buf = vdishare.main.fill_buffer;
+        for (i = 0; i < n - 1; i++)
+        {
+            WORD y1, y2, dy, dy1, dy2, x1, x2, dx;
+
+            if (IS_BREAK(i + 1))
+                continue;               /* from the end of one contour to the next */
+            y1 = bez_pts[i].y;
+            y2 = bez_pts[i + 1].y;
+            dy = y2 - y1;
+            if (!dy)
+                continue;
+            dy1 = y - y1;
+            dy2 = y - y2;
+            if ((dy1 ^ dy2) >= 0)
+                continue;
+            if (intersections >= MAX_VERTICES)
                 break;
-
-            if (IS_JUMP(flag))
-                total_jumps++;   /* count jump point */
-
-            /* generate line segments from bez points */
-            gen_segs(&ptsget->x, &ptsput->x, bez_qual, &xmin, &xmax, vwk->xfm_mode);
-            gen_segs(&ptsget->y, &ptsput->y, bez_qual, &ymin, &ymax, vwk->xfm_mode);
-
-            /* skip to coord pairs at end of bez curve */
-            i += 3;
-            ptsget += 3;
-            total_vertices += vertices_per_bez-3;
-
-            output_vertices += vertices_per_bez+1;
-            ptsput = ptsbuf + output_vertices;
-            /* draw_segs(vwk, vertices_per_bez+1, ptsbuf, FILL ); */
+            x1 = bez_pts[i].x;
+            x2 = bez_pts[i + 1].x;
+            dx = (x2 - x1) << 1;
+            intersections++;
+            if (dx < 0)
+                *buf++ = ((mul_div(dy2, dx, dy) + 1) >> 1) + x2;
+            else
+                *buf++ = ((mul_div(dy1, dx, dy) + 1) >> 1) + x1;
         }
-        else {
-            /* polyline */
-            /* WORD output_vertices = 0; */
-            Point * point = ptsget;
-            do {
-                int t;
+        if (intersections < 2)
+            continue;
+        sort_words(vdishare.main.fill_buffer, intersections);
+        buf = vdishare.main.fill_buffer;
+        for (i = intersections / 2; i > 0; i--)
+        {
+            WORD x1 = *buf++, x2 = *buf++;
 
-                t = point->x;
-                if ( t < xmin )
-                    xmin = t;
-                if ( t > xmax )
-                    xmax = t;
-
-                t = point->y;
-                if ( t < ymin )
-                    ymin = t;
-                if ( t > ymax )
-                    ymax = t;
-
-                output_vertices++;
-                if ( IS_BEZ(flag) )
-                    break;              /* stop if a jump point is next */
-
-                /* continue polyline */
-                i++;
-                if (i >= nr_ptsin)
-                    break;
-
-                ptsget += 1;
+            if (attr.clip)
+            {
+                if (x1 < clipper->xmn_clip)
                 {
-                    int old_flag = flag;
-                    flag = bezarr[i^1];
-                    if (!IS_JUMP(old_flag) && IS_JUMP(flag))
-                        total_jumps++;   /* count jump point */
+                    if (x2 < clipper->xmn_clip)
+                        continue;
+                    x1 = clipper->xmn_clip;
                 }
-            } while( !IS_JUMP(flag) );
-        }
-
-        /* draw segments and reset all vertex information */
-        draw_segs(vwk, output_vertices, ptsbuf, FILL);
-        bez_qual = vwk->bez_qual;
-        /* ptsget0 = ptsget; */
-        ptsput = ptsbuf;
-        output_vertices = 0;
-    }
-
-    INTOUT[0] = total_vertices; /* total nr points */
-    INTOUT[1] = total_jumps;    /* total moves */
-    CONTRL[4] = 2;
-    CONTRL[2] = 2;
-    PTSOUT[0] = xmin;
-    PTSOUT[1] = ymin;
-    PTSOUT[2] = xmax;
-    PTSOUT[3] = ymax;
-
-    return;
-}
-
-#else
-
-void
-v_bez_fill(Vwk * vwk, Point * ptsget, int nr_ptsin)
-{
-    /* WORD  const nr_ptsin = CONTRL[1]; */
-    const UBYTE *const bezarr = (UBYTE*)INTIN;  /* index with xor 1 to byte swap !! */
-    WORD bez_qual;
-    WORD xmin, xmax, ymin, ymax;
-    WORD total_vertices = nr_ptsin;
-    WORD total_jumps = 0;
-    WORD vertices_per_bez;
-    WORD i, i0;
-    WORD output_vertices = 0;
-    Point ptsbuf[MAX_VERTICES];
-    /* Point * ptsget = (Point*)PTSIN; */
-    Point * ptsget0 = ptsget;
-    Point * ptsput = ptsbuf;
-
-    bez_qual = vwk->bez_qual;
-    vertices_per_bez = 1 << bez_qual;
-    xmin = ymin = 32767;
-    xmax = ymax = 0;
-
-    i = i0 = 0;
-    while (i < nr_ptsin) {
-        int flag = bezarr[i^1];
-
-        if (IS_BEZ( flag )) {
-            if (i+3 >= nr_ptsin)
-                break;   /* incomplete curve, omit it */
-
-            if (IS_JUMP(flag))
-                total_jumps++;   /* count jump point */
-
-            /* keep this curve within nr vertices for the driver's ptsget[]
-             ** with one spare for the end point */
-            if ( output_vertices+vertices_per_bez+1 > INQ_TAB[14] ) {
-                if ( bez_qual > MIN_QUAL ) {
-                    /* reduce bezier quality & start this polygon again */
-                    bez_qual--;
-                    i = i0;
-                    ptsget = (Point*)PTSIN;
-                    ptsget0 = ptsget;
-                    ptsput = ptsbuf;
-                    output_vertices = 0;
-                    continue;
-                }
-                /* too bad if we get here. refuse to add vertices to output */
-            }
-            else {
-                if ( i != i0 ) {
-                    /* the end point will be copied in again */
-                    ptsput -= 1;
-                    output_vertices--;
-                }
-
-                output_vertices += vertices_per_bez+1;
-                total_vertices += vertices_per_bez-3;
-                gen_segs(&ptsget->x, &ptsput->x, bez_qual, &xmin, &xmax, vwk->xfm_mode);        /* x coords */
-                gen_segs(&ptsget->y, &ptsput->y, bez_qual, &ymin, &ymax, vwk->xfm_mode);        /* y coords */
-                ptsput = ptsbuf + output_vertices;
-            }
-            /* assert( PTSIN + 2*i == ptsget ); */
-            i+=3;
-            ptsget += 3;
-            flag = bezarr[i^1];
-        }
-        else {
-            /** polyline **/
-            if (i != i0) {
-                /* the end point will be copied in again */
-                ptsput -= 1;
-                output_vertices--;
-            }
-
-            do {
-                int t;
-                if ( output_vertices < INQ_TAB[14] ) {  /* need room for at least one more */
-                    t = ptsget->x;
-                    if ( t < xmin )
-                        xmin = t;
-                    if ( t > xmax )
-                        xmax = t;
-                    ptsput->x = t;
-
-                    t = ptsget->y;
-                    if ( t < ymin )
-                        ymin = t;
-                    if ( t > ymax )
-                        ymax = t;
-                    ptsput->y = t;
-
-                    ptsput++;
-                    output_vertices++;
-                }
-
-                /* assert( ptsbuf + output_vertices == ptsput ); */
-                /* assert( PTSIN + 2*i == ptsget ); */
-                if ( IS_BEZ(flag) )
-                    break;
-                i++;
-                if (i >= nr_ptsin)
-                    break;
-
-                ptsget += 1;
-                /* continue polyline, stop if a jump point is next */
+                if (x2 > clipper->xmx_clip)
                 {
-                    int old_flag = flag;
-                    flag = bezarr[i^1];
-                    if (!IS_JUMP(old_flag) && IS_JUMP(flag))
-                        total_jumps++;   /* count jump point */
+                    if (x1 > clipper->xmx_clip)
+                        continue;
+                    x2 = clipper->xmx_clip;
                 }
-            } while( !IS_JUMP(flag) );
-        }
-
-        if ( i >= nr_ptsin || IS_JUMP(flag) ) {
-            draw_segs(vwk, output_vertices, ptsbuf, FILL);
-            bez_qual = vwk->bez_qual;
-            i0 = i;
-            ptsget0 = ptsget;
-            ptsput = ptsbuf;
-            output_vertices = 0;
+            }
+            rect.x1 = x1;
+            rect.y1 = y;
+            rect.x2 = x2;
+            rect.y2 = y;
+            draw_rect_common(&attr, &rect);
         }
     }
-
-    INTOUT[0] = total_vertices; /* total nr points */
-    INTOUT[1] = total_jumps;    /* total moves */
-    CONTRL[4] = 2;
-    CONTRL[2] = 2;
-    PTSOUT[0] = xmin;
-    PTSOUT[1] = ymin;
-    PTSOUT[2] = xmax;
-    PTSOUT[3] = ymax;
-
-    return;
-
 }
-#endif
 
 
 /*
- * v_bez_control - implement vdi function v_bez_control
- *
- * simply returns the bezier quality set for the current workstation.
- * It can be used by your application to test if the GDOS supports
- * bezier functions. We do not support the use of this function to
- * enable or disable bezier curves.
+ * v_bez_fill - v_fillarea() with sub-opcode 13 (or after v_bez_on()) and
+ * intin: the curves and lines as v_bez(), each polyline closed, filled
  */
-void
-v_bez_control(Vwk * vwk)
+void v_bez_fill(Vwk *vwk)
 {
-    INTOUT[0] = vwk->bez_qual;
-    CONTRL[4] = 1;
+    WORD n, moves, i, start;
+    BOOL used;
+
+    n = make_points(vwk, TRUE, &moves, &used);
+    if (n < 0)
+    {
+        if (!used)
+        {
+            polygon(vwk, (Point *)PTSIN, CONTRL[1]);
+            moves = 0;
+        }
+        bez_answer((const Point *)PTSIN, CONTRL[1], moves);
+        return;
+    }
+
+    if (n >= 2)
+        bez_fill_contours(vwk, n);
+    if (vwk->fill_per == TRUE)
+    {
+        LN_MASK = 0xffff;
+        for (i = 1, start = 0; i <= n; i++)
+        {
+            if (i == n || IS_BREAK(i))
+            {
+                if (i - start >= 2)
+                    polyline(vwk, bez_pts + start, i - start, vwk->fill_color);
+                start = i;
+            }
+        }
+    }
+    bez_answer(bez_pts, n, moves);
 }
 
+
+/*
+ * v_bez_control - v_gdp() 13: v_bez_on() (ptsin count not 0) and v_bez_off()
+ *
+ * v_bez_on: from now on v_pline() and v_fillarea() with intin draw Beziers,
+ * at the finest quality; intout[0] is the greatest depth of division (7).
+ * v_bez_off: no longer; nothing is returned.  As fVDI.
+ */
+void v_bez_control(Vwk *vwk)
+{
+    if (CONTRL[1] != 0)
+    {
+        vwk->bez_on = 1;
+        vwk->bez_qual = 0;
+        INTOUT[0] = BEZ_MAX_DEPTH;
+        CONTRL[4] = 1;
+    }
+    else
+        vwk->bez_on = 0;
+}
 
 #endif /* HAVE_BEZIER */
 
 
-#if HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT
+#if WITH_BEZ_QUAL
 /*
- * v_bez_qual is also built, with HAVE_BEZIER 0, so that the NVDI call stores
- * the quality and reports what it came to; nothing draws a Bezier then.
- */
-#ifndef MIN_QUAL
-#define MIN_QUAL 0
-#endif
-
-/*
- * v_bez_qual -  set bezier quality
+ * v_bez_qual - the quality of the curves (escape 5, sub-function 99,
+ * intin[0] = 32, intin[2] the percentage, 100 the finest)
  *
- * sets the quality of a bezier curve.  A bezier curve is generated
- * as a series of short straight line segments.  A high quality
- * bezier curve is made from many short straight lines, whereas a
- * lower quality bezier curve has fewer longer straight line segments.
- * Higher quality bezier curves thus appear smoother, but are slower.
- *
- * note: bez_qual > 7 will cause overflow in gen_segs()
+ * As fVDI: the percentage is mapped onto the depth scale, 0 the finest and
+ * 9 the coarsest, and intout[0] is the quality the scale really gives.
+ * Kept also when Beziers are not drawn (the NVDI calls report it).
  */
-static const WORD pcarr[] = {0, 10, 23, 39, 55, 71, 86, 100};
-void
-v_bez_qual(Vwk * vwk)
+void v_bez_qual(Vwk *vwk)
 {
-    WORD q = INTIN[2];
-    if ( q >= 95 )
-        q = 7;
-    else if ( q<5 )
-        q = MIN_QUAL;
-    else
-        q = (q>>4) + 1;
+    WORD percent = INTIN[2], scale;
 
-    vwk->bez_qual = q;
-    INTOUT[0] = pcarr[q - MIN_QUAL];
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    scale = (WORD)(((100L - percent) * 9 + 50) / 100);
+    vwk->bez_qual = scale;
+    INTOUT[0] = (WORD)(100 - ((LONG)scale * 100 + 4) / 9);
     CONTRL[4] = 1;
 }
-
-#endif /* HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT */
+#endif /* WITH_BEZ_QUAL */

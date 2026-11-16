@@ -25,7 +25,7 @@
 #include "vdi_sleep.h"
 #endif
 
-#define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
+#define HAVE_BEZIER CONF_WITH_VDI_BEZIER  /* v_bez(), v_bez_fill(), v_bez_on() (see vdi_bezier.c) */
 /* the quality of Beziers is kept (v_bez_qual) when they are drawn or when NVDI calls are */
 #define WITH_BEZ_QUAL (HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT)
 
@@ -306,6 +306,9 @@ struct Vwk_ {
     VwkBitmap bm;               /* see vdi_bitmap.c */
     VdiCtab *ctabs;             /* the colour tables of the workstation (see vdi_ctab.c) */
     VdiItab *itabs;             /* the inverse tables made by v_create_itab */
+#endif
+#if HAVE_BEZIER
+    WORD bez_on;                /* v_bez_on(): v_pline() and v_fillarea() with intin draw Beziers */
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS
     /* last, as vdi_asm.S knows the offsets of the fields above (vdiscreen.h) */
@@ -700,6 +703,12 @@ void vdi_vst_skew(Vwk *);           /* 253 */
 #if WITH_BEZ_QUAL
 void v_bez_qual(Vwk *);
 #endif
+#if HAVE_BEZIER
+void v_bez(Vwk *vwk);               /* v_pline() with sub-opcode 13 */
+void v_bez_fill(Vwk *vwk);          /* v_fillarea() with sub-opcode 13 */
+void v_bez_control(Vwk *vwk);       /* v_gdp() 13: v_bez_on(), v_bez_off() */
+#define VDI_IS_BEZ(vwk) (CONTRL[3] > 0 && (CONTRL[5] == 13 || (vwk)->bez_on))
+#endif
 
 #if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
 /*
@@ -722,13 +731,6 @@ struct expand16 {
 const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg);
 void expand_rows16(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
                    LONG sstep, LONG dstep, const struct expand16 *e);
-#endif
-
-#if HAVE_BEZIER
-/* not in original TOS */
-void v_bez_control(Vwk *);
-void v_bez(Vwk *vwk, Point *points, int count);
-void v_bez_fill(Vwk *vwk, Point *points, int count);
 #endif
 
 #endif                          /* VDIDEF_H */

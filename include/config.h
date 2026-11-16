@@ -1850,6 +1850,19 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_BEZIER to 1 to draw Bezier curves: v_bez(), v_bez_fill()
+ * and v_bez_on()/v_bez_off().  It needs the NVDI extensions (the quality of
+ * the curves is set by v_bez_qual(), one of their calls), and is on with
+ * them unless set to 0.
+ */
+#ifndef CONF_WITH_VDI_BEZIER
+# define CONF_WITH_VDI_BEZIER CONF_WITH_VDI_NVDI_EXT
+#endif
+#if CONF_WITH_VDI_BEZIER && !CONF_WITH_VDI_NVDI_EXT
+# error CONF_WITH_VDI_BEZIER needs CONF_WITH_VDI_NVDI_EXT
+#endif
+
+/*
  * The VDI functions v_fillarea(), v_pline(), v_pmarker() can handle
  * up to MAX_VERTICES coordinates (MAX_VERTICES/2 points).
  * TOS2 allows 512 vertices, TOS3/TOS4 allow 1024.
