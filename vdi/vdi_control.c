@@ -107,7 +107,11 @@ static const WORD INQ_TAB_rom[45] = {
     0,                  /* 25 -  */
     0,                  /* 26 -  */
     0,                  /* 27 -  */
+#if HAVE_BEZIER
+    2,                  /* 28 - bezier flag (bit 1) */
+#else
     0,                  /* 28 - bezier flag (bit 1) */
+#endif
     0,                  /* 29 -  */
 #if CONF_WITH_VDI_NVDI_EXT
     4,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling?; bit 2: vr_clip_rects */
@@ -385,17 +389,10 @@ static void init_wk(Vwk * vwk)
 #endif
 
 #if WITH_BEZ_QUAL
-    vwk->bez_qual = 7;
+    vwk->bez_qual = 0;          /* fVDI's depth scale: the finest (see vdi_bezier.c) */
 #endif
 #if HAVE_BEZIER
-    /* setup initial bezier values */
-#if 0
-    vwk->bezier.available = 1;
-    vwk->bezier.depth_scale.min = 9;
-    vwk->bezier.depth_scale.max = 0;
-    vwk->bezier.depth.min = 2;
-    vwk->bezier.depth.max = 7;
-#endif
+    vwk->bez_on = 0;
 #endif
 
     vwk->next_work = NULL;  /* neatness */
@@ -516,6 +513,7 @@ void vdi_v_opnvwk(Vwk * vwk)
 #if CONF_WITH_VDI_NVDI_EXT
     vwk->bm.addr = NULL;        /* a workstation of the screen */
     vwk->bm.mem = NULL;
+    vdi_ctab_init(vwk);         /* no colour tables yet */
 #endif
     vwk_ptr[handle] = vwk;
     vwk->handle = CONTRL[6] = handle;
@@ -568,6 +566,14 @@ void vdi_v_opnwk(Vwk * vwk)
     int i;
     Vwk **p;
     WORD newrez;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * the tables of an earlier opening that was not closed: freed first, as
+     * that may sleep, before anything of the workstation is changed
+     */
+    vdi_ctab_release(&phys_work);
+#endif
 
     /*
      * Programs can request a video mode switch by passing the desired
@@ -671,6 +677,9 @@ void vdi_v_clswk(Vwk * vwk)
         }
     }
     CUR_WORK = vwk_ptr[VDI_PHYS_HANDLE];
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_ctab_release(&phys_work);   /* the colour tables of the physical workstation; may sleep */
+#endif
 
     timer_exit();
     vdimouse_exit();                    /* deinitialize mouse */

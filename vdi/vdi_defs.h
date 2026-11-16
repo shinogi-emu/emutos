@@ -25,7 +25,7 @@
 #include "vdi_sleep.h"
 #endif
 
-#define HAVE_BEZIER 0           /* switch on bezier capability - entirely untested */
+#define HAVE_BEZIER CONF_WITH_VDI_BEZIER  /* v_bez(), v_bez_fill(), v_bez_on() (see vdi_bezier.c) */
 /* the quality of Beziers is kept (v_bez_qual) when they are drawn or when NVDI calls are */
 #define WITH_BEZ_QUAL (HAVE_BEZIER || CONF_WITH_VDI_NVDI_EXT)
 
@@ -304,6 +304,11 @@ struct Vwk_ {
 #if CONF_WITH_VDI_NVDI_EXT
     VwkColors col;              /* see vdi_nvdicol.c */
     VwkBitmap bm;               /* see vdi_bitmap.c */
+    VdiCtab *ctabs;             /* the colour tables of the workstation (see vdi_ctab.c) */
+    VdiItab *itabs;             /* the inverse tables made by v_create_itab */
+#endif
+#if HAVE_BEZIER
+    WORD bez_on;                /* v_bez_on(): v_pline() and v_fillarea() with intin draw Beziers */
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS
     /* last, as vdi_asm.S knows the offsets of the fields above (vdiscreen.h) */
@@ -591,6 +596,22 @@ BOOL vdi_acts_on_screen(WORD opcode);   /* opcodes that ignore the swap */
 void vdi_vs_x_color(Vwk *);         /* 207 */
 void vdi_vq_x_color(Vwk *);         /* 209 */
 
+/* vdi_col.c: the palette by VDI pen, for the colour tables */
+extern ULONG vdi_pen_gen;           /* counts the changes of colours asked for pens through the VDI */
+void vdi_set_pen_rgb(Vwk *vwk, WORD pen, const WORD *rgb);
+void vdi_default_pen_rgb(WORD pen, WORD *rgb);
+
+/* vdi_ctab.c: colour tables and inverse tables */
+void vdi_vs_ctab(Vwk *);            /* 205: vs_ctab, vs_ctab_entry, vs_dflt_ctab */
+void vdi_vq_ctab(Vwk *);            /* 206: vq_ctab and the other colour table calls */
+void vdi_v_itab(Vwk *);             /* 208: v_create_itab, v_delete_itab */
+void vdi_ctab_init(Vwk *vwk);       /* a workstation that has no tables yet */
+void vdi_ctab_release(Vwk *vwk);    /* free the tables of a closed workstation (may sleep) */
+BOOL vdi_ctab_head(const COLOR_TAB *ctab, COLOR_TAB_HEAD *head);
+BOOL vdi_ctab_prepare(Vwk *vwk, WORD kind, BOOL inverse);     /* may sleep */
+const VdiCtab *vdi_ctab_get(Vwk *vwk, WORD kind, BOOL inverse);
+const VdiItab *vdi_itab_find(Vwk *vwk, ULONG ref, const COLOR_TAB *ctab);
+
 /*
  * the VDI pen of a colour field of the workstation (text_color and
  * friends): an RGB colour on a 16-bit screen keeps a pseudo-pen above 255
@@ -683,6 +704,12 @@ void vdi_vst_skew(Vwk *);           /* 253 */
 #if WITH_BEZ_QUAL
 void v_bez_qual(Vwk *);
 #endif
+#if HAVE_BEZIER
+void v_bez(Vwk *vwk);               /* v_pline() with sub-opcode 13 */
+void v_bez_fill(Vwk *vwk);          /* v_fillarea() with sub-opcode 13 */
+void v_bez_control(Vwk *vwk);       /* v_gdp() 13: v_bez_on(), v_bez_off() */
+#define VDI_IS_BEZ(vwk) (CONTRL[3] > 0 && (CONTRL[5] == 13 || (vwk)->bez_on))
+#endif
 
 #if CONF_WITH_VDI_FASTDRAW && CONF_WITH_VDI_16BIT
 /*
@@ -705,13 +732,6 @@ struct expand16 {
 const struct expand16 *expand_tab16(WORD kind, UWORD fg, UWORD bg);
 void expand_rows16(UWORD *dst, const UWORD *src, WORD bit, LONG width, WORD rows,
                    LONG sstep, LONG dstep, const struct expand16 *e);
-#endif
-
-#if HAVE_BEZIER
-/* not in original TOS */
-void v_bez_control(Vwk *);
-void v_bez(Vwk *vwk, Point *points, int count);
-void v_bez_fill(Vwk *vwk, Point *points, int count);
 #endif
 
 #endif                          /* VDIDEF_H */

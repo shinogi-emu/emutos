@@ -7,17 +7,30 @@
  *   sources:      1 bit, 8-bit indexed, 15 and 16 bits (also byte-swapped),
  *                 24 bits (also reversed) and 32 bits (xRGB)
  *   destinations: the workstation (the screen, or the bitmap of a bitmap
- *                 workstation), or memory in the format of the screen
+ *                 workstation), memory in the format of the screen, or
+ *                 memory of 8-bit indices (not from 1-bit sources)
  *   modes:        0 (copy) and 32 (replace) for all sources, 33 (transparent)
- *                 for 1-bit ones; bit 7 (dither) is ignored
+ *                 for 1-bit ones; with bit 7 (128), error diffusion onto
+ *                 8-bit indices and planes
  *
  * What is not done is not advertised: bits 0 and 1 of work_out[30] stay
  * clear.  The pixel conversion is in vdi_xfercore.c.
  *
  * A 16-bit destination takes its pixels in 5-6-5, the green keeps its sixth
- * bit.  Planes take the pen nearest the colour of the source pixel (in the
- * workstation's colours), asked once per colour that is not one of the last
- * few seen.
+ * bit; bit 7 has no effect there.  Planes take the pen nearest the colour of
+ * the source pixel (in the workstation's colours), asked once per colour that
+ * is not one of the last few seen.
+ *
+ * 8-bit indices, and planes with bit 7, are worked out as fVDI does: through
+ * the inverse table of the destination palette (vdi_ctab.c), which for planes
+ * is the screen's colours by pixel value; reductions of direct colours (and
+ * of dithered 8-bit sources) are filtered, and a source whose colours are all
+ * in the destination palette keeps its indices and is not dithered.  The
+ * palette of an 8-bit bitmap that has no table is the workstation's pens, by
+ * pen number, both as source and as destination; it must then have no
+ * inverse table or one made for those colours.  A destination with a table
+ * needs the inverse table made for it (v_create_itab).  8-bit indices with
+ * neither table nor dithering, at the same size, are copied as they are.
  *
  * vro_cpyfm and vrt_cpyfm with bit 15 of the mode set (a VDI call only) scale
  * the source rectangle onto the destination rectangle by nearest neighbour,
@@ -73,6 +86,7 @@ typedef struct
 {
     Vwk *vwk;
     const COLOR_TAB *ctab;      /* the colour table of the source, NULL: the workstation's pens */
+    LONG ncol;                  /* its colours, as read once (1-256) */
 } XferCtx;
 
 
@@ -94,13 +108,21 @@ static ULONG pen_of_rgb(void *ctx, ULONG rgb)
 }
 
 
-/* the colour of an index of an 8-bit source: the table's, or the pen's */
+/*
+ * the colour of an index of an 8-bit source: the table's, or the pen's; an
+ * index beyond the table (the source changed since it was checked) is black
+ */
 static void index_colour(const XferCtx *x, ULONG index, COLOR_RGB *c)
 {
-    if (x->ctab)
+    if (!x->ctab)
+        vdi_pen_rgb(x->vwk, (WORD)index, c);
+    else if (index < (ULONG)x->ncol)
         *c = x->ctab->colors[index].rgb;
     else
-        vdi_pen_rgb(x->vwk, (WORD)index, c);
+    {
+        c->reserved = 0;
+        c->red = c->green = c->blue = 0;
+    }
 }
 
 
@@ -133,6 +155,70 @@ static UWORD raster_pixel(Vwk *vwk, WORD planes, WORD bg)
 
 
 /*
+ * The tables of the index path, found once the memory is had: nothing
+ * sleeps between finding them and the end of the call
+ */
+typedef struct
+{
+    const VdiItab *itab;        /* the destination palette and its inverse map */
+    const COLOR_ENTRY *scol;    /* XK_8: the colours of the source */
+    WORD scount;
+} XferTables;
+
+
+/*
+ * Get the tables: 'ckind' is the snapshot of the workstation that is the
+ * destination palette (-1: the bitmap's own table 'dctab', with the inverse
+ * table 'ditab'), 'inverse' whether its inverse table is the VDI's; 'pens'
+ * whether an 8-bit source takes the colours of the pens, else 'sctab' with
+ * 'scount' colours (checked by the caller).  FALSE if one cannot be had.
+ */
+static BOOL index_tables(Vwk *vwk, const COLOR_TAB *sctab, WORD scount,
+                         const COLOR_TAB *dctab, ULONG ditab,
+                         WORD ckind, BOOL inverse, BOOL pens, XferTables *t)
+{
+    const VdiCtab *node;
+
+    t->itab = NULL;
+    t->scol = NULL;
+    t->scount = 0;
+
+    /* these may sleep */
+    if (ckind >= 0 && !vdi_ctab_prepare(vwk, ckind, inverse))
+        return FALSE;
+    if (pens && !vdi_ctab_prepare(vwk, VDI_CTAB_PENS, FALSE))
+        return FALSE;
+
+    /* these do not */
+    if (ckind < 0)
+        t->itab = vdi_itab_find(vwk, ditab, dctab);
+    else
+    {
+        node = vdi_ctab_get(vwk, ckind, inverse);
+        if (!node)
+            return FALSE;
+        t->itab = inverse ? node->inverse : vdi_itab_find(vwk, ditab, node->table);
+    }
+    if (!t->itab)
+        return FALSE;
+    if (pens)
+    {
+        node = vdi_ctab_get(vwk, VDI_CTAB_PENS, FALSE);
+        if (!node)
+            return FALSE;
+        t->scol = node->table->colors;
+        t->scount = (WORD)node->table->no_colors;
+    }
+    else if (sctab)
+    {
+        t->scol = sctab->colors;
+        t->scount = scount;
+    }
+    return TRUE;
+}
+
+
+/*
  * vr_transfer_bits
  *
  * intin[0]: the mode; CONTRL[7..8]: the GCBITMAP of the source; CONTRL[9..10]:
@@ -140,22 +226,31 @@ static UWORD raster_pixel(Vwk *vwk, WORD planes, WORD bg)
  * rectangle, then the destination rectangle (x1, y1, x2, y2, both ends
  * inclusive).  Nothing is drawn if the call is not understood or the memory
  * is not usable (see the refusals in vdi_xfercore.h); nothing is returned.
+ *
+ * The two GCBITMAPs and the header of the source's colour table are read
+ * once, into copies: what is checked is what is used, whatever the program
+ * (another of its threads, or another program sharing the memory) writes
+ * there meanwhile, while this call sleeps in an allocation or not.
  */
 void vdi_vr_transfer_bits(Vwk *vwk)
 {
     const GCBITMAP *src, *dst;
+    GCBITMAP sbm, dbm;
+    COLOR_TAB_HEAD shead;
+    const COLOR_TAB *sctab;
     RECT16 sr, dr;
     LONG cx1, cy1, cx2, cy2;    /* the destination, where it may be drawn */
     LONG dx1, dy1, dx2, dy2;    /* the part of the destination rectangle that is */
-    LONG pitch, xbase, ybase, x, y, bytes, sx, mapbytes, rowbytes;
+    LONG pitch, xbase, ybase, x, y, bytes, sx, mapbytes, rowbytes, palbytes, errbytes;
     UBYTE *base, *block, *line, *row;
     ULONG ssize, dsize;
     UWORD mode;
-    WORD kind, planes, k;
-    BOOL transparent = FALSE;
+    WORD kind, planes, dkind, k, ckind = -1;
+    BOOL transparent = FALSE, dither, index, inverse = FALSE, pens = FALSE, same = FALSE;
     XferJob job;
     XferState st;
     XferCtx ctx;
+    XferTables tables;
     LONG ncol = 0;
 
     if (CONTRL[3] < 1 || CONTRL[1] < 4)
@@ -164,6 +259,14 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     dst = (const GCBITMAP *)ptr_at(CONTRL + 9);
     if (!src)
         return;
+    sbm = *src;
+    src = &sbm;
+    if (dst)
+    {
+        dbm = *dst;
+        dst = &dbm;
+    }
+    sctab = sbm.ctab;
     sr.x1 = PTSIN[0];
     sr.y1 = PTSIN[1];
     sr.x2 = PTSIN[2];
@@ -173,8 +276,10 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     dr.x2 = PTSIN[6];
     dr.y2 = PTSIN[7];
 
-    /* the mode: dithering (bit 7) is ignored, the output is not dithered */
-    mode = (UWORD)INTIN[0] & ~0x80U;
+    /* the mode; bit 7 asks for dithering, where there are 256 colours or fewer */
+    mode = (UWORD)INTIN[0];
+    dither = (mode & 0x80) != 0;
+    mode &= ~0x80U;
     kind = xfer_kind(src->px_format);
     k = kind & XK_MASK;
     if (k == XK_NONE)
@@ -199,10 +304,17 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         return;
     if (dst)
     {
-        /* memory in the format of the screen, whatever is clipped there: no clipping */
-        if (dst->px_format != vdi_px_format())
+        /*
+         * memory in the format of the screen, or of 8-bit indices: whatever is
+         * clipped there, no clipping
+         */
+        if (dst->px_format == XF_PX_8 && dst->bits == 8)
+            dkind = XD_INDEX8;
+        else if (dst->px_format == vdi_px_format())
+            dkind = planes;
+        else
             return;
-        dsize = xfer_dst_size(dst, planes);
+        dsize = xfer_dst_size(dst, dkind);
         if (dsize == 0 || !xfer_rect_in(dst, &dr) || dst->addr == v_bas_ad)
             return;                 /* the screen is the workstation, not memory */
         base = dst->addr;
@@ -217,6 +329,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     else
     {
         /* this workstation: the screen, or the bitmap while a bitmap workstation is drawn in */
+        dkind = planes;
         base = v_bas_ad;
         pitch = (LONG)v_lin_wr;
         xbase = ybase = 0;
@@ -239,6 +352,17 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     if (xfer_overlap(src->addr, ssize, base, dsize))
         return;
 
+    /*
+     * The pixels are indices of a palette, worked out as fVDI does: onto 8-bit
+     * indices, and dithered onto planes.  Onto 16 bits dithering has no
+     * effect; a 1-bit source has its two colours.
+     */
+    index = (dkind == XD_INDEX8) || (dither && dkind != XD_16 && k != XK_1);
+    if (dkind == XD_INDEX8 && k == XK_1)
+        return;
+    if (!index)
+        dither = FALSE;
+
     dx1 = dr.x1 > cx1 ? dr.x1 : cx1;
     dy1 = dr.y1 > cy1 ? dr.y1 : cy1;
     dx2 = dr.x2 < cx2 ? dr.x2 : cx2;
@@ -249,7 +373,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     /* the job */
     memset(&job, 0, sizeof(job));
     job.kind = kind;
-    job.planes = planes;
+    job.planes = dkind;
     job.transparent = transparent;
     job.pitch = src->width;
     job.sw = (ULONG)((LONG)sr.x2 - sr.x1 + 1);
@@ -271,9 +395,21 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         job.src += sx * (xfer_kind_bits(kind) / 8);
     ctx.vwk = vwk;
     ctx.ctab = NULL;
+    ctx.ncol = 0;
     job.ctx = &ctx;
     job.pen_rgb = pen_of_rgb;
     job.pen_index = pen_of_index;
+
+    if (index && dkind == XD_INDEX8 && k == XK_8 && !dither && !src->ctab && !dst->ctab &&
+        !src->itab && !dst->itab && job.sw == job.dw && job.sh == job.dh)
+    {
+        /* no colour tables, the same size: the bytes as they are, as fVDI */
+        row = (UBYTE *)job.src;
+        line = base + (dy1 - ybase) * pitch + (dx1 - xbase);
+        for (y = 0; y < job.rows; y++, row += job.pitch, line += pitch)
+            memcpy(line, row, job.count);
+        return;
+    }
 
     if (k == XK_1)
     {
@@ -282,14 +418,27 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     }
     else if (k == XK_8)
     {
-        /* the colours of the indices: the table of the source or the pens of the workstation */
-        if (src->ctab && src->ctab->no_colors >= 1 && src->ctab->no_colors <= 256)
+        /*
+         * the colours of the indices: the table of the source (its header
+         * read once; the index path wants a sound one, the others only a
+         * count of 1-256) or, without one, the pens of the workstation by pen
+         * number (as since the first vr_transfer_bits, though vq_ctab lists
+         * the colours by pixel value)
+         */
+        if (vdi_ctab_head(sctab, &shead) ||
+            (sctab && !index && shead.no_colors >= 1 && shead.no_colors <= 256))
         {
-            ctx.ctab = src->ctab;
-            ncol = src->ctab->no_colors;
+            ctx.ctab = sctab;
+            ncol = shead.no_colors;
         }
+        else if (sctab && index)
+            return;                 /* the index path takes only a sound table */
         else
+        {
+            sctab = NULL;           /* an unusable table: the pens, as before */
             ncol = numcolors > 256 ? 256 : numcolors;
+        }
+        ctx.ncol = ncol;
         if (ncol < 1)
             return;
         if (ncol < 256)
@@ -297,11 +446,40 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             /* an index beyond the table refuses the whole call */
             for (y = 0; y < (LONG)job.sh; y++)
             {
-                row = (UBYTE *)job.src + y * src->width;
+                row = (UBYTE *)job.src + y * job.pitch;
                 for (x = 0; x < (LONG)job.sw; x++)
                     if (row[x] >= ncol)
                         return;
             }
+        }
+    }
+
+    if (index)
+    {
+        /* the destination palette: the bitmap's table, the pens, or the screen's colours */
+        if (dkind == XD_INDEX8)
+        {
+            if (!dst->ctab)
+            {
+                ckind = VDI_CTAB_PENS;
+                inverse = !dst->itab;
+            }
+        }
+        else
+        {
+            ckind = VDI_CTAB_CURRENT;
+            inverse = TRUE;
+        }
+        pens = (k == XK_8 && !sctab);
+        /*
+         * 8-bit indices without tables onto 8-bit indices without tables: the
+         * same palette (the pens) on both sides, so every index stays and
+         * nothing is dithered; no palette or inverse table is needed for that
+         */
+        if (dkind == XD_INDEX8 && pens && !dst->ctab && !dst->itab)
+        {
+            same = TRUE;
+            dither = FALSE;
         }
     }
 
@@ -311,10 +489,16 @@ void vdi_vr_transfer_bits(Vwk *vwk)
      * closes or resizes meanwhile leaves them stale.  Not guarded: the same
      * known limit as the bitmap swap's (see vdi_bitmap.c and vdi_sleep.h).
      */
-    /* work memory: the pixel of each index, a row of pixel values and, if transparent, a mask */
-    mapbytes = (k == XK_8) ? 512L : 0L;
-    rowbytes = (planes != XD_16) ? job.count : 0L;
-    bytes = mapbytes + rowbytes * (transparent ? 2 : 1);
+    /*
+     * work memory: the pixel of each index, a row of pixel values and, if
+     * transparent, a mask; the index path: the colours of the source, the
+     * error of the dithering and the index of each source index
+     */
+    mapbytes = (!index && k == XK_8) ? 512L : 0L;
+    palbytes = (index && k == XK_8) ? 1024L + 256L : 0L;
+    errbytes = dither ? 6L * (LONG)job.dw : 0L;
+    rowbytes = (dkind != XD_16 && dkind != XD_INDEX8) ? job.count : 0L;
+    bytes = mapbytes + palbytes + errbytes + rowbytes * (transparent ? 2 : 1);
     block = NULL;
     if (bytes)
     {
@@ -322,7 +506,49 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         if (!block)
             return;
     }
-    if (k == XK_8)
+
+    if (index)
+    {
+        ULONG *spal = (ULONG *)block;
+        UBYTE *remap = block + 1024;
+
+        /* indices beyond the source's table (a source changed since it was checked) map to 0 */
+        if (palbytes)
+            memset(block, 0, palbytes);
+
+        job.index = TRUE;
+        if (same)
+        {
+            for (x = 0; x < 256; x++)
+                remap[x] = (UBYTE)x;
+            job.remap = remap;
+            goto render;
+        }
+
+        /* the tables; nothing sleeps from here on */
+        if (!index_tables(vwk, sctab, (WORD)ncol, dst ? dst->ctab : NULL, dst ? (ULONG)dst->itab : 0UL,
+                          ckind, inverse, pens, &tables))
+            goto done;
+        job.imap = VDI_ITAB_MAP(tables.itab);
+        job.ibits = tables.itab->bits;
+        job.dcol = tables.itab->colors;
+        if (k == XK_8)
+        {
+            /* a source with only colours of the destination is not dithered (fVDI) */
+            if (xfer_remap(tables.scol, tables.scount, tables.itab->colors, tables.itab->count,
+                           job.imap, job.ibits, remap, spal) & XFER_REMAP_EXACT)
+                dither = FALSE;
+            job.spal = spal;
+            job.remap = remap;
+        }
+        if (dither)
+        {
+            job.dither = TRUE;
+            job.err = (WORD *)(block + palbytes);
+            memset(job.err, 0, errbytes);
+        }
+    }
+    else if (k == XK_8)
     {
         job.map = (UWORD *)block;
         for (x = 0; x < 256; x++)
@@ -343,16 +569,37 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         }
     }
 
+render:
     xfer_begin(&st, &job);
+    if (index)
+    {
+        UBYTE *pix = block + palbytes + errbytes;
+
+        if (dkind == XD_INDEX8)
+        {
+            line = base + (dy1 - ybase) * pitch + (dx1 - xbase);
+            for (y = 0; y < job.rows; y++, line += pitch)
+                xfer_row_index(&st, line);
+        }
+        else
+        {
+            line = base + (dy1 - ybase) * pitch;
+            for (y = 0; y < job.rows; y++, line += pitch)
+            {
+                xfer_row_index(&st, pix);
+                xfer_store_planar(line, planes, dx1 - xbase, job.count, pix, NULL);
+            }
+        }
+    }
 #if CONF_WITH_VDI_16BIT
-    if (planes == XD_16)
+    else if (planes == XD_16)
     {
         row = base + (dy1 - ybase) * pitch + (dx1 - xbase) * 2;
         for (y = 0; y < job.rows; y++, row += pitch)
             xfer_row16(&st, row, y ? row - pitch : NULL);
     }
-    else
 #endif
+    else
     {
         UBYTE *pix = block + mapbytes;
         UBYTE *mask = transparent ? pix + job.count : NULL;
@@ -364,6 +611,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             xfer_store_planar(line, planes, dx1 - xbase, job.count, pix, mask);
         }
     }
+done:
     if (block)
         vdi_free_kept(block);
 }

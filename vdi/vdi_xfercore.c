@@ -167,12 +167,20 @@ static LONG dst_line_min(WORD planes, LONG width)
 {
     if (IS_D16(planes))
         return width * 2;
+    if (planes == XD_INDEX8)
+        return width;
     return ((width + 15) / 16) * 2 * planes;
 }
 
 
 ULONG xfer_dst_size(const GCBITMAP *bm, WORD planes)
 {
+    if (planes == XD_INDEX8)
+    {
+        if (bm->bits != 8 || bm->px_format != XF_PX_8)
+            return 0;
+        return bitmap_size(bm, dst_line_min, planes, FALSE);
+    }
     if (!IS_D16(planes) && planes != 1 && planes != 2 && planes != 4 && planes != 8)
         return 0;
     if (bm->bits != planes)
@@ -244,15 +252,29 @@ void xfer_axis_next(XferAxis *a)
 
 void xfer_begin(XferState *s, const XferJob *job)
 {
-    WORD i;
+    WORD i, k = job->kind & XK_MASK;
+    BOOL reduced = job->sw > job->dw || job->sh > job->dh;
+    ULONG skipx = job->skipx, skipy = job->skipy;
 
     s->job = job;
     s->filtered = FALSE;
-    if ((job->kind & XK_MASK) != XK_1 && (job->kind & XK_MASK) != XK_8 &&
-        IS_D16(job->planes) && (job->sw > job->dw || job->sh > job->dh))
+    s->dskip = 0;
+    if (job->index)
+    {
+        /* as fVDI: indexed sources are filtered only when dithered */
+        if (reduced && (k != XK_8 || job->dither))
+            s->filtered = TRUE;
+        if (job->dither)
+        {
+            /* the error runs through every pixel of the rectangle from its top left */
+            s->dskip = skipy;
+            skipx = skipy = 0;
+        }
+    }
+    else if (k != XK_1 && k != XK_8 && IS_D16(job->planes) && reduced)
         s->filtered = TRUE;
-    xfer_axis_start(&s->x0, job->sw, job->dw, job->skipx, s->filtered);
-    xfer_axis_start(&s->y, job->sh, job->dh, job->skipy, s->filtered);
+    xfer_axis_start(&s->x0, job->sw, job->dw, skipx, s->filtered);
+    xfer_axis_start(&s->y, job->sh, job->dh, skipy, s->filtered);
     s->prev_y = -1;
     for (i = 0; i < 8; i++)
     {
@@ -522,6 +544,250 @@ void xfer_row_pix(XferState *s, UBYTE *pix, UBYTE *mask)
 
     if (j->transparent || s->prev_y != s->y.pos)
         make_row(s, pix, mask);
+    s->prev_y = s->y.pos;
+    xfer_axis_next(&s->y);
+}
+
+
+/*
+ * The index path
+ */
+
+UBYTE xfer_itab_index(const UBYTE *map, WORD bits, ULONG rgb)
+{
+    ULONG mask = (1UL << bits) - 1;
+    ULONG r = (rgb >> (24 - 3 * bits)) & (mask << (2 * bits));
+    ULONG g = (rgb >> (16 - 2 * bits)) & (mask << bits);
+    ULONG b = (rgb >> (8 - bits)) & mask;
+
+    return map[r | g | b];
+}
+
+
+void xfer_itab_fill(const COLOR_ENTRY *colors, WORD count, WORD bits, UBYTE *map, void *work)
+{
+    ULONG *sq = (ULONG *)work;          /* sq[d + 255] = d * d, d -255 to 255 */
+    ULONG *dr = sq + 511;               /* the red part of the distance of each colour */
+    ULONG *drg = dr + count;            /* and with the green part */
+    UBYTE *red = (UBYTE *)(drg + count), *green = red + count, *blue = green + count;
+    WORD shift = 8 - bits, n = (WORD)(1 << bits), r, g, b, i;
+    LONG d, half = 1L << (shift - 1), c;
+    const ULONG *bsq;
+    ULONG best, dist;
+    UBYTE index;
+
+    for (d = -255; d <= 255; d++)
+        sq[d + 255] = (ULONG)(d * d);
+    for (i = 0; i < count; i++)
+    {
+        red[i] = (UBYTE)(colors[i].rgb.red >> 8);
+        green[i] = (UBYTE)(colors[i].rgb.green >> 8);
+        blue[i] = (UBYTE)(colors[i].rgb.blue >> 8);
+    }
+
+    /*
+     * The distance is the sum of three squares: the red and green parts are
+     * worked out once per row of cells, and the squares come from a table.
+     * The colours are tried in order and only a nearer one replaces the
+     * best, so the first of equals wins.
+     */
+    for (r = 0; r < n; r++)
+    {
+        c = ((LONG)r << shift) + half + 255;
+        for (i = 0; i < count; i++)
+            dr[i] = sq[c - red[i]];
+        for (g = 0; g < n; g++)
+        {
+            c = ((LONG)g << shift) + half + 255;
+            for (i = 0; i < count; i++)
+                drg[i] = dr[i] + sq[c - green[i]];
+            for (b = 0; b < n; b++)
+            {
+                bsq = sq + ((LONG)b << shift) + half + 255;
+                best = 0xffffffffUL;
+                index = 0;
+                for (i = 0; i < count; i++)
+                {
+                    dist = drg[i] + bsq[-(LONG)blue[i]];
+                    if (dist < best)
+                    {
+                        best = dist;
+                        index = (UBYTE)i;
+                    }
+                }
+                *map++ = index;
+            }
+        }
+    }
+}
+
+
+static BOOL same_rgb(const COLOR_RGB *a, const COLOR_RGB *b)
+{
+    return a->red == b->red && a->green == b->green && a->blue == b->blue;
+}
+
+
+#define RGB8(c)     (((ULONG)((c)->red >> 8) << 16) | ((ULONG)((c)->green >> 8) << 8) | ((c)->blue >> 8))
+
+WORD xfer_remap(const COLOR_ENTRY *src, WORD scount, const COLOR_ENTRY *dst, WORD dcount,
+                const UBYTE *map, WORD bits, UBYTE *remap, ULONG *spal)
+{
+    WORD i, j, flags = XFER_REMAP_EXACT | XFER_REMAP_SAME;
+    const COLOR_RGB *c;
+
+    /* remap and spal hold 256 entries, whatever the caller was told */
+    if (scount > 256)
+        scount = 256;
+    if (dcount > 256)
+        dcount = 256;
+    for (i = 0; i < scount; i++)
+    {
+        c = &src[i].rgb;
+        spal[i] = RGB8(c);
+        /* the same index, or the first that has the colour (duplicates keep their index) */
+        if (i < dcount && same_rgb(c, &dst[i].rgb))
+            j = i;
+        else
+        {
+            for (j = 0; j < dcount; j++)
+                if (same_rgb(c, &dst[j].rgb))
+                    break;
+        }
+        if (j == dcount)
+        {
+            flags &= ~XFER_REMAP_EXACT;
+            j = xfer_itab_index(map, bits, spal[i]);
+        }
+        remap[i] = (UBYTE)j;
+        if (j != i)
+            flags &= ~XFER_REMAP_SAME;
+    }
+    return flags;
+}
+
+
+/* the four-sample filter over the colours of an 8-bit source */
+static ULONG interpolate_index(const UBYTE *row0, const UBYTE *row1, LONG x, LONG width,
+                               LONG fy, const ULONG *pal)
+{
+    LONG fx, right;
+
+    if (x < 0)
+        x = 0;
+    if (x > (width - 1) * 256)
+        x = (width - 1) * 256;
+    fx = x & 255;
+    x >>= 8;
+    right = x + (fx != 0);
+    return blend_rgb(pal[row0[x]], pal[row0[right]], pal[row1[x]], pal[row1[right]], fx, fy);
+}
+
+
+/* one row of the index path; with 'out' NULL only the error runs (rows above the part drawn) */
+static void index_row(XferState *s, UBYTE *out)
+{
+    const XferJob *j = s->job;
+    WORD kind = j->kind & XK_MASK;
+    const UBYTE *next, *row;
+    LONG fy, pbytes = xfer_kind_bits(j->kind) / 8, n, col, first, end;
+    XferAxis x = s->x0;
+    ULONG rgb;
+
+    row = source_row(s, &next, &fy);
+    if (!j->dither)
+    {
+        n = j->count;
+        if (kind == XK_8)
+        {
+            while (n-- > 0)
+            {
+                *out++ = j->remap[row[x.pos]];
+                AXIS_NEXT(x);
+            }
+        }
+        else
+        {
+            while (n-- > 0)
+            {
+                rgb = s->filtered ? interpolate(row, next, x.pos, (LONG)j->sw, fy, j->kind, pbytes) :
+                                    xfer_unpack(row + x.pos * pbytes, j->kind);
+                *out++ = xfer_itab_index(j->imap, j->ibits, rgb);
+                AXIS_NEXT(x);
+            }
+        }
+        return;
+    }
+
+    /*
+     * Floyd-Steinberg, left to right, as fVDI does it: err holds three
+     * components a pixel, errors in sixteenths (at most 16 * 255, so words).
+     * The old error at a column is used before its slot becomes the next
+     * row's; the term down and to the right of the pixel before waits in
+     * 'diagonal', the one to the right in 'carry'.
+     */
+    {
+        WORD *err = j->err;
+        LONG carry[3], diagonal[3], channel[3], value, e;
+        ULONG adjusted;
+        const COLOR_RGB *chosen;
+        UBYTE pixel;
+        WORD k, shift;
+
+        first = (LONG)j->skipx;
+        end = first + j->count;
+        for (k = 0; k < 3; k++)
+            carry[k] = diagonal[k] = 0;
+        for (col = 0; col < (LONG)j->dw; col++)
+        {
+            if (kind == XK_8)
+                rgb = s->filtered ? interpolate_index(row, next, x.pos, (LONG)j->sw, fy, j->spal) :
+                                    j->spal[row[x.pos]];
+            else
+                rgb = s->filtered ? interpolate(row, next, x.pos, (LONG)j->sw, fy, j->kind, pbytes) :
+                                    xfer_unpack(row + x.pos * pbytes, j->kind);
+            adjusted = 0;
+            for (k = 0, shift = 16; k < 3; k++, shift -= 8)
+            {
+                value = (LONG)((rgb >> shift) & 255) + ((err[k] + carry[k] + 8) >> 4);
+                if (value < 0)
+                    value = 0;
+                else if (value > 255)
+                    value = 255;
+                channel[k] = value;
+                adjusted |= (ULONG)value << shift;
+            }
+            pixel = xfer_itab_index(j->imap, j->ibits, adjusted);
+            chosen = &j->dcol[pixel].rgb;
+            channel[0] -= chosen->red >> 8;
+            channel[1] -= chosen->green >> 8;
+            channel[2] -= chosen->blue >> 8;
+            for (k = 0; k < 3; k++)
+            {
+                e = channel[k];
+                if (col)
+                    err[k - 3] += (WORD)(e * 3);
+                err[k] = (WORD)(e * 5 + diagonal[k]);
+                diagonal[k] = e;
+                carry[k] = e * 7;
+            }
+            err += 3;
+            if (out && col >= first && col < end)
+                out[col - first] = pixel;
+            AXIS_NEXT(x);
+        }
+    }
+}
+
+
+void xfer_row_index(XferState *s, UBYTE *out)
+{
+    for (; s->dskip; s->dskip--)
+    {
+        index_row(s, NULL);
+        xfer_axis_next(&s->y);
+    }
+    index_row(s, out);
     s->prev_y = s->y.pos;
     xfer_axis_next(&s->y);
 }

@@ -473,7 +473,7 @@ void vdi_v_gdp(Vwk * vwk)
         break;
 #if HAVE_BEZIER
     case 13:         /* GDP Bezier */
-        v_bez_control(vwk);     /* check, if we can do bezier curves */
+        v_bez_control(vwk);     /* v_bez_on(), v_bez_off() */
         break;
 #endif
     }

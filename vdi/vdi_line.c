@@ -1587,9 +1587,9 @@ void vdi_v_pline(Vwk * vwk)
     set_LN_MASK(vwk);
 
 #if HAVE_BEZIER
-    /* check, if we want to draw a bezier curve */
-    if (CONTRL[5] == 13 && vwk->bez_qual )        /* FIXME: bez_qual ok?? */
-        v_bez(vwk, point, count);
+    /* sub-opcode 13 (or v_bez_on()) with intin: a Bezier curve */
+    if (VDI_IS_BEZ(vwk))
+        v_bez(vwk);
     else
 #endif
     {

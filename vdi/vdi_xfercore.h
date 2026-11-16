@@ -39,8 +39,13 @@
 #define XK_MASK         0x0f
 #define XK_REV          0x10            /* or-ed in: PX_REVERSED */
 
-/* the destinations (16-bit words only with CONF_WITH_VDI_16BIT): 16-bit words (red, green and blue in 5-6-5), or 1, 2, 4 and 8 planes */
+/*
+ * the destinations (16-bit words only with CONF_WITH_VDI_16BIT): 16-bit words
+ * (red, green and blue in 5-6-5), 1, 2, 4 and 8 planes, or bytes of 8-bit
+ * indices (XF_PX_8)
+ */
 #define XD_16           16
+#define XD_INDEX8       32
 
 /* the source kind of a pixel format, XK_NONE if it is not one */
 WORD xfer_kind(ULONG px_format);
@@ -88,6 +93,38 @@ void xfer_axis_next(XferAxis *a);
  */
 typedef ULONG (*XferPenFn)(void *ctx, ULONG value);
 
+/*
+ * Inverse colour maps (v_create_itab, the dithering): for each cell of RGB
+ * at 'bits' bits a component (3, 4 or 5), the index of the palette colour
+ * nearest the centre of the cell, at 8 bits a component and by squared
+ * distance, the first of equals.  The map has XFER_ITAB_CELLS(bits) bytes,
+ * the cell of red r, green g, blue b being (r << 2 * bits) | (g << bits) | b;
+ * xfer_itab_fill() needs XFER_ITAB_WORK(count) bytes of work memory, LONG
+ * aligned, for a palette of 'count' (1-256) colours.  It is an approximation
+ * (the search is made once, at the centre of each cell), as fVDI's.
+ */
+#define XFER_ITAB_MIN_BITS      3
+#define XFER_ITAB_MAX_BITS      5
+#define XFER_ITAB_CELLS(bits)   (1L << (3 * (bits)))
+#define XFER_ITAB_WORK(count)   (4L * 511 + 8L * (count) + 4L * (count))
+void xfer_itab_fill(const COLOR_ENTRY *colors, WORD count, WORD bits, UBYTE *map, void *work);
+
+/* the index a map gives a colour 0x00rrggbb */
+UBYTE xfer_itab_index(const UBYTE *map, WORD bits, ULONG rgb);
+
+/*
+ * The destination index of each index of a palette 'src' onto the palette
+ * 'dst' with the inverse map 'map' of it: the same index if it has the same
+ * colour (16-bit red, green and blue), else the first index of dst with the
+ * colour, else what the map gives.  Also the colours of src as 0x00rrggbb in
+ * 'spal'.  Returns XFER_REMAP_EXACT if every colour of src is one of dst,
+ * and XFER_REMAP_SAME if each index stays.  At most 256 of each are taken.
+ */
+#define XFER_REMAP_EXACT        1
+#define XFER_REMAP_SAME         2
+WORD xfer_remap(const COLOR_ENTRY *src, WORD scount, const COLOR_ENTRY *dst, WORD dcount,
+                const UBYTE *map, WORD bits, UBYTE *remap, ULONG *spal);
+
 typedef struct
 {
     WORD kind;                  /* XK_ of the source, with XK_REV */
@@ -106,6 +143,21 @@ typedef struct
     XferPenFn pen_rgb;          /* direct sources onto planes */
     XferPenFn pen_index;        /* XK_8 onto planes */
     void *ctx;                  /* handed to both */
+    /*
+     * The pixels as indices of a palette, as fVDI makes them (xfer_row_index):
+     * XD_INDEX8, and planes with dithering.  Direct sources and dithered 8-bit
+     * ones are filtered as they are reduced; dithering (Floyd-Steinberg, left
+     * to right) runs over the whole destination rectangle, the part drawn or
+     * not, so that what is drawn does not depend on the clipping.
+     */
+    BOOL index;
+    BOOL dither;
+    const UBYTE *imap;          /* the inverse map of the destination palette */
+    WORD ibits;                 /* its bits a component */
+    const COLOR_ENTRY *dcol;    /* dithering: the destination palette, the colour of each index */
+    const ULONG *spal;          /* XK_8, dithering: the colour of each source index, 0x00rrggbb */
+    const UBYTE *remap;         /* XK_8 without dithering: the destination index of each source index */
+    WORD *err;                  /* dithering: 3 * dw words, zero */
 } XferJob;
 
 typedef struct
@@ -116,6 +168,7 @@ typedef struct
     LONG prev_y;                /* the source row of the last row made, -1: none */
     ULONG ckey[8];              /* the last colours asked of pen_rgb */
     UWORD cval[8];
+    ULONG dskip;                /* dithering: the rows above the part drawn, still to be run */
 } XferState;
 
 void xfer_begin(XferState *s, const XferJob *job);
@@ -133,6 +186,12 @@ void xfer_row16(XferState *s, UBYTE *dst, const UBYTE *prev);
  * 1 for the pixels to write.
  */
 void xfer_row_pix(XferState *s, UBYTE *pix, UBYTE *mask);
+
+/*
+ * The next row of the index path (job->index): count indices at 'out',
+ * those of the columns skipx to skipx + count - 1.
+ */
+void xfer_row_index(XferState *s, UBYTE *out);
 
 /*
  * Write count pixels from column x0 of a line of interleaved planes

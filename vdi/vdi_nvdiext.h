@@ -65,6 +65,68 @@ typedef struct
     COLOR_ENTRY colors[256];
 } COLOR_TAB;
 
+/* the bytes of a colour table of 'n' colours: the header, then the colours */
+#define COLOR_TAB_HEADER    48
+#define COLOR_TAB_BYTES(n)  (COLOR_TAB_HEADER + 8L * (n))
+
+/* the header of a colour table alone: a copy of a program's, read once */
+typedef struct
+{
+    LONG magic;
+    LONG length;
+    LONG format;
+    LONG reserved;
+    LONG map_id;
+    LONG color_space;
+    LONG flags;
+    LONG no_colors;
+    LONG reserved1;
+    LONG reserved2;
+    LONG reserved3;
+    LONG reserved4;
+} COLOR_TAB_HEAD;
+
+/*
+ * An inverse colour table (v_create_itab, and those the VDI keeps for its
+ * own tables): a snapshot of the palette it was made for, then its map,
+ * 1 << (3 * bits) bytes (see xfer_itab_fill() in vdi_xfercore.h).  The
+ * caller only gets 'ref', which the VDI never gives twice.
+ */
+typedef struct VdiItab_ VdiItab;
+struct VdiItab_
+{
+    VdiItab *next;
+    ULONG ref;
+    WORD count;                 /* the colours of the snapshot, 1-256 */
+    WORD bits;                  /* 3-5 bits a component */
+    COLOR_ENTRY colors[];
+};
+
+#define VDI_ITAB_MAP(t)     ((const UBYTE *)((t)->colors + (t)->count))
+
+/*
+ * A colour table of a workstation (see vdi_ctab.c): one a program made with
+ * v_create_ctab, or a snapshot the VDI keeps of the workstation's colours,
+ * with the inverse table made for it.  The node is the VDI's own memory;
+ * the table of one a program made is a block of its own, which the program
+ * has the pointer to and may write all of (only as many colours as
+ * no_colors are allocated); a snapshot's table follows its node.
+ */
+typedef struct VdiCtab_ VdiCtab;
+struct VdiCtab_
+{
+    VdiCtab *next;
+    COLOR_TAB *table;
+    VdiItab *inverse;           /* the snapshots: the inverse table of 'table', or NULL */
+    WORD kind;                  /* VDI_CTAB_CREATED, _CURRENT or _PENS */
+    WORD pad;
+    ULONG gen;                  /* the snapshots: vdi_pen_gen when last brought up to the pens */
+};
+
+#define VDI_CTAB_CREATED    0   /* made by v_create_ctab */
+#define VDI_CTAB_CURRENT    1   /* the colours by pixel value (vq_ctab) */
+#define VDI_CTAB_PENS       2   /* the colours by VDI pen: an 8-bit bitmap without a table */
+
 /* a bitmap description, as v_open_bm() and v_resize_bm() take it */
 #define GCBITMAP_MAGIC  0x6362746dL     /* 'cbtm' */
 

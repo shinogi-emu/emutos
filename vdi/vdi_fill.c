@@ -634,9 +634,9 @@ void vdi_v_fillarea(Vwk * vwk)
     int count = CONTRL[1];
 
 #if HAVE_BEZIER
-    /* check, if we want to draw a filled bezier curve */
-    if (CONTRL[5] == 13 && vwk->bez_qual )
-        v_bez_fill(vwk, point, count);
+    /* sub-opcode 13 (or v_bez_on()) with intin: a filled Bezier curve */
+    if (VDI_IS_BEZ(vwk))
+        v_bez_fill(vwk);
     else
 #endif
         polygon(vwk, point, count);
