@@ -567,6 +567,14 @@ void vdi_v_opnwk(Vwk * vwk)
     Vwk **p;
     WORD newrez;
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /*
+     * the tables of an earlier opening that was not closed: freed first, as
+     * that may sleep, before anything of the workstation is changed
+     */
+    vdi_ctab_release(&phys_work);
+#endif
+
     /*
      * Programs can request a video mode switch by passing the desired
      * mode + 2 in INTIN[0].
@@ -625,9 +633,6 @@ void vdi_v_opnwk(Vwk * vwk)
         vwk->ext = &phys_work_ext;  /* workstation extension */
 #endif
 
-#if CONF_WITH_VDI_NVDI_EXT
-    vdi_ctab_release(vwk);      /* the tables of an earlier opening that was not closed */
-#endif
     init_wk(vwk);
 
     timer_init();
