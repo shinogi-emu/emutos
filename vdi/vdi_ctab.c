@@ -396,7 +396,7 @@ static VdiItab *alloc_itab(WORD count, WORD bits)
 }
 
 
-/* the snapshot and the map of an inverse table, from colours that stay while it runs */
+/* the snapshot and the map of an inverse table: the colours are read once, t->count of them */
 static void fill_itab(VdiItab *t, const COLOR_ENTRY *colors, void *work)
 {
     memcpy(t->colors, colors, 8L * t->count);
@@ -701,6 +701,7 @@ void vdi_vq_ctab(Vwk *vwk)
 void vdi_v_itab(Vwk *vwk)
 {
     const COLOR_TAB *ctab;
+    COLOR_TAB_HEAD head;
     VdiItab *t, **link;
     void *work;
     LONG ref = 0;
@@ -713,15 +714,14 @@ void vdi_v_itab(Vwk *vwk)
         {
             ctab = (const COLOR_TAB *)get_long(INTIN);
             bits = INTIN[2];
-            if (vdi_ctab_valid(ctab) && bits >= XFER_ITAB_MIN_BITS && bits <= XFER_ITAB_MAX_BITS &&
+            /* the header of the program's table is read once, its colours once, as many as it says */
+            if (vdi_ctab_head(ctab, &head) && bits >= XFER_ITAB_MIN_BITS && bits <= XFER_ITAB_MAX_BITS &&
                 refs_given < 0xffffffffUL)
             {
-                count = (WORD)ctab->no_colors;
+                count = (WORD)head.no_colors;
                 t = alloc_itab(count, bits);                    /* may sleep */
                 work = vdi_alloc_kept(XFER_ITAB_WORK(count));   /* may sleep */
-                /* the table is the program's: it is read again after the sleeps */
-                if (t && work && vdi_ctab_valid(ctab) && ctab->no_colors == count &&
-                    refs_given < 0xffffffffUL)
+                if (t && work && refs_given < 0xffffffffUL)
                 {
                     fill_itab(t, ctab->colors, work);
                     t->ref = ++refs_given;
