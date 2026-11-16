@@ -246,7 +246,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     ULONG ssize, dsize;
     UWORD mode;
     WORD kind, planes, dkind, k, ckind = -1;
-    BOOL transparent = FALSE, dither, index, inverse = FALSE, pens = FALSE;
+    BOOL transparent = FALSE, dither, index, inverse = FALSE, pens = FALSE, same = FALSE;
     XferJob job;
     XferState st;
     XferCtx ctx;
@@ -471,6 +471,16 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             inverse = TRUE;
         }
         pens = (k == XK_8 && !sctab);
+        /*
+         * 8-bit indices without tables onto 8-bit indices without tables: the
+         * same palette (the pens) on both sides, so every index stays and
+         * nothing is dithered; no palette or inverse table is needed for that
+         */
+        if (dkind == XD_INDEX8 && pens && !dst->ctab && !dst->itab)
+        {
+            same = TRUE;
+            dither = FALSE;
+        }
     }
 
     /*
@@ -506,11 +516,19 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         if (palbytes)
             memset(block, 0, palbytes);
 
+        job.index = TRUE;
+        if (same)
+        {
+            for (x = 0; x < 256; x++)
+                remap[x] = (UBYTE)x;
+            job.remap = remap;
+            goto render;
+        }
+
         /* the tables; nothing sleeps from here on */
         if (!index_tables(vwk, sctab, (WORD)ncol, dst ? dst->ctab : NULL, dst ? (ULONG)dst->itab : 0UL,
                           ckind, inverse, pens, &tables))
             goto done;
-        job.index = TRUE;
         job.imap = VDI_ITAB_MAP(tables.itab);
         job.ibits = tables.itab->bits;
         job.dcol = tables.itab->colors;
@@ -551,6 +569,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         }
     }
 
+render:
     xfer_begin(&st, &job);
     if (index)
     {
