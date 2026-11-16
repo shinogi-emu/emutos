@@ -319,7 +319,8 @@ static void refresh(Vwk *vwk, VdiCtab *node)
             changed = TRUE;
         }
     }
-    if (changed || t->map_id == 0)
+    /* only the table by pixel value has an id (vq_ctab, vq_ctab_id) */
+    if (node->kind == VDI_CTAB_CURRENT && (changed || t->map_id == 0))
         t->map_id = new_id();
 }
 
