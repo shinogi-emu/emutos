@@ -597,6 +597,7 @@ void vdi_vs_x_color(Vwk *);         /* 207 */
 void vdi_vq_x_color(Vwk *);         /* 209 */
 
 /* vdi_col.c: the palette by VDI pen, for the colour tables */
+extern ULONG vdi_pen_gen;           /* counts the changes of colours asked for pens through the VDI */
 void vdi_set_pen_rgb(Vwk *vwk, WORD pen, const WORD *rgb);
 void vdi_default_pen_rgb(WORD pen, WORD *rgb);
 

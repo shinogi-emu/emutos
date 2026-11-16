@@ -119,7 +119,8 @@ struct VdiCtab_
     COLOR_TAB *table;
     VdiItab *inverse;           /* the snapshots: the inverse table of 'table', or NULL */
     WORD kind;                  /* VDI_CTAB_CREATED, _CURRENT or _PENS */
-    WORD pad;                   /* the table after the node stays long aligned */
+    WORD pad;
+    ULONG gen;                  /* the snapshots: vdi_pen_gen when last brought up to the pens */
 };
 
 #define VDI_CTAB_CREATED    0   /* made by v_create_ctab */

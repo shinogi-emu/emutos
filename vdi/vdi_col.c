@@ -672,6 +672,10 @@ void vdi_vs_color(Vwk *vwk)
     WORD colnum, i;
     WORD *intin, rgb[3], *rgbptr;
 
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_pen_gen++;              /* the colour tables look again (vdi_ctab.c) */
+#endif
+
 #if CONF_WITH_VDI_16BIT
     if (TRUECOLOR_MODE)
     {
@@ -722,6 +726,10 @@ void vdi_vs_color(Vwk *vwk)
 void init_colors(void)
 {
     int i;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_pen_gen++;
+#endif
 
     /* set up palette */
     memcpy(REQ_COL, st_palette, sizeof(st_palette));    /* use ST as default */
@@ -1090,9 +1098,13 @@ WORD vdi_nearest_pen_in(Vwk *vwk, const COLOR_RGB *c)
  *
  * 'pen' must be valid, the components 0-1000 (vs_ctab and friends)
  */
+ULONG vdi_pen_gen;
+
 void vdi_set_pen_rgb(Vwk *vwk, WORD pen, const WORD *rgb)
 {
     WORD i, colnum = pen, c[3];
+
+    vdi_pen_gen++;
 
 #if CONF_WITH_VDI_16BIT
     if (TRUECOLOR_MODE)

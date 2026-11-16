@@ -286,6 +286,7 @@ static VdiCtab *alloc_ctab(WORD count, WORD kind)
     node->inverse = NULL;
     node->kind = kind;
     node->pad = 0;
+    node->gen = 0;
     ctab_header(table, count, 0);
     return node;
 }
@@ -319,6 +320,7 @@ static void refresh(Vwk *vwk, VdiCtab *node)
             changed = TRUE;
         }
     }
+    node->gen = vdi_pen_gen;
     /* only the table by pixel value has an id (vq_ctab, vq_ctab_id) */
     if (node->kind == VDI_CTAB_CURRENT && (changed || t->map_id == 0))
         t->map_id = new_id();
@@ -437,8 +439,14 @@ BOOL vdi_ctab_prepare(Vwk *vwk, WORD kind, BOOL inverse)
  */
 const VdiCtab *vdi_ctab_get(Vwk *vwk, WORD kind, BOOL inverse)
 {
-    VdiCtab *node = snapshot(vwk, kind, FALSE);
+    VdiCtab *node = find_kind(vwk, kind);
 
+    /*
+     * vdi_ctab_prepare() brought it up to the pens; unless the VDI set a
+     * colour since (while the call slept), it is not compared again
+     */
+    if (node && (node->gen != vdi_pen_gen || node->table->no_colors != palette_size()))
+        node = snapshot(vwk, kind, FALSE);
     if (!node || (inverse && !itab_fits(node->inverse, node->table)))
         return NULL;
     return node;
