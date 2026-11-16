@@ -88,6 +88,25 @@ void xfer_axis_next(XferAxis *a);
  */
 typedef ULONG (*XferPenFn)(void *ctx, ULONG value);
 
+/*
+ * Inverse colour maps (v_create_itab, the dithering): for each cell of RGB
+ * at 'bits' bits a component (3, 4 or 5), the index of the palette colour
+ * nearest the centre of the cell, at 8 bits a component and by squared
+ * distance, the first of equals.  The map has XFER_ITAB_CELLS(bits) bytes,
+ * the cell of red r, green g, blue b being (r << 2 * bits) | (g << bits) | b;
+ * xfer_itab_fill() needs XFER_ITAB_WORK(count) bytes of work memory, LONG
+ * aligned, for a palette of 'count' (1-256) colours.  It is an approximation
+ * (the search is made once, at the centre of each cell), as fVDI's.
+ */
+#define XFER_ITAB_MIN_BITS      3
+#define XFER_ITAB_MAX_BITS      5
+#define XFER_ITAB_CELLS(bits)   (1L << (3 * (bits)))
+#define XFER_ITAB_WORK(count)   (4L * 511 + 8L * (count) + 4L * (count))
+void xfer_itab_fill(const COLOR_ENTRY *colors, WORD count, WORD bits, UBYTE *map, void *work);
+
+/* the index a map gives a colour 0x00rrggbb */
+UBYTE xfer_itab_index(const UBYTE *map, WORD bits, ULONG rgb);
+
 typedef struct
 {
     WORD kind;                  /* XK_ of the source, with XK_REV */

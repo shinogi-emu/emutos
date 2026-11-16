@@ -527,6 +527,79 @@ void xfer_row_pix(XferState *s, UBYTE *pix, UBYTE *mask)
 }
 
 
+/*
+ * Inverse colour maps
+ */
+
+UBYTE xfer_itab_index(const UBYTE *map, WORD bits, ULONG rgb)
+{
+    ULONG mask = (1UL << bits) - 1;
+    ULONG r = (rgb >> (24 - 3 * bits)) & (mask << (2 * bits));
+    ULONG g = (rgb >> (16 - 2 * bits)) & (mask << bits);
+    ULONG b = (rgb >> (8 - bits)) & mask;
+
+    return map[r | g | b];
+}
+
+
+void xfer_itab_fill(const COLOR_ENTRY *colors, WORD count, WORD bits, UBYTE *map, void *work)
+{
+    ULONG *sq = (ULONG *)work;          /* sq[d + 255] = d * d, d -255 to 255 */
+    ULONG *dr = sq + 511;               /* the red part of the distance of each colour */
+    ULONG *drg = dr + count;            /* and with the green part */
+    UBYTE *red = (UBYTE *)(drg + count), *green = red + count, *blue = green + count;
+    WORD shift = 8 - bits, n = (WORD)(1 << bits), r, g, b, i;
+    LONG d, half = 1L << (shift - 1), c;
+    const ULONG *bsq;
+    ULONG best, dist;
+    UBYTE index;
+
+    for (d = -255; d <= 255; d++)
+        sq[d + 255] = (ULONG)(d * d);
+    for (i = 0; i < count; i++)
+    {
+        red[i] = (UBYTE)(colors[i].rgb.red >> 8);
+        green[i] = (UBYTE)(colors[i].rgb.green >> 8);
+        blue[i] = (UBYTE)(colors[i].rgb.blue >> 8);
+    }
+
+    /*
+     * The distance is the sum of three squares: the red and green parts are
+     * worked out once per row of cells, and the squares come from a table.
+     * The colours are tried in order and only a nearer one replaces the
+     * best, so the first of equals wins.
+     */
+    for (r = 0; r < n; r++)
+    {
+        c = ((LONG)r << shift) + half + 255;
+        for (i = 0; i < count; i++)
+            dr[i] = sq[c - red[i]];
+        for (g = 0; g < n; g++)
+        {
+            c = ((LONG)g << shift) + half + 255;
+            for (i = 0; i < count; i++)
+                drg[i] = dr[i] + sq[c - green[i]];
+            for (b = 0; b < n; b++)
+            {
+                bsq = sq + ((LONG)b << shift) + half + 255;
+                best = 0xffffffffUL;
+                index = 0;
+                for (i = 0; i < count; i++)
+                {
+                    dist = drg[i] + bsq[-(LONG)blue[i]];
+                    if (dist < best)
+                    {
+                        best = dist;
+                        index = (UBYTE)i;
+                    }
+                }
+                *map++ = index;
+            }
+        }
+    }
+}
+
+
 void xfer_store_planar(UBYTE *line, WORD planes, LONG x0, LONG count,
                        const UBYTE *pix, const UBYTE *mask)
 {

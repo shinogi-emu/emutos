@@ -516,6 +516,7 @@ void vdi_v_opnvwk(Vwk * vwk)
 #if CONF_WITH_VDI_NVDI_EXT
     vwk->bm.addr = NULL;        /* a workstation of the screen */
     vwk->bm.mem = NULL;
+    vdi_ctab_init(vwk);         /* no colour tables yet */
 #endif
     vwk_ptr[handle] = vwk;
     vwk->handle = CONTRL[6] = handle;
@@ -627,6 +628,9 @@ void vdi_v_opnwk(Vwk * vwk)
         vwk->ext = &phys_work_ext;  /* workstation extension */
 #endif
 
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_ctab_release(vwk);      /* the tables of an earlier opening that was not closed */
+#endif
     init_wk(vwk);
 
     timer_init();
@@ -671,6 +675,9 @@ void vdi_v_clswk(Vwk * vwk)
         }
     }
     CUR_WORK = vwk_ptr[VDI_PHYS_HANDLE];
+#if CONF_WITH_VDI_NVDI_EXT
+    vdi_ctab_release(&phys_work);   /* the colour tables of the physical workstation; may sleep */
+#endif
 
     timer_exit();
     vdimouse_exit();                    /* deinitialize mouse */

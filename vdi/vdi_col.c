@@ -1083,4 +1083,86 @@ WORD vdi_nearest_pen_in(Vwk *vwk, const COLOR_RGB *c)
 #endif
     return found;
 }
+
+
+/*
+ * vdi_set_pen_rgb - set a VDI pen to a colour, as vs_color() does
+ *
+ * 'pen' must be valid, the components 0-1000 (vs_ctab and friends)
+ */
+void vdi_set_pen_rgb(Vwk *vwk, WORD pen, const WORD *rgb)
+{
+    WORD i, colnum = pen, c[3];
+
+#if CONF_WITH_VDI_16BIT
+    if (TRUECOLOR_MODE)
+    {
+        for (i = 0; i < 3; i++)
+            c[i] = vwk->ext->req_col[pen][i] = rgb[i];
+        set_color16(vwk, pen, c);
+        return;
+    }
+#endif
+
+#if CONF_WITH_TT_SHIFTER
+    if (has_tt_shifter)
+        colnum = adjust_tt_colnum(colnum);  /* handles palette bank issues */
+#endif
+    for (i = 0; i < 3; i++)
+    {
+        if (colnum < 16)
+            REQ_COL[colnum][i] = rgb[i];
+#if EXTENDED_PALETTE
+        else
+            req_col2[colnum-16][i] = rgb[i];
+#endif
+        c[i] = rgb[i];
+    }
+    set_color(pen, c);
+}
+
+
+/*
+ * vdi_default_pen_rgb - the colour a VDI pen starts with (init_colors())
+ *
+ * 'pen' 0-255; without a palette of more than 16 colours, pens from 16 are black
+ */
+void vdi_default_pen_rgb(WORD pen, WORD *rgb)
+{
+    const WORD *src = st_palette[0];
+
+    /* as init_colors(): the Videl's, else the TT's, else the ST's (the Videl's above 15) */
+    if (pen < 16)
+    {
+        src = st_palette[pen];
+#if CONF_WITH_TT_SHIFTER
+        if (has_tt_shifter)
+            src = tt_palette1[pen];
+#endif
+#if CONF_WITH_VIDEL
+        if (has_videl)
+            src = videl_palette1[pen];
+#endif
+    }
+    else
+    {
+#if EXTENDED_PALETTE
+        src = videl_palette2[pen-16];
+#if CONF_WITH_TT_SHIFTER
+        if (has_tt_shifter)
+            src = tt_palette2[pen-16];
+#endif
+#if CONF_WITH_VIDEL
+        if (has_videl)
+            src = videl_palette2[pen-16];
+#endif
+#else
+        rgb[0] = rgb[1] = rgb[2] = 0;
+        return;
+#endif
+    }
+    rgb[0] = src[0];
+    rgb[1] = src[1];
+    rgb[2] = src[2];
+}
 #endif /* CONF_WITH_VDI_NVDI_EXT */

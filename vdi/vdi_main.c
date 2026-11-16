@@ -180,7 +180,10 @@ static const struct vdi_xjmptab jmptb3[] = {
     { 202, VDI_ANY_SUBOP, 0,  6, vdi_vq_fg_color },
     { 203, VDI_ANY_SUBOP, 0,  6, vdi_vq_bg_color },
     { 204, VDI_ANY_SUBOP, 0,  0, vdi_color_entry },         /* sets 2, 6, 6 or 4 of intout */
+    { 205, VDI_ANY_SUBOP, 0,  1, vdi_vs_ctab },             /* in vdi_ctab.c */
+    { 206, VDI_ANY_SUBOP, 0,  0, vdi_vq_ctab },             /* sets CONTRL[4] */
     { 207, VDI_ANY_SUBOP, 0,  1, vdi_vs_x_color },
+    { 208, VDI_ANY_SUBOP, 0,  0, vdi_v_itab },              /* in vdi_ctab.c, sets CONTRL[4] */
 #if !CONF_WITH_VDI_OUTLINE_FONTS
     { 240, 4200,          4,  0, vdi_vqt_real_extent },     /* in vdi_text.c */
 #endif
@@ -232,6 +235,7 @@ static BOOL release_vwk(Vwk *vwk)
 {
 #if CONF_WITH_VDI_NVDI_EXT
     vdi_bitmap_release(vwk);    /* the pixels, if the VDI gave them */
+    vdi_ctab_release(vwk);      /* the colour and inverse tables */
 #endif
     return vdi_os_mfree(vwk) == 0;  /* may sleep: see vdi_sleep.h */
 }

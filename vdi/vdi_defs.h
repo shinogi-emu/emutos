@@ -304,6 +304,8 @@ struct Vwk_ {
 #if CONF_WITH_VDI_NVDI_EXT
     VwkColors col;              /* see vdi_nvdicol.c */
     VwkBitmap bm;               /* see vdi_bitmap.c */
+    VdiCtab *ctabs;             /* the colour tables of the workstation (see vdi_ctab.c) */
+    VdiItab *itabs;             /* the inverse tables made by v_create_itab */
 #endif
 #if CONF_WITH_VDI_OUTLINE_FONTS
     /* last, as vdi_asm.S knows the offsets of the fields above (vdiscreen.h) */
@@ -590,6 +592,21 @@ void vdi_bitmap_swap_out(WORD opcode);  /* back to the screen (after the call of
 BOOL vdi_acts_on_screen(WORD opcode);   /* opcodes that ignore the swap */
 void vdi_vs_x_color(Vwk *);         /* 207 */
 void vdi_vq_x_color(Vwk *);         /* 209 */
+
+/* vdi_col.c: the palette by VDI pen, for the colour tables */
+void vdi_set_pen_rgb(Vwk *vwk, WORD pen, const WORD *rgb);
+void vdi_default_pen_rgb(WORD pen, WORD *rgb);
+
+/* vdi_ctab.c: colour tables and inverse tables */
+void vdi_vs_ctab(Vwk *);            /* 205: vs_ctab, vs_ctab_entry, vs_dflt_ctab */
+void vdi_vq_ctab(Vwk *);            /* 206: vq_ctab and the other colour table calls */
+void vdi_v_itab(Vwk *);             /* 208: v_create_itab, v_delete_itab */
+void vdi_ctab_init(Vwk *vwk);       /* a workstation that has no tables yet */
+void vdi_ctab_release(Vwk *vwk);    /* free the tables of a closed workstation (may sleep) */
+BOOL vdi_ctab_valid(const COLOR_TAB *ctab);
+BOOL vdi_ctab_prepare(Vwk *vwk, WORD kind, BOOL inverse);     /* may sleep */
+const VdiCtab *vdi_ctab_get(Vwk *vwk, WORD kind, BOOL inverse);
+const VdiItab *vdi_itab_find(Vwk *vwk, ULONG ref, const COLOR_TAB *ctab);
 
 /*
  * the VDI pen of a colour field of the workstation (text_color and
