@@ -607,6 +607,7 @@ void vdi_v_itab(Vwk *);             /* 208: v_create_itab, v_delete_itab */
 void vdi_ctab_init(Vwk *vwk);       /* a workstation that has no tables yet */
 void vdi_ctab_release(Vwk *vwk);    /* free the tables of a closed workstation (may sleep) */
 BOOL vdi_ctab_valid(const COLOR_TAB *ctab);
+BOOL vdi_ctab_head(const COLOR_TAB *ctab, COLOR_TAB_HEAD *head);
 BOOL vdi_ctab_prepare(Vwk *vwk, WORD kind, BOOL inverse);     /* may sleep */
 const VdiCtab *vdi_ctab_get(Vwk *vwk, WORD kind, BOOL inverse);
 const VdiItab *vdi_itab_find(Vwk *vwk, ULONG ref, const COLOR_TAB *ctab);

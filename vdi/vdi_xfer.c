@@ -86,6 +86,7 @@ typedef struct
 {
     Vwk *vwk;
     const COLOR_TAB *ctab;      /* the colour table of the source, NULL: the workstation's pens */
+    LONG ncol;                  /* its colours, as read once (1-256) */
 } XferCtx;
 
 
@@ -107,13 +108,21 @@ static ULONG pen_of_rgb(void *ctx, ULONG rgb)
 }
 
 
-/* the colour of an index of an 8-bit source: the table's, or the pen's */
+/*
+ * the colour of an index of an 8-bit source: the table's, or the pen's; an
+ * index beyond the table (the source changed since it was checked) is black
+ */
 static void index_colour(const XferCtx *x, ULONG index, COLOR_RGB *c)
 {
-    if (x->ctab)
+    if (!x->ctab)
+        vdi_pen_rgb(x->vwk, (WORD)index, c);
+    else if (index < (ULONG)x->ncol)
         *c = x->ctab->colors[index].rgb;
     else
-        vdi_pen_rgb(x->vwk, (WORD)index, c);
+    {
+        c->reserved = 0;
+        c->red = c->green = c->blue = 0;
+    }
 }
 
 
@@ -159,11 +168,13 @@ typedef struct
 
 /*
  * Get the tables: 'ckind' is the snapshot of the workstation that is the
- * destination palette (-1: the bitmap's own table), 'inverse' whether its
- * inverse table is the VDI's; 'pens' whether an 8-bit source takes the
- * colours of the pens.  FALSE if one cannot be had.
+ * destination palette (-1: the bitmap's own table 'dctab', with the inverse
+ * table 'ditab'), 'inverse' whether its inverse table is the VDI's; 'pens'
+ * whether an 8-bit source takes the colours of the pens, else 'sctab' with
+ * 'scount' colours (checked by the caller).  FALSE if one cannot be had.
  */
-static BOOL index_tables(Vwk *vwk, const GCBITMAP *src, const GCBITMAP *dst,
+static BOOL index_tables(Vwk *vwk, const COLOR_TAB *sctab, WORD scount,
+                         const COLOR_TAB *dctab, ULONG ditab,
                          WORD ckind, BOOL inverse, BOOL pens, XferTables *t)
 {
     const VdiCtab *node;
@@ -180,13 +191,13 @@ static BOOL index_tables(Vwk *vwk, const GCBITMAP *src, const GCBITMAP *dst,
 
     /* these do not */
     if (ckind < 0)
-        t->itab = vdi_itab_find(vwk, (ULONG)dst->itab, dst->ctab);
+        t->itab = vdi_itab_find(vwk, ditab, dctab);
     else
     {
         node = vdi_ctab_get(vwk, ckind, inverse);
         if (!node)
             return FALSE;
-        t->itab = inverse ? node->inverse : vdi_itab_find(vwk, (ULONG)dst->itab, &node->table);
+        t->itab = inverse ? node->inverse : vdi_itab_find(vwk, ditab, &node->table);
     }
     if (!t->itab)
         return FALSE;
@@ -198,10 +209,10 @@ static BOOL index_tables(Vwk *vwk, const GCBITMAP *src, const GCBITMAP *dst,
         t->scol = node->table.colors;
         t->scount = (WORD)node->table.no_colors;
     }
-    else if (src->ctab)
+    else if (sctab)
     {
-        t->scol = src->ctab->colors;
-        t->scount = (WORD)src->ctab->no_colors;
+        t->scol = sctab->colors;
+        t->scount = scount;
     }
     return TRUE;
 }
@@ -215,10 +226,18 @@ static BOOL index_tables(Vwk *vwk, const GCBITMAP *src, const GCBITMAP *dst,
  * rectangle, then the destination rectangle (x1, y1, x2, y2, both ends
  * inclusive).  Nothing is drawn if the call is not understood or the memory
  * is not usable (see the refusals in vdi_xfercore.h); nothing is returned.
+ *
+ * The two GCBITMAPs and the header of the source's colour table are read
+ * once, into copies: what is checked is what is used, whatever the program
+ * (another of its threads, or another program sharing the memory) writes
+ * there meanwhile, while this call sleeps in an allocation or not.
  */
 void vdi_vr_transfer_bits(Vwk *vwk)
 {
     const GCBITMAP *src, *dst;
+    GCBITMAP sbm, dbm;
+    COLOR_TAB_HEAD shead;
+    const COLOR_TAB *sctab;
     RECT16 sr, dr;
     LONG cx1, cy1, cx2, cy2;    /* the destination, where it may be drawn */
     LONG dx1, dy1, dx2, dy2;    /* the part of the destination rectangle that is */
@@ -240,6 +259,14 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     dst = (const GCBITMAP *)ptr_at(CONTRL + 9);
     if (!src)
         return;
+    sbm = *src;
+    src = &sbm;
+    if (dst)
+    {
+        dbm = *dst;
+        dst = &dbm;
+    }
+    sctab = sbm.ctab;
     sr.x1 = PTSIN[0];
     sr.y1 = PTSIN[1];
     sr.x2 = PTSIN[2];
@@ -368,6 +395,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         job.src += sx * (xfer_kind_bits(kind) / 8);
     ctx.vwk = vwk;
     ctx.ctab = NULL;
+    ctx.ncol = 0;
     job.ctx = &ctx;
     job.pen_rgb = pen_of_rgb;
     job.pen_index = pen_of_index;
@@ -378,7 +406,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         /* no colour tables, the same size: the bytes as they are, as fVDI */
         row = (UBYTE *)job.src;
         line = base + (dy1 - ybase) * pitch + (dx1 - xbase);
-        for (y = 0; y < job.rows; y++, row += src->width, line += pitch)
+        for (y = 0; y < job.rows; y++, row += job.pitch, line += pitch)
             memcpy(line, row, job.count);
         return;
     }
@@ -390,17 +418,27 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     }
     else if (k == XK_8)
     {
-        /* the colours of the indices: the table of the source or the pens of the workstation */
-        if (src->ctab && (index ? vdi_ctab_valid(src->ctab) :
-                          (src->ctab->no_colors >= 1 && src->ctab->no_colors <= 256)))
+        /*
+         * the colours of the indices: the table of the source (its header
+         * read once; the index path wants a sound one, the others only a
+         * count of 1-256) or, without one, the pens of the workstation by pen
+         * number (as since the first vr_transfer_bits, though vq_ctab lists
+         * the colours by pixel value)
+         */
+        if (vdi_ctab_head(sctab, &shead) ||
+            (sctab && !index && shead.no_colors >= 1 && shead.no_colors <= 256))
         {
-            ctx.ctab = src->ctab;
-            ncol = src->ctab->no_colors;
+            ctx.ctab = sctab;
+            ncol = shead.no_colors;
         }
-        else if (src->ctab && index)
+        else if (sctab && index)
             return;                 /* the index path takes only a sound table */
         else
+        {
+            sctab = NULL;           /* an unusable table: the pens, as before */
             ncol = numcolors > 256 ? 256 : numcolors;
+        }
+        ctx.ncol = ncol;
         if (ncol < 1)
             return;
         if (ncol < 256)
@@ -408,7 +446,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             /* an index beyond the table refuses the whole call */
             for (y = 0; y < (LONG)job.sh; y++)
             {
-                row = (UBYTE *)job.src + y * src->width;
+                row = (UBYTE *)job.src + y * job.pitch;
                 for (x = 0; x < (LONG)job.sw; x++)
                     if (row[x] >= ncol)
                         return;
@@ -432,7 +470,7 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             ckind = VDI_CTAB_CURRENT;
             inverse = TRUE;
         }
-        pens = (k == XK_8 && !src->ctab);
+        pens = (k == XK_8 && !sctab);
     }
 
     /*
@@ -464,8 +502,13 @@ void vdi_vr_transfer_bits(Vwk *vwk)
         ULONG *spal = (ULONG *)block;
         UBYTE *remap = block + 1024;
 
+        /* indices beyond the source's table (a source changed since it was checked) map to 0 */
+        if (palbytes)
+            memset(block, 0, palbytes);
+
         /* the tables; nothing sleeps from here on */
-        if (!index_tables(vwk, src, dst, ckind, inverse, pens, &tables))
+        if (!index_tables(vwk, sctab, (WORD)ncol, dst ? dst->ctab : NULL, dst ? (ULONG)dst->itab : 0UL,
+                          ckind, inverse, pens, &tables))
             goto done;
         job.index = TRUE;
         job.imap = VDI_ITAB_MAP(tables.itab);

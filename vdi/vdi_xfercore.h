@@ -118,7 +118,7 @@ UBYTE xfer_itab_index(const UBYTE *map, WORD bits, ULONG rgb);
  * colour (16-bit red, green and blue), else the first index of dst with the
  * colour, else what the map gives.  Also the colours of src as 0x00rrggbb in
  * 'spal'.  Returns XFER_REMAP_EXACT if every colour of src is one of dst,
- * and XFER_REMAP_SAME if each index stays.
+ * and XFER_REMAP_SAME if each index stays.  At most 256 of each are taken.
  */
 #define XFER_REMAP_EXACT        1
 #define XFER_REMAP_SAME         2

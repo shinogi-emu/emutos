@@ -179,6 +179,27 @@ BOOL vdi_ctab_valid(const COLOR_TAB *ctab)
 
 
 /*
+ * Copy the header of a program's colour table once, and say whether the
+ * copy describes a table that can be read (as vdi_ctab_valid()).  The
+ * program may change its table at any time: only the copy is looked at,
+ * and the colours are read as far as the copy's count says.  A NULL or odd
+ * pointer is not read (the copy then has no colours).
+ */
+BOOL vdi_ctab_head(const COLOR_TAB *ctab, COLOR_TAB_HEAD *head)
+{
+    if (!ctab || ((ULONG)ctab & 1))
+    {
+        memset(head, 0, sizeof(*head));
+        return FALSE;
+    }
+    memcpy(head, ctab, sizeof(*head));
+    return head->magic == COLOR_TAB_MAGIC && head->format == 0 &&
+           head->color_space == 1 && head->no_colors > 0 && head->no_colors <= 256 &&
+           head->length >= COLOR_TAB_BYTES(head->no_colors);
+}
+
+
+/*
  * The lists of the workstation
  */
 
@@ -412,16 +433,20 @@ const VdiCtab *vdi_ctab_get(Vwk *vwk, WORD kind, BOOL inverse)
 
 /*
  * The inverse table 'ref' of the workstation, if it was made for the colours
- * of 'ctab' (they are compared: a table changed since is refused)
+ * of 'ctab' (they are compared: a table changed since is refused).  The
+ * program's table is read only if 'ref' is one of the workstation's: its
+ * header once, then as many colours as the inverse table has.
  */
 const VdiItab *vdi_itab_find(Vwk *vwk, ULONG ref, const COLOR_TAB *ctab)
 {
     const VdiItab *t;
+    COLOR_TAB_HEAD head;
 
     for (t = vwk->itabs; t; t = t->next)
     {
         if (t->ref == ref)
-            return (vdi_ctab_valid(ctab) && itab_fits(t, ctab)) ? t : NULL;
+            return (vdi_ctab_head(ctab, &head) && head.no_colors == t->count &&
+                    !memcmp(t->colors, ctab->colors, 8L * t->count)) ? t : NULL;
     }
     return NULL;
 }

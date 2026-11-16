@@ -69,6 +69,23 @@ typedef struct
 #define COLOR_TAB_HEADER    48
 #define COLOR_TAB_BYTES(n)  (COLOR_TAB_HEADER + 8L * (n))
 
+/* the header of a colour table alone: a copy of a program's, read once */
+typedef struct
+{
+    LONG magic;
+    LONG length;
+    LONG format;
+    LONG reserved;
+    LONG map_id;
+    LONG color_space;
+    LONG flags;
+    LONG no_colors;
+    LONG reserved1;
+    LONG reserved2;
+    LONG reserved3;
+    LONG reserved4;
+} COLOR_TAB_HEAD;
+
 /*
  * An inverse colour table (v_create_itab, and those the VDI keeps for its
  * own tables): a snapshot of the palette it was made for, then its map,

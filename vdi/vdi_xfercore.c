@@ -636,6 +636,11 @@ WORD xfer_remap(const COLOR_ENTRY *src, WORD scount, const COLOR_ENTRY *dst, WOR
     WORD i, j, flags = XFER_REMAP_EXACT | XFER_REMAP_SAME;
     const COLOR_RGB *c;
 
+    /* remap and spal hold 256 entries, whatever the caller was told */
+    if (scount > 256)
+        scount = 256;
+    if (dcount > 256)
+        dcount = 256;
     for (i = 0; i < scount; i++)
     {
         c = &src[i].rgb;
