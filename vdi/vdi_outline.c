@@ -30,7 +30,9 @@
  * - v_gtext() has the engine render the string into a one-plane bitmap,
  *   turns it here for rotated text, and draws it with text_blt() as a
  *   single character.  The text effects, the underline included, are the
- *   engine's.  Outline text is always clipped to the screen.
+ *   engine's.  Outline text is always clipped to the screen.  On a 16-bit
+ *   screen, in the replace and transparent modes, the string is rendered
+ *   as coverage instead, and blended into the pixels (vdi_textaa.c).
  *
  * - The engine is called on a stack of its own (outline_on_stack()).
  *
@@ -53,6 +55,9 @@
 #include "vdi_ft2.h"
 #include "vdi_ftos.h"
 #include "vdi_ftmem.h"
+#if CONF_WITH_VDI_TEXT_AA
+#include "vdi_textaa.h"
+#endif
 
 #if CONF_WITH_VDI_OUTLINE_FONTS
 
@@ -92,6 +97,11 @@ static BOOL scanned;            /* the faces are ready */
 
 /* the outline_font of a workstation whose face is still to be sized; not for the engine */
 static VdiOutlineFont unsized;
+
+#if CONF_WITH_VDI_TEXT_AA
+/* TRUE: all outline text is drawn one-bit, none anti-aliased (see vdi_textaa.c) */
+BOOL vdi_text_mono;
+#endif
 
 /*
  * The engine and FreeType run on a stack of their own: a VDI call comes
@@ -829,18 +839,14 @@ static LONG char_width(Vwk *vwk, LONG ch)
  */
 
 /*
- * draw a one-plane bitmap with its top left corner at x,y, clipped to the
- * screen and to the clip rectangle
- *
- * The bitmap goes to text_blt() as one character of a font whose form is
- * the bitmap.  The clipping is done here, with LONGs, so that text_blt()
- * sees only what is on the screen.
+ * clip a width x height bitmap with its top left corner at x,y to the
+ * screen and to the clip rectangle, with LONGs: what is left, and where it
+ * starts in the bitmap (sx,sy); FALSE if nothing is left
  */
-static void blit(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LONG height,
-                 LONG x, LONG y)
+static BOOL clip_bitmap(const Vwk *vwk, LONG *x, LONG *y, LONG *width, LONG *height,
+                        LONG *sx, LONG *sy)
 {
     LONG xmin = 0, ymin = 0, xmax = xres, ymax = yres;
-    LONG sx = 0, sy = 0;
 
     if (vwk->clip)
     {
@@ -854,23 +860,43 @@ static void blit(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LO
             ymax = vwk->ymx_clip;
     }
 
-    if (x < xmin)
+    *sx = 0;
+    *sy = 0;
+    if (*x < xmin)
     {
-        sx = xmin - x;
-        width -= sx;
-        x = xmin;
+        *sx = xmin - *x;
+        *width -= *sx;
+        *x = xmin;
     }
-    if (y < ymin)
+    if (*y < ymin)
     {
-        sy = ymin - y;
-        height -= sy;
-        y = ymin;
+        *sy = ymin - *y;
+        *height -= *sy;
+        *y = ymin;
     }
-    if (x + width - 1 > xmax)
-        width = xmax - x + 1;
-    if (y + height - 1 > ymax)
-        height = ymax - y + 1;
-    if ((width <= 0) || (height <= 0))
+    if (*x + *width - 1 > xmax)
+        *width = xmax - *x + 1;
+    if (*y + *height - 1 > ymax)
+        *height = ymax - *y + 1;
+
+    return (*width > 0) && (*height > 0);
+}
+
+
+/*
+ * draw a one-plane bitmap with its top left corner at x,y, clipped to the
+ * screen and to the clip rectangle
+ *
+ * The bitmap goes to text_blt() as one character of a font whose form is
+ * the bitmap.  The clipping is done here, so that text_blt() sees only
+ * what is on the screen.
+ */
+static void blit(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LONG height,
+                 LONG x, LONG y)
+{
+    LONG sx, sy;
+
+    if (!clip_bitmap(vwk, &x, &y, &width, &height, &sx, &sy))
         return;
 
     FBASE = data;
@@ -971,6 +997,86 @@ static UWORD *turn(const VdiOutlineBitmap *bm, LONG angle, LONG *new_wdwidth)
 }
 
 
+#if CONF_WITH_VDI_TEXT_AA
+/*
+ * is outline text of this workstation drawn anti-aliased?  On a 16-bit
+ * screen, in the replace and transparent modes, unless switched off
+ */
+static BOOL smooth(const Vwk *vwk)
+{
+    return TRUECOLOR_MODE && !vdi_text_mono
+        && ((vwk->wrt_mode == WM_REPLACE) || (vwk->wrt_mode == WM_TRANS));
+}
+
+
+/*
+ * blend a coverage bitmap with its top left corner at x,y into the 16-bit
+ * screen (or the off-screen bitmap a call draws in), clipped to it and to
+ * the clip rectangle, in the text colour: over the text background colour
+ * in replace mode, over what is there in transparent mode
+ */
+static void blit_cover(const Vwk *vwk, const UWORD *data, LONG wdwidth, LONG width, LONG height,
+                       LONG x, LONG y)
+{
+    const UWORD *palette = vwk->ext->palette;
+    LONG sx, sy;
+    UWORD bg;
+
+    if (!clip_bitmap(vwk, &x, &y, &width, &height, &sx, &sy))
+        return;
+
+#if CONF_WITH_VDI_NVDI_EXT
+    bg = palette[vdi_bg_index(vwk, VDI_COL_TEXT)];
+#else
+    bg = palette[0];
+#endif
+
+    vdi_aa_blend16((UWORD *)(v_bas_ad + y * (LONG)v_lin_wr) + x, v_lin_wr,
+                   (const UBYTE *)data + sy * wdwidth * 2 + sx, wdwidth * 2,
+                   width, height, palette[vwk->text_color], bg,
+                   (vwk->wrt_mode == WM_REPLACE) ? VDI_AA_REPLACE : VDI_AA_TRANS);
+}
+
+
+/*
+ * turn a coverage bitmap counterclockwise by 90, 180 or 270 degrees, into
+ * a new one to give back to vdi_ft_free(), its rows padded to even bytes;
+ * NULL if there is no memory
+ */
+static UWORD *turn_cover(const VdiOutlineBitmap *bm, LONG angle, LONG *new_wdwidth)
+{
+    LONG nw = (angle == 1800) ? bm->width : bm->height;
+    LONG nh = (angle == 1800) ? bm->height : bm->width;
+    LONG nwd = (nw + 1) >> 1;
+    UWORD *out;
+
+    out = vdi_ft_alloc(nwd * 2 * nh);
+    if (!out)
+        return NULL;
+
+    vdi_aa_turn((const UBYTE *)bm->data, bm->wdwidth * 2, bm->width, bm->height, (WORD)angle,
+                (UBYTE *)out, nwd * 2);
+
+    *new_wdwidth = nwd;
+    return out;
+}
+
+
+/* draw a bitmap that the engine has rendered: one-plane or coverage */
+static void put_bitmap(const Vwk *vwk, BOOL cover, const UWORD *data, LONG wdwidth,
+                       LONG width, LONG height, LONG x, LONG y)
+{
+    if (cover)
+        blit_cover(vwk, data, wdwidth, width, height, x, y);
+    else
+        blit(vwk, data, wdwidth, width, height, x, y);
+}
+#else
+#define put_bitmap(vwk, cover, data, wdwidth, width, height, x, y) \
+    blit(vwk, data, wdwidth, width, height, x, y)
+#endif
+
+
 /*
  * draw a string with its pen starting at u0,v0 from the reference point
  * x,y, measured along and across the text before it is rotated (v0 is
@@ -981,7 +1087,9 @@ static UWORD *turn(const VdiOutlineBitmap *bm, LONG angle, LONG *new_wdwidth)
  * x+v,y-u at 90, x-u,y-v at 180 and x-v,y+u at 270.
  *
  * Returns -1, having drawn nothing, if the engine cannot render the
- * string or there is no memory to turn it.
+ * string or there is no memory to turn it.  Anti-aliased text that cannot
+ * be rendered (for want of memory: it takes eight times the room) is drawn
+ * one-bit.
  */
 static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, LONG count,
                      LONG x, LONG y, LONG u0, LONG v0)
@@ -990,9 +1098,24 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, LONG co
     WORD angle = vwk->chup;
     LONG u, advance, wd;
     UWORD *turned;
+#if CONF_WITH_VDI_TEXT_AA
+    LONG kind = -1;
+    BOOL cover;
+#endif
 
+#if CONF_WITH_VDI_TEXT_AA
+    if (smooth(vwk))
+        kind = vdi_ft_render(f, str, count, vwk->outline_map, effects_of(vwk) | VDI_FT_COVERAGE,
+                             vwk->outline_skew, &bm);
+    if (kind < 0)
+        kind = vdi_ft_render(f, str, count, vwk->outline_map, effects_of(vwk), vwk->outline_skew, &bm);
+    if (kind < 0)
+        return -1;
+    cover = (kind == 1);
+#else
     if (vdi_ft_render(f, str, count, vwk->outline_map, effects_of(vwk), vwk->outline_skew, &bm) < 0)
         return -1;
+#endif
     advance = bm.advance_x;
     if (!bm.data)
         return advance;
@@ -1001,12 +1124,16 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, LONG co
 
     if ((angle != 900) && (angle != 1800) && (angle != 2700))   /* 0 or 3600 */
     {
-        blit(vwk, bm.data, bm.wdwidth, bm.width, bm.height, x + u, y + v0);
+        put_bitmap(vwk, cover, bm.data, bm.wdwidth, bm.width, bm.height, x + u, y + v0);
         vdi_ft_release(&bm);
         return advance;
     }
 
+#if CONF_WITH_VDI_TEXT_AA
+    turned = cover ? turn_cover(&bm, angle, &wd) : turn(&bm, angle, &wd);
+#else
     turned = turn(&bm, angle, &wd);
+#endif
     if (!turned)
         advance = -1;
     else
@@ -1014,13 +1141,14 @@ static LONG draw_run(const Vwk *vwk, VdiOutlineFont *f, const WORD *str, LONG co
         switch (angle)
         {
         case 900:
-            blit(vwk, turned, wd, bm.height, bm.width, x + v0, y - u - bm.width + 1);
+            put_bitmap(vwk, cover, turned, wd, bm.height, bm.width, x + v0, y - u - bm.width + 1);
             break;
         case 1800:
-            blit(vwk, turned, wd, bm.width, bm.height, x - u - bm.width + 1, y - v0 - bm.height + 1);
+            put_bitmap(vwk, cover, turned, wd, bm.width, bm.height,
+                       x - u - bm.width + 1, y - v0 - bm.height + 1);
             break;
         default:
-            blit(vwk, turned, wd, bm.height, bm.width, x - v0 - bm.height + 1, y + u);
+            put_bitmap(vwk, cover, turned, wd, bm.height, bm.width, x - v0 - bm.height + 1, y + u);
             break;
         }
         vdi_ft_free(turned);

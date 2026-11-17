@@ -399,6 +399,10 @@ ifeq (1,$(VDI_OUTLINE_FONTS))
 vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
 endif
 
+ifeq (1,$(VDI_TEXT_AA))
+vdi_src += vdi_textaa.c
+endif
+
 # FreeType sources, relative to freetype/src
 FT_SOURCES = base/ftbase.c base/ftinit.c base/ftbbox.c base/ftbitmap.c \
              base/ftdebug.c base/ftglyph.c base/ftmm.c base/ftstroke.c \

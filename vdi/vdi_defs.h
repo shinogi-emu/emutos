@@ -677,6 +677,9 @@ BOOL outline_fontheader(Vwk *vwk, VdiFontHeader *fhdr);
 BOOL outline_fonts_present(void);
 LONG outline_rescan(char **dirs, LONG count);
 const char *outline_font_dir(void);
+#if CONF_WITH_VDI_TEXT_AA
+extern BOOL vdi_text_mono;          /* TRUE: no anti-aliased outline text (see vdi_textaa.c) */
+#endif
 
 /* vdi_text.c, for the NVDI calls */
 void text_size_out(Vwk *vwk);
