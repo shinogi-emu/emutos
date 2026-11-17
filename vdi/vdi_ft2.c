@@ -176,7 +176,7 @@ typedef struct instance
     CachedGlyph cache[256];         /* codes 0-255 */
     CachedGlyph scratch;            /* the last code above 255 */
 #if VDI_FT_WITH_COVERAGE
-    LONG cover_pref;                /* last drawn in coverage: measuring renders that */
+    LONG cover_pref;                /* drawn in coverage last: measuring renders that */
 #endif
 } Instance;
 
@@ -233,6 +233,7 @@ static FontFile *fontfiles;
 static ULONG ff_clock;
 #if VDI_FT_WITH_COVERAGE
 static LONG cover_total;            /* bytes of coverage images kept */
+static LONG cover_last;             /* the last string was drawn in coverage */
 #endif
 
 /* NVDI/SpeedoGDOS spdchar.map: the first table, Atari codes 32-255 to BICS */
@@ -747,6 +748,9 @@ static Instance *open_instance(SizeRec *s, LONG effects, LONG skew)
     in->size = s;
     in->effects = effects;
     in->skew = skew;
+#if VDI_FT_WITH_COVERAGE
+    in->cover_pref = cover_last;    /* a new size is likely drawn as the last string was */
+#endif
     in->next = s->instances;
     s->instances = in;
     lru_insert(in);
@@ -2307,7 +2311,7 @@ LONG vdi_ft_render(VdiOutlineFont *f, const WORD *text, LONG count,
     if (!in)
         return -1;
 #if VDI_FT_WITH_COVERAGE
-    in->cover_pref = (effects & VDI_FT_COVERAGE) ? 1 : 0;
+    in->cover_pref = cover_last = (effects & VDI_FT_COVERAGE) ? 1 : 0;
 #endif
 
     /* Get the dimensions of the text surface */
