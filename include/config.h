@@ -1836,6 +1836,25 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_TEXT_AA to 1 to draw outline text anti-aliased on
+ * 16-bit screens: the glyphs are rendered with 256 levels of coverage,
+ * and the text colour is blended into the pixels by them, in the replace
+ * and transparent writing modes.  The xor and reverse transparent modes,
+ * and screens of 8 planes or fewer, keep one-bit text.  It is on with the
+ * outline fonts, unless set to 0 (see vdi_textaa.c).
+ */
+#ifndef CONF_WITH_VDI_TEXT_AA
+# if CONF_WITH_VDI_OUTLINE_FONTS && CONF_WITH_VDI_16BIT
+#  define CONF_WITH_VDI_TEXT_AA 1
+# else
+#  define CONF_WITH_VDI_TEXT_AA 0
+# endif
+#endif
+#if CONF_WITH_VDI_TEXT_AA && !(CONF_WITH_VDI_OUTLINE_FONTS && CONF_WITH_VDI_16BIT)
+# error CONF_WITH_VDI_TEXT_AA needs CONF_WITH_VDI_OUTLINE_FONTS and CONF_WITH_VDI_16BIT
+#endif
+
+/*
  * Set CONF_WITH_VDI_NVDI_EXT to 1 to add the NVDI colour, raster and
  * off-screen bitmap calls to the VDI (v_setrgb(), vr_clip_rects_by_dst(),
  * v_color2value() and its relatives, vr_transfer_bits(), v_opnbm() and
