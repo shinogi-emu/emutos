@@ -115,7 +115,8 @@ static const WORD INQ_TAB_rom[45] = {
     0,                  /* 29 -  */
 #if CONF_WITH_VDI_NVDI_EXT
     4,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling?; bit 2: vr_clip_rects;
-                                bit 3: vr_transfer_bits blends (T_BLEND), see update_rez_dependent() */
+                                with CONF_WITH_VDI_ALPHA, bit 3: vr_transfer_bits blends (T_BLEND),
+                                see update_rez_dependent() */
 #else
     0,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling? */
 #endif
