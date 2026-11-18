@@ -114,7 +114,8 @@ static const WORD INQ_TAB_rom[45] = {
 #endif
     0,                  /* 29 -  */
 #if CONF_WITH_VDI_NVDI_EXT
-    4,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling?; bit 2: vr_clip_rects */
+    4,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling?; bit 2: vr_clip_rects;
+                                bit 3: vr_transfer_bits blends (T_BLEND), see update_rez_dependent() */
 #else
     0,                  /* 30 - raster flag (bit 0), does vro_cpyfm scaling? */
 #endif
@@ -224,6 +225,10 @@ void update_rez_dependent(void)
     DEV_TAB[39] = get_palette();    /* some versions of COLOR.CPX care about this */
 
     INQ_TAB[4] = v_planes;
+#if CONF_WITH_VDI_ALPHA
+    /* bit 3 of the raster flags: vr_transfer_bits blends (T_BLEND), onto 16 bits only */
+    INQ_TAB[30] = (v_planes == 16) ? 4 | 8 : 4;
+#endif
     if ((v_planes == 16) || (get_monitor_type() == MON_MONO))
         INQ_TAB[5] = 0;
     else INQ_TAB[5] = 1;
