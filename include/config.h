@@ -1882,6 +1882,26 @@
 #endif
 
 /*
+ * Set CONF_WITH_VDI_ALPHA to 1 to let vr_transfer_bits() blend images of
+ * 32-bit pixels with an alpha channel (PX_ARGB32, PX_RGBA32; straight alpha,
+ * mode T_BLEND) into the 16-bit screen, weighted by the colour weight set
+ * with vs_weight_color(), and to report it in bit 3 of work_out[30] of
+ * vq_extnd().  It is on for the QEMU virt machine only, which has the
+ * 16-bit screen to show it on; add it to another target with, for example,
+ * "make 1024 DEF=-DCONF_WITH_VDI_ALPHA=1" (see vdi_alpha.c).
+ */
+#ifndef CONF_WITH_VDI_ALPHA
+# if defined(TARGET_QEMU_VIRT) && CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT
+#  define CONF_WITH_VDI_ALPHA 1
+# else
+#  define CONF_WITH_VDI_ALPHA 0
+# endif
+#endif
+#if CONF_WITH_VDI_ALPHA && !(CONF_WITH_VDI_NVDI_EXT && CONF_WITH_VDI_16BIT)
+# error CONF_WITH_VDI_ALPHA needs CONF_WITH_VDI_NVDI_EXT and CONF_WITH_VDI_16BIT
+#endif
+
+/*
  * The VDI functions v_fillarea(), v_pline(), v_pmarker() can handle
  * up to MAX_VERTICES coordinates (MAX_VERTICES/2 points).
  * TOS2 allows 512 vertices, TOS3/TOS4 allow 1024.

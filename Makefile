@@ -386,6 +386,10 @@ VDI_NVDI_EXT := $(shell echo CONF_WITH_VDI_NVDI_EXT | $(CPP) -P -x c $(INC) $(DE
 # evaluated the same way: the outline font engine is told by VDI_FT_WITH_COVERAGE
 VDI_TEXT_AA := $(shell echo CONF_WITH_VDI_TEXT_AA | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
 
+# blending of images with alpha (see CONF_WITH_VDI_ALPHA in include/config.h),
+# evaluated the same way
+VDI_ALPHA := $(shell echo CONF_WITH_VDI_ALPHA | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
+
 # OS glue of the allocation that outlives the caller; another host may supply it
 ifneq (,$(filter 1,$(VDI_OUTLINE_FONTS) $(VDI_NVDI_EXT)))
 vdi_src += vdi_kept.c
@@ -401,6 +405,10 @@ endif
 
 ifeq (1,$(VDI_TEXT_AA))
 vdi_src += vdi_textaa.c
+endif
+
+ifeq (1,$(VDI_ALPHA))
+vdi_src += vdi_alpha.c
 endif
 
 # FreeType sources, relative to freetype/src
