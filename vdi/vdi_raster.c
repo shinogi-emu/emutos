@@ -803,104 +803,113 @@ setup_pattern (struct raster_t *raster, struct blit_frame *info)
 }
 
 /*
- * do_clip - clip, if dest is screen and clipping is wanted
+ * clip_axis - one axis of do_clip
+ *
+ * smin..smax is the source range and dmin where the destination starts (the
+ * destination is as long as the source); dl[0..1] and sl[0..1] are the
+ * first and last place there are in the destination and in the source.
+ * Both are cut, each moving the other along.  The arithmetic is LONG:
+ * coordinates are 16 bits and an int is 16 bits here.
+ *
+ * *ps and *pd get the start in the source and in the destination, *pn the
+ * number of pixels; returns TRUE if nothing is left.
+ */
+static BOOL
+clip_axis (WORD smin, WORD smax, WORD dmin, const LONG *dl, const LONG *sl,
+           WORD *ps, WORD *pd, WORD *pn)
+{
+    LONG s0 = smin, d0 = dmin, se = smax, n;
+
+    if ( d0 < dl[0] ) {                 /* the amount cut off the start */
+        s0 += dl[0] - d0;
+        d0 = dl[0];
+    }
+#if CONF_WITH_VDI_NVDI_EXT
+    if ( s0 < sl[0] ) {
+        d0 += sl[0] - s0;
+        s0 = sl[0];
+    }
+    if ( se > sl[1] )
+        se = sl[1];
+#endif
+    n = se - s0;
+    if ( d0 + n > dl[1] )
+        n = dl[1] - d0;
+    /* with CONF_WITH_VDI_NVDI_EXT the places end below 32767 and all of these fit a WORD; without it, only so far as the forms are right */
+    *ps = s0;
+    *pd = d0;
+    *pn = n + 1;
+    return n < 0;
+}
+
+/*
+ * do_clip - cut the copy to the places there are
+ *
+ * lim holds the first and last x, then y, of the places in the destination
+ * (the screen, cut down to the clipping rectangle when clipping is on, or a
+ * memory form's size) and then the same four of the source.  Whatever is
+ * cut from one side is cut from the other, so that the pixels that are
+ * copied are the same ones.
  *
  * return TRUE, if clipping took away everything
  */
-/* not fully optimized yet*/
 static BOOL
-do_clip (VwkClip *clipper, struct blit_frame *info)
+do_clip (const LONG *lim, struct blit_frame *info)
 {
-    WORD s_xmin, s_ymin;
-    WORD d_xmin, d_ymin;
-    WORD d_xmax, d_ymax;
-    WORD deltax, deltay, clip;
-
-    /* clip Xmin source and destination to window */
-    s_xmin = PTSIN[XMIN_S];
-    d_xmin = PTSIN[XMIN_D];
-    clip = clipper->xmn_clip;
-
-    /* Xmin dest < Xmin clip */
-    if ( d_xmin < clip ) {    /* Xmin dest > Xmin clip => branch */
-        s_xmin -= d_xmin - clip;    /* subtract amount clipped in x */
-        d_xmin = clip;               /* clip Xmin dest */
-    }
-    info->s_xmin = s_xmin;      /* d0 <- clipped Xmin source */
-    info->d_xmin = d_xmin;      /* d2 <- clipped Xmin destination */
-
-    /* clip Xmax destination to window */
-    d_xmax = PTSIN[XMAX_S] - s_xmin + d_xmin;
-    clip = clipper->xmx_clip;
-
-    /* Xmax dest > Xmax clip */
-    if ( d_xmax > clip )
-        d_xmax = clip;          /* clip Xmax dest */
-    info->d_xmax = d_xmax;
-
-    /* match source and destination rectangles */
-    deltax = d_xmax - d_xmin;
-    if ( deltax < 0 )
+    if ( clip_axis(PTSIN[XMIN_S], PTSIN[XMAX_S], PTSIN[XMIN_D], lim, lim + 4,
+                   &info->s_xmin, &info->d_xmin, &info->b_wd) ||
+         clip_axis(PTSIN[YMIN_S], PTSIN[YMAX_S], PTSIN[YMIN_D], lim + 2, lim + 6,
+                   &info->s_ymin, &info->d_ymin, &info->b_ht) )
         return TRUE;                    /* block entirely clipped */
-    info->b_wd = deltax + 1;
-    info->s_xmax = s_xmin + deltax;     /* d4 <- Xmax Source */
 
-    /* clip Ymin source and destination to window */
-    s_ymin = PTSIN[YMIN_S];
-    d_ymin = PTSIN[YMIN_D];
-    clip = clipper->ymn_clip;
-
-    /* Ymin dest < Ymin clip => clip Ymin */
-    if ( d_ymin < clip ) {
-        s_ymin -= d_ymin - clip;    /* subtract amount clipped in y */
-        d_ymin = clip;               /* clip Ymin dest */
-    }
-    info->s_ymin = s_ymin;       /* d1, Dy Source */
-    info->d_ymin = d_ymin;       /* d3, Ymax destination */
-
-    /* clip Ymax destination to window */
-    d_ymax = PTSIN[YMAX_S] - s_ymin + d_ymin;
-    clip = clipper->ymx_clip;
-
-    /* if Ymax dest > Ymax clip */
-    if ( d_ymax > clip ) {
-        /* clip Ymax dest */
-        d_ymax = clip;          /* d7 <- Xmax dest = Xmax clip */
-    }
-    info->d_ymax = d_ymax;
-
-    /* match source and destination rectangles */
-    deltay = d_ymax - d_ymin;
-    if ( deltay < 0 )
-        return TRUE;             /* block entirely clipped */
-    info->b_ht = deltay + 1;
-    info->s_ymax = s_ymin + deltay;             /* d5 <- Ymax Source */
+    info->s_xmax = info->s_xmin + info->b_wd - 1;
+    info->d_xmax = info->d_xmin + info->b_wd - 1;
+    info->s_ymax = info->s_ymin + info->b_ht - 1;
+    info->d_ymax = info->d_ymin + info->b_ht - 1;
 
     return FALSE;
 }
 
+#if CONF_WITH_VDI_NVDI_EXT
 /*
- * dont_clip - clip, if dest is screen and clipping is wanted
+ * mfdb_ok - TRUE if a form in memory has memory that can be copied from or to
+ *
+ * The VDI must not trust the MFDB of a program (it may be a user's, under
+ * the kernel): an odd address is an address error; the plane count must be
+ * one the copies handle (1 to 8, or 16 with 16-bit pixels), or the
+ * blit loops count wrongly; a form must have at least a word and a row; a
+ * row of more than 32766 bytes does not fit the WORD stride of the blit.
  */
-static void
-dont_clip (struct blit_frame * info)
+static BOOL
+mfdb_ok (const MFDB *m)
 {
-    /* source */
-    info->s_xmin = PTSIN[XMIN_S];       /* d0 x of upper left of source */
-    info->s_ymin = PTSIN[YMIN_S];       /* d1 y of upper left of source */
-    info->s_xmax = PTSIN[XMAX_S];       /* d4 x of lower right of source */
-    info->s_ymax = PTSIN[YMAX_S];       /* d5 y of lower right of source */
+    WORD p = m->fd_nplanes;
 
-    /* width and height of block in pixels */
-    info->b_wd = info->s_xmax - info->s_xmin + 1;
-    info->b_ht = info->s_ymax - info->s_ymin + 1;
-
-    /* destination */
-    info->d_xmin = PTSIN[XMIN_D];       /* d2 x of upper left of dest. */
-    info->d_ymin = PTSIN[YMIN_D];       /* d3 y of upper left of dest. */
-    info->d_xmax = PTSIN[XMAX_D];       /* d6 x of lower right of dest. */
-    info->d_ymax = PTSIN[YMAX_D];       /* d7 y of lower right of dest. */
+    if ( (ULONG)m->fd_addr & 1 )
+        return FALSE;
+#if CONF_WITH_VDI_16BIT
+    if ( p < 1 || (p > 8 && p != 16) )
+#else
+    if ( p < 1 || p > 8 )
+#endif
+        return FALSE;
+    if ( m->fd_wdwidth < 1 || m->fd_h < 1 )
+        return FALSE;
+    return (LONG)m->fd_wdwidth * p * 2 <= 32766L;
 }
+
+/* the last pixel of an axis of n pixels of a form in memory, below 32767 so that it fits a WORD */
+static LONG
+mfdb_last (LONG n)
+{
+    return (n > 32767L ? 32767L : n) - 1;
+}
+#define MEM_LASTX(m)    mfdb_last((LONG)(m)->fd_wdwidth * 16)
+#define MEM_LASTY(m)    mfdb_last((LONG)(m)->fd_h)
+#else
+#define MEM_LASTX(m)    ((LONG)(m)->fd_wdwidth * 16 - 1)
+#define MEM_LASTY(m)    ((LONG)(m)->fd_h - 1)
+#endif
 
 /*
  * setup_info - fill the info structure with MFDB values
@@ -912,33 +921,77 @@ static BOOL
 setup_info (struct raster_t *raster, struct blit_frame * info)
 {
     MFDB *src,*dst;
-    BOOL use_clip = FALSE;
+    LONG bounds[8];             /* the places of the destination and then of the source: x1, x2, y1, y2 */
 
     /* Get the pointers to the MFDBs */
     src = *(MFDB **)&CONTRL[7]; /* a5, source MFDB */
     dst = *(MFDB **)&CONTRL[9]; /* a4, destination MFDB */
 
+#if CONF_WITH_VDI_NVDI_EXT
+    /* a form that is not there: no source; no destination is the screen */
+    if ( !src )
+        return TRUE;
+#endif
+
     /* setup plane info for source MFDB */
     if ( src->fd_addr ) {
+#if CONF_WITH_VDI_NVDI_EXT
+        if ( !mfdb_ok(src) )
+            return TRUE;
+#endif
         /* for a positive source address */
         info->s_form = src->fd_addr;
         info->s_nxwd = src->fd_nplanes * 2;
         info->s_nxln = src->fd_wdwidth * info->s_nxwd;
+
+#if CONF_WITH_VDI_NVDI_EXT
+        /* a source in memory is read only within its form's memory: fd_wdwidth
+         * words a row and fd_h rows (none if it has no size) */
+        bounds[5] = MEM_LASTX(src);
+        bounds[7] = MEM_LASTY(src);
+#endif
     }
     else {
         /* source form is screen */
         info->s_form = (UWORD*) v_bas_ad;
         info->s_nxwd = v_planes * 2;
         info->s_nxln = v_lin_wr;
+#if CONF_WITH_VDI_NVDI_EXT
+        bounds[5] = xres;
+        bounds[7] = yres;
+#endif
     }
+    bounds[0] = bounds[2] = 0;
+#if CONF_WITH_VDI_NVDI_EXT
+    bounds[4] = bounds[6] = 0;
+#endif
+    /*
+     * The targets that leave out the NVDI extensions (192 and 256 KB, ...)
+     * are short of ROM space and have no protection boundary to defend: they
+     * bound the destination's position only, and trust the forms.
+     */
 
     /* setup plane info for destination MFDB */
+#if CONF_WITH_VDI_NVDI_EXT
+    if ( dst && dst->fd_addr ) {
+        if ( !mfdb_ok(dst) )
+            return TRUE;
+#else
     if ( dst->fd_addr ) {
+#endif
         /* for a positive address */
         info->d_form = dst->fd_addr;
         info->plane_ct = dst->fd_nplanes;
         info->d_nxwd = dst->fd_nplanes * 2;
         info->d_nxln = dst->fd_wdwidth * info->d_nxwd;
+
+        /*
+         * a destination in memory is held to its form's memory: fd_wdwidth
+         * words a row and fd_h rows, the fields that say where the bytes
+         * are (fd_w is not looked at; none if it has no size)
+         */
+        bounds[1] = MEM_LASTX(dst);
+        bounds[3] = MEM_LASTY(dst);
     }
     else {
         /* destination form is screen */
@@ -947,17 +1000,26 @@ setup_info (struct raster_t *raster, struct blit_frame * info)
         info->d_nxwd = v_planes * 2;
         info->d_nxln = v_lin_wr;
 
-        /* check if clipping is enabled, when destination is screen */
-        if (raster->clip)
-            use_clip = TRUE;
+        /*
+         * the screen is a limit whatever the clip flag says: nothing outside
+         * it belongs to the screen; the clipping rectangle cuts it further
+         */
+        bounds[1] = xres;
+        bounds[3] = yres;
+        if (raster->clip) {
+            if (raster->clipper->xmn_clip > bounds[0])
+                bounds[0] = raster->clipper->xmn_clip;
+            if (raster->clipper->xmx_clip < bounds[1])
+                bounds[1] = raster->clipper->xmx_clip;
+            if (raster->clipper->ymn_clip > bounds[2])
+                bounds[2] = raster->clipper->ymn_clip;
+            if (raster->clipper->ymx_clip < bounds[3])
+                bounds[3] = raster->clipper->ymx_clip;
+        }
     }
 
-    if (use_clip) {
-        if (do_clip(raster->clipper, info))
-            return TRUE;        /* clipping took away everything */
-    }
-    else
-        dont_clip(info);
+    if (do_clip(bounds, info))
+        return TRUE;            /* clipping took away everything */
 
     info->s_nxpl = 2;           /* next plane offset (source) */
     info->d_nxpl = 2;           /* next plane offset (destination) */

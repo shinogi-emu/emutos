@@ -743,6 +743,8 @@ static ULONG mfdb_size(const SMFDB *b, WORD planes)
         (b->fd_stand != 0 && b->fd_stand != 1))
         return 0;
     stride = (LONG)b->fd_wdwidth * 2 * planes;
+    if (stride > 32766L)            /* the copy's stride is a WORD (as BM_MAX_LINE of vdi_bitmap.c) */
+        return 0;
     if (stride > 0x7fffffffL / b->fd_h)
         return 0;
     return (ULONG)stride * (ULONG)b->fd_h;
