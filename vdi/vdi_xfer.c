@@ -5,16 +5,29 @@
  * rectangle of another, scaling it.  This is the slice that EmuTOS has:
  *
  *   sources:      1 bit, 8-bit indexed, 15 and 16 bits (also byte-swapped),
- *                 24 bits (also reversed) and 32 bits (xRGB)
+ *                 24 bits (also reversed) and 32 bits (xRGB); with
+ *                 CONF_WITH_VDI_ALPHA also 32 bits with straight alpha,
+ *                 PX_ARGB32 (bytes a, r, g, b) and PX_RGBA32 (r, g, b, a)
  *   destinations: the workstation (the screen, or the bitmap of a bitmap
  *                 workstation), memory in the format of the screen, or
  *                 memory of 8-bit indices (not from 1-bit sources)
  *   modes:        0 (copy) and 32 (replace) for all sources, 33 (transparent)
  *                 for 1-bit ones; with bit 7 (128), error diffusion onto
- *                 8-bit indices and planes
+ *                 8-bit indices and planes; with CONF_WITH_VDI_ALPHA, 64
+ *                 (T_BLEND) for the direct sources onto 16 bits
+ *
+ * Modes 0 and 32 draw ARGB and RGBA as xRGB: the alpha is not read.  Mode
+ * 64 mixes each pixel of the source (the nearest one, never filtered) into
+ * the pixel there by its alpha (255 for sources without one) times the
+ * weight colour of vs_weight_color(), which a workstation starts at half;
+ * a pixel of alpha 0 is left as it is, unread.  It is refused onto planes
+ * and 8-bit indices and for 1- and 8-bit sources, as are the other
+ * arithmetic modes (65-71) and 80 (64 with colourising); bit 7 has no
+ * effect.  It needs no work memory.  The rule is in vdi_alpha.c.
  *
  * What is not done is not advertised: bits 0 and 1 of work_out[30] stay
- * clear.  The pixel conversion is in vdi_xfercore.c.
+ * clear; bit 3 is set where mode 64 blends, on 16-bit screens.  The pixel
+ * conversion is in vdi_xfercore.c.
  *
  * A 16-bit destination takes its pixels in 5-6-5, the green keeps its sixth
  * bit; bit 7 has no effect there.  Planes take the pen nearest the colour of
@@ -50,6 +63,9 @@
 #include "vdi_kept.h"
 #include "vdi_nvdimath.h"
 #include "vdi_xfercore.h"
+#if CONF_WITH_VDI_ALPHA
+#include "vdi_alpha.h"
+#endif
 
 #if CONF_WITH_VDI_NVDI_EXT
 
@@ -252,6 +268,9 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     XferCtx ctx;
     XferTables tables;
     LONG ncol = 0;
+#if CONF_WITH_VDI_ALPHA
+    BOOL blend = FALSE;
+#endif
 
     if (CONTRL[3] < 1 || CONTRL[1] < 4)
         return;
@@ -290,6 +309,10 @@ void vdi_vr_transfer_bits(Vwk *vwk)
             return;
         transparent = TRUE;
     }
+#if CONF_WITH_VDI_ALPHA
+    else if (mode == XF_T_BLEND)
+        blend = TRUE;               /* what it may draw onto: below */
+#endif
     else if (mode != 0 && mode != 32)
         return;
 
@@ -349,6 +372,11 @@ void vdi_vr_transfer_bits(Vwk *vwk)
                 cy2 = vwk->ymx_clip;
         }
     }
+#if CONF_WITH_VDI_ALPHA
+    /* T_BLEND: direct sources onto 16-bit pixels, not planes or 8-bit indices */
+    if (blend && !xfer_blend_ok(kind, dkind))
+        return;
+#endif
     if (xfer_overlap(src->addr, ssize, base, dsize))
         return;
 
@@ -397,6 +425,16 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     ctx.ctab = NULL;
     ctx.ncol = 0;
     job.ctx = &ctx;
+#if CONF_WITH_VDI_ALPHA
+    if (blend)
+    {
+        /* the weight colour; with an alpha, a pixel's weight is alpha times it */
+        job.blend = TRUE;
+        job.wp[0] = vdi_alpha_weight(vwk->col.extra[3].red);
+        job.wp[1] = vdi_alpha_weight(vwk->col.extra[3].green);
+        job.wp[2] = vdi_alpha_weight(vwk->col.extra[3].blue);
+    }
+#endif
     job.pen_rgb = pen_of_rgb;
     job.pen_index = pen_of_index;
 
@@ -492,7 +530,8 @@ void vdi_vr_transfer_bits(Vwk *vwk)
     /*
      * work memory: the pixel of each index, a row of pixel values and, if
      * transparent, a mask; the index path: the colours of the source, the
-     * error of the dithering and the index of each source index
+     * error of the dithering and the index of each source index (none for
+     * 16 bits from direct sources, so T_BLEND allocates nothing)
      */
     mapbytes = (!index && k == XK_8) ? 512L : 0L;
     palbytes = (index && k == XK_8) ? 1024L + 256L : 0L;
@@ -704,6 +743,8 @@ static ULONG mfdb_size(const SMFDB *b, WORD planes)
         (b->fd_stand != 0 && b->fd_stand != 1))
         return 0;
     stride = (LONG)b->fd_wdwidth * 2 * planes;
+    if (stride > 32766L)            /* the copy's stride is a WORD (as BM_MAX_LINE of vdi_bitmap.c) */
+        return 0;
     if (stride > 0x7fffffffL / b->fd_h)
         return 0;
     return (ULONG)stride * (ULONG)b->fd_h;

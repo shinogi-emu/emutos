@@ -382,6 +382,14 @@ VDI_OUTLINE_FONTS := $(shell echo CONF_WITH_VDI_OUTLINE_FONTS | $(CPP) -P -x c $
 # include/config.h), evaluated the same way
 VDI_NVDI_EXT := $(shell echo CONF_WITH_VDI_NVDI_EXT | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
 
+# anti-aliased outline text (see CONF_WITH_VDI_TEXT_AA in include/config.h),
+# evaluated the same way: the outline font engine is told by VDI_FT_WITH_COVERAGE
+VDI_TEXT_AA := $(shell echo CONF_WITH_VDI_TEXT_AA | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
+
+# blending of images with alpha (see CONF_WITH_VDI_ALPHA in include/config.h),
+# evaluated the same way
+VDI_ALPHA := $(shell echo CONF_WITH_VDI_ALPHA | $(CPP) -P -x c $(INC) $(DEFINES) $(if $(filter prg %.prg,$(MAKECMDGOALS)),-DTARGET_PRG) -imacros include/config.h - 2>/dev/null | tail -n 1)
+
 # OS glue of the allocation that outlives the caller; another host may supply it
 ifneq (,$(filter 1,$(VDI_OUTLINE_FONTS) $(VDI_NVDI_EXT)))
 vdi_src += vdi_kept.c
@@ -393,6 +401,14 @@ endif
 
 ifeq (1,$(VDI_OUTLINE_FONTS))
 vdi_src += vdi_ftos.c vdi_ftmem.c vdi_outline.c vdi_nvdi.c
+endif
+
+ifeq (1,$(VDI_TEXT_AA))
+vdi_src += vdi_textaa.c
+endif
+
+ifeq (1,$(VDI_ALPHA))
+vdi_src += vdi_alpha.c
 endif
 
 # FreeType sources, relative to freetype/src
@@ -1375,7 +1391,7 @@ $(foreach f,$(FT_SOURCES),$(eval $(call FT_OBJ_RULE,$(f))))
 
 # the engine's own files are held to the warnings of the rest of EmuTOS
 obj/vdi_ft2.o obj/vdi_ftmap.o obj/vdi_ftlibc.o: obj/%.o: vdi/%.c vdi/vdi_ft2.h vdi/vdi_ftos.h vdi/vdi_ftmap.h $(FT_CONFIG_H)
-	$(CC) $(FT_CFLAGS) $(WARNFLAGS) -c $< -o $@
+	$(CC) $(FT_CFLAGS) $(WARNFLAGS) -DVDI_FT_WITH_COVERAGE=$(if $(filter 1,$(VDI_TEXT_AA)),1,0) -c $< -o $@
 	$(OBJCOPY) --redefine-syms=vdi/vdi_ftlibc.syms $@
 
 #

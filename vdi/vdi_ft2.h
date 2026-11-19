@@ -53,6 +53,12 @@ typedef signed char BYTE;
 #define VDI_FT_MAP_ATARI    1L      /* the Atari character set (default) */
 #define VDI_FT_MAP_UNICODE  2L
 
+/*
+ * not a VDI effect: added to the effects of vdi_ft_render(), it asks for
+ * the string as 8-bit coverage, for anti-aliased text (see below)
+ */
+#define VDI_FT_COVERAGE     0x00010000L
+
 typedef struct {            /* one face at one size, owned by vdi_ft2.c */
     LONG id;                /* VDI font id (fVDI's ft2_get_face_id rule) */
     LONG points;            /* size in points */
@@ -176,6 +182,10 @@ typedef struct {
  * the text could not be drawn.  Bit 0x80 of the first byte of a row is
  * its leftmost pixel.  It draws the underline (effect 8) itself; leave
  * that bit out to draw it from underline_size and underline_offset.
+ * With VDI_FT_COVERAGE in effects, an engine built with coverage (see
+ * VDI_FT_WITH_COVERAGE in vdi_ft2.c) returns 1 instead, and a bitmap of
+ * one byte a pixel, from 0 (blank) to 255 (covered), wdwidth * 2 bytes a
+ * row; its size, origin and advance are those of the one-plane bitmap.
  * vdi_ft_text_extent() measures without skew; a monospaced font is as
  * wide as its advances add up to.
  *

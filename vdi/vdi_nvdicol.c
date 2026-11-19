@@ -355,7 +355,8 @@ void vdi_v_setrgb(Vwk *vwk)
 
 /*
  * vs_hilite_color and company (207): contrl[5] 0 highlight, 1 minimum,
- * 2 maximum, 3 weight; the colour is only kept
+ * 2 maximum, 3 weight; the colour is only kept, except that with
+ * CONF_WITH_VDI_ALPHA the weight drives T_BLEND in vr_transfer_bits
  */
 void vdi_vs_x_color(Vwk *vwk)
 {

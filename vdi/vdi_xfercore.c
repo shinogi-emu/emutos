@@ -5,8 +5,10 @@
  * its phase when the destination is clipped, a four-sample filter for
  * reductions onto 16 bits), reduced to the slice EmuTOS serves: sources of
  * 1, 8, 15, 16, 24 and 32 bits, destinations of 16-bit words and of 1, 2,
- * 4 and 8 interleaved planes.  The file has no VDI globals and no plain
- * ints (EmuTOS has 16-bit ones).
+ * 4 and 8 interleaved planes.  With CONF_WITH_VDI_ALPHA, also 32-bit
+ * sources with alpha (ARGB, RGBA), and the blend of direct sources onto
+ * 16-bit words (mode T_BLEND, the arithmetic in vdi_alpha.c).  The file has
+ * no VDI globals and no plain ints (EmuTOS has 16-bit ones).
  *
  * Copyright (C) 2026 The EmuTOS development team
  *
@@ -15,6 +17,9 @@
  */
 
 #include "vdi_xfercore.h"
+#if CONF_WITH_VDI_ALPHA
+#include "vdi_alpha.h"
+#endif
 
 /* a 16-bit destination exists only in a build with 16-bit graphics */
 #if CONF_WITH_VDI_16BIT
@@ -34,6 +39,12 @@ WORD xfer_kind(ULONG px_format)
         return XK_8;
     if (px_format == XF_PX_32)
         return XK_32;
+#if CONF_WITH_VDI_ALPHA
+    if (px_format == XF_PX_ARGB32)
+        return XK_ARGB32;
+    if (px_format == XF_PX_RGBA32)
+        return XK_RGBA32;
+#endif
     if (base == XF_PX_15)
         return XK_15 | rev;
     if (base == XF_PX_16)
@@ -58,6 +69,10 @@ WORD xfer_kind_bits(WORD kind)
     case XK_24:
         return 24;
     case XK_32:
+#if CONF_WITH_VDI_ALPHA
+    case XK_ARGB32:
+    case XK_RGBA32:
+#endif
         return 32;
     default:
         return 0;
@@ -72,7 +87,14 @@ ULONG xfer_unpack(const UBYTE *p, WORD kind)
     switch (kind & XK_MASK)
     {
     case XK_32:
+#if CONF_WITH_VDI_ALPHA
+    case XK_ARGB32:
+#endif
         return ((ULONG)p[1] << 16) | ((ULONG)p[2] << 8) | p[3];
+#if CONF_WITH_VDI_ALPHA
+    case XK_RGBA32:
+        return ((ULONG)p[0] << 16) | ((ULONG)p[1] << 8) | p[2];
+#endif
     case XK_24:
         if (kind & XK_REV)
             return ((ULONG)p[2] << 16) | ((ULONG)p[1] << 8) | p[0];
@@ -106,6 +128,30 @@ UWORD xfer_pack565(ULONG rgb)
 }
 
 
+#if CONF_WITH_VDI_ALPHA
+UWORD xfer_alpha(const UBYTE *p, WORD kind)
+{
+    switch (kind & XK_MASK)
+    {
+    case XK_ARGB32:
+        return p[0];
+    case XK_RGBA32:
+        return p[3];
+    default:
+        return 255;
+    }
+}
+
+
+BOOL xfer_blend_ok(WORD kind, WORD planes)
+{
+    WORD k = kind & XK_MASK;
+
+    return k != XK_NONE && k != XK_1 && k != XK_8 && IS_D16(planes);
+}
+#endif
+
+
 /* the bytes of a line of 'width' pixels of a source kind, at least; 0 for a bad kind */
 static LONG src_line_min(WORD kind, LONG width)
 {
@@ -121,6 +167,10 @@ static LONG src_line_min(WORD kind, LONG width)
     case XK_24:
         return width * 3;
     case XK_32:
+#if CONF_WITH_VDI_ALPHA
+    case XK_ARGB32:
+    case XK_RGBA32:
+#endif
         return width * 4;
     default:
         return 0;
@@ -158,6 +208,10 @@ ULONG xfer_src_size(const GCBITMAP *bm, WORD kind)
 
     if (bits == 0 || bm->bits != bits)
         return 0;
+#if CONF_WITH_VDI_ALPHA
+    if (k == XK_ARGB32 || k == XK_RGBA32)
+        k = XK_32;                      /* words and longs are read there too */
+#endif
     return bitmap_size(bm, src_line_min, kind, k == XK_15 || k == XK_16 || k == XK_32);
 }
 
@@ -273,6 +327,10 @@ void xfer_begin(XferState *s, const XferJob *job)
     }
     else if (k != XK_1 && k != XK_8 && IS_D16(job->planes) && reduced)
         s->filtered = TRUE;
+#if CONF_WITH_VDI_ALPHA
+    if (job->blend)
+        s->filtered = FALSE;            /* the nearest pixel: straight alpha is not filtered */
+#endif
     xfer_axis_start(&s->x0, job->sw, job->dw, skipx, s->filtered);
     xfer_axis_start(&s->y, job->sh, job->dh, skipy, s->filtered);
     s->prev_y = -1;
@@ -398,6 +456,68 @@ static const UBYTE *source_row(XferState *s, const UBYTE **next, LONG *fy)
 #endif
 
 
+#if CONF_WITH_VDI_ALPHA
+#if defined(__m68k__)
+#define LOAD16(p)           (*(const UWORD_ALIAS *)(p))
+#else
+#define LOAD16(p)           ((UWORD)(((UWORD)(p)[0] << 8) | (p)[1]))
+#endif
+
+/*
+ * T_BLEND: count pixels mixed into the 16-bit words at 'out', each by the
+ * alpha of its nearest source pixel times the weights.  A pixel of alpha 0
+ * is neither read nor written.  A 1:1 row of a source with alpha is the
+ * row of vdi_alpha.c; anything else goes pixel by pixel, with kc worked out
+ * again only when the alpha changes (sources without alpha keep 255).
+ */
+static void blend_row(const XferJob *j, XferAxis *x, const UBYTE *row, UBYTE *out)
+{
+    WORD kind = j->kind & XK_MASK;
+    LONG n = j->count, pbytes = xfer_kind_bits(j->kind) / 8;
+    BOOL full = j->wp[0] >= VDI_ALPHA_FULL && j->wp[1] >= VDI_ALPHA_FULL && j->wp[2] >= VDI_ALPHA_FULL;
+    BOOL opaque = FALSE;
+    const UBYTE *p;
+    ULONG rgb;
+    UWORD a, last = 0, kr = 0, kg = 0, kb = 0, v;
+
+    if ((kind == XK_ARGB32 || kind == XK_RGBA32) && j->sw == j->dw)
+    {
+        vdi_alpha_row565(out, row + x->pos * 4, n, kind == XK_ARGB32, j->wp);
+        return;
+    }
+    while (n-- > 0)
+    {
+        p = row + x->pos * pbytes;
+        a = xfer_alpha(p, j->kind);
+        if (a)
+        {
+            if (a != last)
+            {
+                last = a;
+                if (full)
+                    kr = kg = kb = a + (a >> 7);
+                else
+                {
+                    kr = vdi_alpha_k(a, j->wp[0]);
+                    kg = vdi_alpha_k(a, j->wp[1]);
+                    kb = vdi_alpha_k(a, j->wp[2]);
+                }
+                opaque = kr == 256 && kg == 256 && kb == 256;
+            }
+            rgb = xfer_unpack(p, j->kind);
+            if (opaque)
+                v = xfer_pack565(rgb);  /* mode 32's pixel, the one below not read */
+            else
+                v = vdi_alpha_mix565(LOAD16(out), rgb, kr, kg, kb);
+            STORE16(out, v);
+        }
+        out += 2;
+        AXIS_NEXT(*x);
+    }
+}
+#endif
+
+
 /*
  * make one row of count pixels at 'out': 16-bit words, or bytes of pixel
  * values with 'mask' (transparent sources onto planes)
@@ -475,6 +595,10 @@ static void make_row(XferState *s, UBYTE *out, UBYTE *mask)
             AXIS_NEXT(x);
         }
     }
+#if CONF_WITH_VDI_ALPHA
+    else if (d16 && j->blend)
+        blend_row(j, &x, row, out);
+#endif
     else if (d16 && kind == XK_16)
     {
         /* 5-6-5 as it is: the green keeps its sixth bit (the reversed form is swapped) */
@@ -525,6 +649,10 @@ void xfer_row16(XferState *s, UBYTE *dst, const UBYTE *prev)
     LONG i, bytes = j->count * 2;
     BOOL same = !s->filtered && !j->transparent && prev && s->y.pos == s->prev_y;
 
+#if CONF_WITH_VDI_ALPHA
+    if (j->blend)
+        same = FALSE;                   /* each row is blended into its own pixels */
+#endif
     if (same)
     {
         for (i = 0; i < bytes; i++)

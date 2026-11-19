@@ -27,6 +27,13 @@
 #define XF_PX_24        0x03021818UL    /* bytes r, g, b */
 #define XF_PX_32        0x03421820UL    /* bytes x, r, g, b; x is not read */
 #define XF_PX_REVERSED  0x00800000UL    /* 15 and 16 bits: low byte first; 24 bits: b, g, r */
+#if CONF_WITH_VDI_ALPHA
+#define XF_PX_ARGB32    0x03122020UL    /* bytes a, r, g, b: straight alpha */
+#define XF_PX_RGBA32    0x03022020UL    /* bytes r, g, b, a */
+
+/* the mode of vr_transfer_bits that blends (NVDI's T_BLEND), see vdi_alpha.h */
+#define XF_T_BLEND      64
+#endif
 
 /* what xfer_kind() makes of a pixel format */
 #define XK_NONE         0
@@ -36,6 +43,10 @@
 #define XK_16           4
 #define XK_24           5
 #define XK_32           6
+#if CONF_WITH_VDI_ALPHA
+#define XK_ARGB32       7               /* never reversed */
+#define XK_RGBA32       8
+#endif
 #define XK_MASK         0x0f
 #define XK_REV          0x10            /* or-ed in: PX_REVERSED */
 
@@ -58,6 +69,17 @@ ULONG xfer_unpack(const UBYTE *p, WORD kind);
 
 /* 0x00rrggbb as the 16-bit pixel rrrrrggggggbbbbb (components cut) */
 UWORD xfer_pack565(ULONG rgb);
+
+#if CONF_WITH_VDI_ALPHA
+/* the alpha (0-255) of a pixel of a direct kind: 255 for the kinds without one */
+UWORD xfer_alpha(const UBYTE *p, WORD kind);
+
+/*
+ * TRUE if T_BLEND draws a source of a kind onto a destination of 'planes':
+ * direct sources (not XK_1 or XK_8) onto 16-bit words only
+ */
+BOOL xfer_blend_ok(WORD kind, WORD planes);
+#endif
 
 /*
  * The size in bytes of the memory of a bitmap as the source of a kind, or
@@ -158,6 +180,15 @@ typedef struct
     const ULONG *spal;          /* XK_8, dithering: the colour of each source index, 0x00rrggbb */
     const UBYTE *remap;         /* XK_8 without dithering: the destination index of each source index */
     WORD *err;                  /* dithering: 3 * dw words, zero */
+#if CONF_WITH_VDI_ALPHA
+    /*
+     * T_BLEND onto XD_16: each source pixel is mixed into the pixel there by
+     * its alpha (255 for kinds without one) under the weights, nearest
+     * source pixel, never filtered; alpha 0 leaves the pixel unread
+     */
+    BOOL blend;
+    ULONG wp[3];                /* its weights of red, green, blue: Wc' (vdi_alpha_weight) */
+#endif
 } XferJob;
 
 typedef struct
@@ -176,7 +207,8 @@ void xfer_begin(XferState *s, const XferJob *job);
 /*
  * The next row of a 16-bit destination at 'dst' (count pixels, written as
  * big-endian words).  'prev' is the row made before it, or NULL: an
- * enlargement repeats it.  A transparent XK_1 source writes the 1 bits only.
+ * enlargement repeats it (not when blending: the pixels below differ).  A
+ * transparent XK_1 source writes the 1 bits only.
  */
 void xfer_row16(XferState *s, UBYTE *dst, const UBYTE *prev);
 

@@ -56,6 +56,16 @@
 #include FT_MODULE_H
 
 
+/*
+ * VDI_FT_WITH_COVERAGE: the engine also renders glyphs as 8-bit coverage,
+ * for anti-aliased text (CONF_WITH_VDI_TEXT_AA in include/config.h).  This
+ * file does not see EmuTOS's configuration, so the Makefile passes it; a
+ * host that leaves it out gets it.
+ */
+#ifndef VDI_FT_WITH_COVERAGE
+#define VDI_FT_WITH_COVERAGE 1
+#endif
+
 /* Handy routines for converting from fixed point */
 #define FT_FLOOR(X)     (((X) & -64) / 64)
 #define FT_CEIL(X)      ((((X) + 63) & -64) / 64)
@@ -63,7 +73,14 @@
 /* what a cached glyph holds */
 #define CACHED_METRICS  0x10
 #define CACHED_BITMAP   0x01
+#define CACHED_COVER    0x02    /* the coverage image */
 #define CACHED_INDEX    0x100   /* the glyph index has been looked up */
+
+/*
+ * the coverage images of all the instances together are kept within this
+ * many bytes: about ten faces of 95 characters at 22 pixels
+ */
+#define COVER_BUDGET    262144L
 
 /* the VDI text effects */
 #define EFFECT_BOLD         0x01
@@ -96,6 +113,20 @@
 #define KIND_SIZE           0x53697a65L /* 'Size' */
 
 
+/*
+ * A glyph's coverage image: one byte a pixel, 0 blank to 255 covered,
+ * width bytes a row, after this header.  The smooth renderer puts it on
+ * the whole pixels around the outline, where the one-plane image is
+ * rounded to the pixel centres and can be a pixel narrower: so the image
+ * keeps its own place.
+ */
+typedef struct
+{
+    LONG left, top;         /* position from the pen and baseline */
+    LONG width, rows;
+    LONG size;              /* of the block, header included */
+} CoverImage;
+
 /* Cached glyph information */
 typedef struct
 {
@@ -109,6 +140,9 @@ typedef struct
     LONG left, top;         /* bitmap position from the pen and baseline */
     LONG width, rows, pitch;
     UBYTE *buffer;          /* 1 plane, rows of whole words */
+#if VDI_FT_WITH_COVERAGE
+    CoverImage *cover;      /* NULL if blank, when CACHED_COVER is set */
+#endif
 } CachedGlyph;
 
 /* the start of a registered face and of a size */
@@ -141,6 +175,9 @@ typedef struct instance
     FontFile *file;
     CachedGlyph cache[256];         /* codes 0-255 */
     CachedGlyph scratch;            /* the last code above 255 */
+#if VDI_FT_WITH_COVERAGE
+    LONG cover_pref;                /* drawn in coverage last: measuring renders that */
+#endif
 } Instance;
 
 typedef struct face_rec
@@ -194,6 +231,10 @@ static Instance *newest, *oldest;   /* open instances, by last use */
 static LONG instance_count;
 static FontFile *fontfiles;
 static ULONG ff_clock;
+#if VDI_FT_WITH_COVERAGE
+static LONG cover_total;            /* bytes of coverage images kept */
+static LONG cover_last;             /* the last string was drawn in coverage */
+#endif
 
 /* NVDI/SpeedoGDOS spdchar.map: the first table, Atari codes 32-255 to BICS */
 static WORD spdchar_map[224];
@@ -488,9 +529,25 @@ static LONG map_char(FT_Face face, UWORD ch, LONG src_mode, LONG dst_mode)
  * ===========================================================================
  */
 
+#if VDI_FT_WITH_COVERAGE
+static void free_cover(CachedGlyph *glyph)
+{
+    if (glyph->cover)
+    {
+        cover_total -= glyph->cover->size;
+        vdi_ft_free(glyph->cover);
+        glyph->cover = NULL;
+    }
+    glyph->stored &= ~CACHED_COVER;
+}
+#endif
+
 static void flush_glyph(CachedGlyph *glyph)
 {
     vdi_ft_free(glyph->buffer);
+#if VDI_FT_WITH_COVERAGE
+    free_cover(glyph);
+#endif
     ft_memset(glyph, 0, sizeof(*glyph));
 }
 
@@ -691,6 +748,9 @@ static Instance *open_instance(SizeRec *s, LONG effects, LONG skew)
     in->size = s;
     in->effects = effects;
     in->skew = skew;
+#if VDI_FT_WITH_COVERAGE
+    in->cover_pref = cover_last;    /* a new size is likely drawn as the last string was */
+#endif
     in->next = s->instances;
     s->instances = in;
     lru_insert(in);
@@ -766,6 +826,166 @@ static void shift_row(UBYTE *row, LONG bytes, LONG count)
     }
 }
 
+#if VDI_FT_WITH_COVERAGE
+/*
+ * Coverage images take eight times the memory of one-plane ones, so they
+ * are kept within COVER_BUDGET bytes.  To make room, the images of the
+ * least recently used instance that has any go first, and those of the
+ * instance being drawn with last, but for the glyph being loaded (keep).
+ * A string draws each glyph as soon as it is found, so the images of its
+ * glyphs found before can go.  Returns 0 if there was nothing to free.
+ */
+static int drop_covers(Instance *in, const CachedGlyph *keep)
+{
+    Instance *victim;
+    int pass, i, freed = 0;
+
+    for (pass = 0; pass < 2 && !freed; pass++)
+    {
+        for (victim = oldest; victim && !freed; victim = victim->newer)
+        {
+            if ((victim == in) != (pass == 1))
+                continue;
+            for (i = 0; i <= 256; i++)
+            {
+                CachedGlyph *g = (i < 256) ? &victim->cache[i] : &victim->scratch;
+
+                if (g != keep && g->cover)
+                {
+                    free_cover(g);
+                    freed = 1;
+                }
+            }
+        }
+    }
+
+    return freed;
+}
+
+static CoverImage *alloc_cover(Instance *in, const CachedGlyph *keep, LONG size)
+{
+    CoverImage *c;
+
+    while (cover_total + size > COVER_BUDGET && drop_covers(in, keep))
+        ;
+    c = vdi_ft_alloc(size);
+    while (!c && drop_covers(in, keep))
+        c = vdi_ft_alloc(size);
+    if (c)
+        cover_total += size;
+
+    return c;
+}
+
+/*
+ * Render the coverage image of a loaded glyph g into the cache.  A copy is
+ * rendered, as the one-plane image may be wanted from the outline too.
+ * The light effect halves the coverage: grey text, as the one-plane
+ * image's alternate pixels are.
+ */
+static FT_Error load_cover(Instance *in, CachedGlyph *cached, FT_Glyph g, LONG shear)
+{
+    SizeRec *s = in->size;
+    FT_Glyph copy = g;
+    FT_BitmapGlyph bg;
+    FT_Bitmap *src;
+    FT_Error error;
+    CoverImage *c = NULL;
+    LONG width, rows, size, row, i;
+
+    error = FT_Glyph_To_Bitmap(&copy, FT_RENDER_MODE_NORMAL, NULL, 0);
+    if (error)
+        return error;
+    bg = (FT_BitmapGlyph)copy;
+    src = &bg->bitmap;
+
+    /* Need to enlarge to fit the italics shear if bitmap font */
+    width = (LONG)src->width + shear;
+    rows = src->rows;
+
+    if (rows > 0 && width > 0)
+    {
+        LONG src_pitch = (src->pitch < 0) ? -src->pitch : src->pitch;
+        LONG grays = (src->num_grays > 1) ? src->num_grays : 256;
+
+        if (width > MAX_BITMAP || rows > MAX_BITMAP)
+        {
+            error = FT_Err_Invalid_Argument;
+            goto out;
+        }
+
+        size = sizeof(CoverImage) + width * rows;
+        c = alloc_cover(in, cached, size);
+        if (!c)
+        {
+            error = FT_Err_Out_Of_Memory;
+            goto out;
+        }
+        ft_memset(c, 0, size);
+        c->left = bg->left;
+        c->top = bg->top;
+        c->width = width;
+        c->rows = rows;
+        c->size = size;
+
+        for (row = 0; row < rows; row++)
+        {
+            const UBYTE *s_row = src->buffer +
+                ((src->pitch < 0) ? (rows - 1 - row) : row) * src_pitch;
+            UBYTE *d_row = (UBYTE *)(c + 1) + row * width;
+
+            if (src->pixel_mode == FT_PIXEL_MODE_GRAY)
+            {
+                for (i = 0; i < (LONG)src->width; i++)
+                    d_row[i] = (grays == 256) ? s_row[i] :
+                        (UBYTE)((s_row[i] >= grays - 1) ? 255 : s_row[i] * 255 / (grays - 1));
+            }
+            else if (src->pixel_mode == FT_PIXEL_MODE_MONO)
+            {
+                /* an embedded one-plane bitmap */
+                for (i = 0; i < (LONG)src->width; i++)
+                    if (s_row[i >> 3] & (0x80 >> (i & 7)))
+                        d_row[i] = 255;
+            }
+        }
+
+        if (shear)
+        {
+            LONG distance = s->base.font.pixel_height / (shear + 1);
+
+            if (distance < 1)
+                distance = 1;
+            for (row = rows - 1; row >= 0; --row)
+            {
+                LONG cnt = (s->base.font.pixel_height - cached->yoffset - row) / distance;
+                UBYTE *p = (UBYTE *)(c + 1) + row * width;
+
+                if (cnt <= 0)
+                    continue;
+                for (i = width - 1; i >= 0; i--)
+                    p[i] = (i >= cnt) ? p[i - cnt] : 0;
+            }
+        }
+
+        if (in->effects & EFFECT_LIGHT)
+        {
+            UBYTE *p = (UBYTE *)(c + 1);
+
+            for (i = width * rows; i > 0; i--, p++)
+                *p >>= 1;
+        }
+    }
+
+    cached->cover = c;
+    cached->stored |= CACHED_COVER;
+
+out:
+    if (copy != g)
+        FT_Done_Glyph(copy);
+    return error;
+}
+#endif
+
 static FT_Error load_glyph(Instance *in, UWORD ch, LONG map, CachedGlyph *cached, int want)
 {
     SizeRec *s = in->size;
@@ -782,7 +1002,11 @@ static FT_Error load_glyph(Instance *in, UWORD ch, LONG map, CachedGlyph *cached
      * just before it is drawn, and each used to be loaded twice.
      */
     if (want & CACHED_METRICS)
+#if VDI_FT_WITH_COVERAGE
+        want |= in->cover_pref ? CACHED_COVER : CACHED_BITMAP;
+#else
         want |= CACHED_BITMAP;
+#endif
 
     /* Load the glyph */
     if (!(cached->stored & CACHED_INDEX))
@@ -896,6 +1120,18 @@ static FT_Error load_glyph(Instance *in, UWORD ch, LONG map, CachedGlyph *cached
 
         cached->stored |= CACHED_METRICS;
     }
+
+#if VDI_FT_WITH_COVERAGE
+    if ((want & CACHED_COVER) && !(cached->stored & CACHED_COVER))
+    {
+        error = load_cover(in, cached, g, bitmap_italics_shear);
+        if (error)
+        {
+            FT_Done_Glyph(g);
+            return error;
+        }
+    }
+#endif
 
     if ((want & CACHED_BITMAP) && !(cached->stored & CACHED_BITMAP))
     {
@@ -1106,6 +1342,119 @@ static void blit_glyph(UBYTE *dst, LONG bytes_per_row, LONG width, LONG height,
             d[n] |= carry;
     }
 }
+
+#if VDI_FT_WITH_COVERAGE
+/*
+ * Lay a glyph's coverage image over a string's at x, y (its top left
+ * corner), clipped.  Where glyphs overlap, the coverages add up as two
+ * independent ones do: a + b - a * b / 255.  Only the columns left of
+ * drawn can hold glyphs laid before: right of it the image is copied.
+ */
+static void put_cover(UBYTE *dst, LONG bytes_per_row, LONG width, LONG height,
+                      const CoverImage *c, LONG x, LONG y, LONG drawn)
+{
+    const UBYTE *src = (const UBYTE *)(c + 1);
+    LONG first = (x < 0) ? -x : 0, end = c->width, split = drawn - x, row, i;
+
+    if (x + end > width)
+        end = width - x;
+    if (split < first)
+        split = first;
+    if (split > end)
+        split = end;
+
+    for (row = 0; row < c->rows; row++, src += c->width)
+    {
+        UBYTE *d;
+
+        if (y + row < 0 || y + row >= height)
+            continue;
+        d = dst + (y + row) * bytes_per_row + x;
+
+        for (i = first; i < split; i++)
+        {
+            ULONG a = d[i], b = src[i];
+
+            if (!b)
+                continue;
+            if (a)
+            {
+                ULONG t = a * b + 128;
+
+                b = a + b - ((t + (t >> 8)) >> 8);
+            }
+            d[i] = (UBYTE)b;
+        }
+        if (end > split)
+            ft_memcpy(d + split, src + split, end - split);
+    }
+}
+
+/* the rest of vdi_ft_render() for VDI_FT_COVERAGE: the string's coverage */
+static LONG render_cover(Instance *in, const WORD *text, LONG count, LONG map, LONG effects,
+                         LONG minx, LONG maxx, LONG width, LONG height, VdiOutlineBitmap *out)
+{
+    SizeRec *s = in->size;
+    LONG bytes_per_row = (width + 3) & ~3L, pen = 0, drawn = 0, i, n;
+    CachedGlyph *glyph;
+    UBYTE *data;
+    ULONG *p;
+
+    /* rows of whole longs, cleared a long at a time (the block is aligned) */
+    data = vdi_ft_alloc(bytes_per_row * height);
+    if (!data)
+        return -1;
+    for (p = (ULONG *)data, n = bytes_per_row * height / 4; n > 0; n--)
+        *p++ = 0;
+
+    for (i = 0; i < count; i++)
+    {
+        glyph = find_glyph(in, (UWORD)text[i], map, CACHED_METRICS | CACHED_COVER);
+        if (!glyph)
+            continue;
+
+        if (glyph->cover)
+        {
+            LONG x = pen + glyph->cover->left - minx;
+
+            put_cover(data, bytes_per_row, width, height, glyph->cover,
+                      x, s->base.font.top - glyph->cover->top, drawn);
+            if (x + glyph->cover->width > drawn)
+                drawn = x + glyph->cover->width;
+        }
+        pen += glyph->advance;
+
+        /* only when a glyph failed to load while measuring */
+        if (pen > maxx)
+            break;
+    }
+
+    /* the underline: rows of full coverage, half of it for light text */
+    if (effects & EFFECT_UNDERLINE)
+    {
+        LONG row = s->base.font.ascent - s->base.font.underline_offset - 1;
+        LONG k;
+
+        if (row + s->base.font.underline_size > height)
+            row = (height - 1) - s->base.font.underline_size;
+        if (row < 0)
+            row = 0;
+
+        for (k = s->base.font.underline_size; k > 0 && row < height; --k, row++)
+            ft_memset(data + row * bytes_per_row, (in->effects & EFFECT_LIGHT) ? 0x7f : 0xff, width);
+    }
+
+    out->data = (UWORD *)data;
+    out->width = width;
+    out->height = height;
+    out->wdwidth = bytes_per_row / 2;
+    out->origin_x = -minx;
+    out->origin_y = s->base.font.top;
+    out->advance_x = pen;
+
+    return 1;
+}
+#endif
 
 
 /*
@@ -1961,6 +2310,9 @@ LONG vdi_ft_render(VdiOutlineFont *f, const WORD *text, LONG count,
     in = get_instance(s, effects, skew);
     if (!in)
         return -1;
+#if VDI_FT_WITH_COVERAGE
+    in->cover_pref = cover_last = (effects & VDI_FT_COVERAGE) ? 1 : 0;
+#endif
 
     /* Get the dimensions of the text surface */
     failed = text_size(in, text, count, map, &minx, &maxx, &pen);
@@ -1973,6 +2325,11 @@ LONG vdi_ft_render(VdiOutlineFont *f, const WORD *text, LONG count,
      * a run it could not draw instead of handing it a wrapped size. */
     if (width > MAX_BITMAP || height > MAX_BITMAP)
         return -1;
+
+#if VDI_FT_WITH_COVERAGE
+    if (effects & VDI_FT_COVERAGE)
+        return render_cover(in, text, count, map, effects, minx, maxx, width, height, out);
+#endif
 
     bytes_per_row = ((width + 15) >> 4) * 2;
     data = vdi_ft_alloc(bytes_per_row * height);
