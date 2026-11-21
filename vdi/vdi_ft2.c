@@ -416,6 +416,30 @@ static FT_UInt unicode_glyph(FT_Face face, UWORD cc)
     return FT_Get_Char_Index(face, (cc == 0xffff) ? (FT_ULong)-1 : cc);
 }
 
+/*
+ * Fonts made for Atari systems, such as EmuTOS Classic, also carry each
+ * Atari code at U+F000 + code.  There every code finds its own glyph,
+ * where the NVDI table finds no character for some codes in such a font
+ * (the check mark, the window gadget arrows, the LCD digits) and another
+ * character for others (0x12 is superscript two there, 0xc0-0xdc Latin
+ * letters instead of Hebrew).  A font is taken to be one of these when
+ * 'A' has the same glyph in both places, so a font with other glyphs in
+ * that area (ligatures, icons) keeps the NVDI table.
+ */
+#define ATARI_CODES 0xf000
+
+static int atari_coded(FT_Face face)
+{
+    FT_UInt a = FT_Get_Char_Index(face, ATARI_CODES + 'A');
+
+    return a && a == FT_Get_Char_Index(face, 'A');
+}
+
+static FT_UInt atari_coded_glyph(FT_Face face, UWORD ch)
+{
+    return atari_coded(face) ? FT_Get_Char_Index(face, ATARI_CODES + ch) : 0;
+}
+
 /* the glyph for a character code in a character set */
 static FT_UInt glyph_index(FT_Face face, UWORD ch, LONG map)
 {
@@ -424,6 +448,10 @@ static FT_UInt glyph_index(FT_Face face, UWORD ch, LONG map)
 
     if (map == VDI_FT_MAP_ATARI && ch < 256)
     {
+        index = atari_coded_glyph(face, ch);
+        if (index)
+            return index;
+
         /* in case we don't have BICS -> UNICODE the cc value will be -1 */
         cc = bics_to_unicode(atari_to_bics(ch));
         index = unicode_glyph(face, cc);
@@ -484,6 +512,12 @@ static LONG map_char(FT_Face face, UWORD ch, LONG src_mode, LONG dst_mode)
             cc = bics_to_unicode((UWORD)Atari2Bics[ch]);
             index = unicode_glyph(face, cc);
         }
+
+        /* A code the table cannot give in this font: its place among the
+         * font's own Atari codes, which draws what glyph_index() draws.
+         * Codes the table can give keep their Unicode answer. */
+        if (!index && (index = atari_coded_glyph(face, ch)) != 0)
+            cc = ATARI_CODES + ch;
         ch = cc;
     }
     else if (src_mode == VDI_FT_MAP_UNICODE)
@@ -504,6 +538,9 @@ static LONG map_char(FT_Face face, UWORD ch, LONG src_mode, LONG dst_mode)
 
     if (dst_mode == VDI_FT_MAP_ATARI)
     {
+        if (ch >= ATARI_CODES && ch <= ATARI_CODES + 0xff && atari_coded(face))
+            return ch - ATARI_CODES;
+
         for (i = spdchar_map_valid ? 32 : 0; i < 256; i++)
         {
             WORD bics = spdchar_map_valid ? spdchar_map[i - 32] : Atari2Bics[i];
@@ -2524,7 +2561,6 @@ LONG vdi_ft_get_outline(VdiOutlineFont *f, LONG ch, LONG map, WORD *xy, BYTE *fl
     FT_Face face;
     FT_UInt glyph;
     OutlineArgs o;
-    LONG code;
 
     if (!xy || !flags || max_points <= 0)
         return 0;
@@ -2537,8 +2573,9 @@ LONG vdi_ft_get_outline(VdiOutlineFont *f, LONG ch, LONG map, WORD *xy, BYTE *fl
     if (!FT_IS_SCALABLE(face))
         return 0;
 
-    code = map_char(face, (UWORD)ch, map, VDI_FT_MAP_UNICODE);
-    if (code == 0xffff || (glyph = FT_Get_Char_Index(face, code)) == 0)
+    /* the glyph text draws for this code */
+    glyph = glyph_index(face, (UWORD)ch, map);
+    if (!glyph)
         return 0;
 
     if (FT_Load_Glyph(face, glyph, FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) ||
